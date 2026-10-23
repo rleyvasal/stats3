@@ -9,6 +9,9 @@ pip install stats3              # Polars data
 pip install "stats3[pandas]"    # pandas data too
 ```
 
+stats3 needs Python 3.12+, Polars and SciPy 1.18+ (the first SciPy whose
+distribution functions match R to full precision).
+
 Every test takes R's arguments and defaults, drops missing values as R does,
 raises R's errors and warnings, and is checked against R 4.6.
 

@@ -4,7 +4,7 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-10-23
 
 The first version: R's common statistical tests for Polars, pandas and tidy3 data.
 

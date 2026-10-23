@@ -7,7 +7,7 @@ name = "stats3"
 dynamic = ["version"]
 description = "R's statistical tests on Polars, for Polars, pandas and tidy3 data, with R's results"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Rigoberto Leyva Salmeron" }]
@@ -16,23 +16,28 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering :: Mathematics",
 ]
 dependencies = [
   # Summary statistics for every group come from one Polars query.
   "polars>=1.39",
   # p-values and intervals come from scipy's distribution functions
-  # (Polars has none); NumPy arrives with scipy.
-  "scipy>=1.10",
+  # (Polars has none); NumPy arrives with scipy. 1.18 is the first whose
+  # inverse t and Shapiro-Wilk match R to full precision.
+  "scipy>=1.18",
 ]
 
 [project.optional-dependencies]
-# pandas frames in and out: Polars converts them through pyarrow.
-pandas = ["pandas>=2.0", "pyarrow>=14"]
+# pandas frames in and out: Polars converts them through pyarrow (the
+# first releases built for NumPy 2, which scipy 1.18 needs).
+pandas = ["pandas>=2.2.2", "pyarrow>=16"]
 dev = [
   "pytest>=7.0",
-  "pandas>=2.0",
-  "pyarrow>=14",
+  "pandas>=2.2.2",
+  "pyarrow>=16",
   # Only to test that tidy3 frames, groups and expressions work.
   "tidy3>=0.8.1",
   "ipython>=8.0",
