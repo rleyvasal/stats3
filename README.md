@@ -91,6 +91,61 @@ A name the notebook defines keeps its value; any other bare name in a stats3
 call is a column. With tidy3 loaded the two packages share the shorthand. In
 a `.py` script write `"body_mass_g ~ sex"` and `pl.col("sex") == "male"`.
 
+## Models
+
+`lm()` and `glm()` take R's formulas and print a summary you can read at a
+glance: the coefficients with their 95% intervals, then the fit.
+
+```python
+fit = lm(penguins, "body_mass_g ~ flipper_length_mm + species")
+fit
+```
+
+```text
+lm(body_mass_g ~ flipper_length_mm + species)   n = 342
+┌───────────────────┬──────────────┬──────────────┬──────────────┬───────────┬────────────┐
+│ term              ┆ estimate     ┆ conf_low     ┆ conf_high    ┆ std_error ┆ p_value    │
+╞═══════════════════╪══════════════╪══════════════╪══════════════╪═══════════╪════════════╡
+│ (Intercept)       ┆ -4031.476891 ┆ -5180.506847 ┆ -2882.446935 ┆ 584.15134 ┆ 2.5515e-11 │
+│ flipper_length_mm ┆ 40.705401    ┆ 34.664683    ┆ 46.746119    ┆ 3.07102   ┆ 1.4016e-32 │
+│ speciesChinstrap  ┆ -206.51012   ┆ -320.066724  ┆ -92.953517   ┆ 57.730646 ┆ 0.000398   │
+│ speciesGentoo     ┆ 266.809603   ┆ 79.425129    ┆ 454.194077   ┆ 95.263741 ┆ 0.005392   │
+└───────────────────┴──────────────┴──────────────┴──────────────┴───────────┴────────────┘
+residual SE 375.5 on 338 df · R² 0.7826 · adjusted R² 0.7807
+F(3, 338) = 405.7, p < 2.2e-16
+```
+
+broom's verbs give tables (in the data's frame type), and `by=` fits one
+model per group:
+
+```python
+tidy(fit, conf_int=True)    # term, estimate, std_error, statistic, p_value, conf_low, conf_high
+glance(fit)                 # r_squared, adj_r_squared, sigma, statistic, p_value, AIC, BIC, ...
+augment(fit)                # the rows with .fitted, .resid, .hat, .sigma, .cooksd, .std_resid
+anova(fit)                  # sequential sums of squares; anova(fit1, fit2) compares models
+predict(fit, new_rows, interval="prediction")
+
+glance(lm(penguins, "body_mass_g ~ flipper_length_mm", by="species"))   # one row per species
+
+glm(penguins, "sex ~ body_mass_g + species", family=binomial())
+glm(mtcars, "carb ~ hp + offset(log(gear))", family=poisson())
+```
+
+Formulas follow R: `a * b`, `a:b`, `(a + b)^2`, `0 +` / `- 1`, `.`, `log(x)`,
+`I(x^2)`, `factor(cyl)`, `offset(...)`, and `cbind(successes, failures)` for
+binomial models. Factors use treatment contrasts with the first level as the
+reference (a pandas category or Polars `Enum` sets the order), with R's
+column names, and redundant columns are reported as aliased, as in R.
+Families: `gaussian`, `binomial`, `poisson`, `Gamma`, `inverse_gaussian`,
+`quasibinomial`, `quasipoisson`, with R's links. `fit >> tidy()` works too,
+and with tidy3 loaded, `tidy(data)` still makes a tidy3 frame.
+
+The engine is stats3's own: weighted least squares by QR for `lm`, and a
+port of R's `glm.fit` (same starting values, convergence rule and step
+halving) for `glm`. On 1,000,000 rows with 13 coefficients `lm` takes about
+0.16 s and a Poisson `glm` about 0.6 s, against about 1.1 s and 1.9 s for
+statsmodels' formula interface.
+
 ## What's in it
 
 | R | stats3 |
@@ -108,8 +163,11 @@ a `.py` script write `"body_mass_g ~ sex"` and `pl.col("sex") == "male"`.
 | `p.adjust` | `p_adjust(p, "BH")`: on a vector or Series, or a column in `with_columns` / `mutate` |
 | effectsize | `cohens_d`, `hedges_g`, `eta_squared` |
 | `power.t.test`, `power.prop.test` | `power_t_test`, `power_prop_test` |
+| `lm`, `glm` | `lm`, `glm`, with broom's `tidy`, `glance`, `augment`, and `anova`, `predict` |
 
-Models (`lm`, `glm`) are next.
+Next: type II/III ANOVA, estimated marginal means, mixed models, and
+profile-likelihood intervals for `glm` (`tidy(conf_int=True)` gives Wald
+intervals for now, R's `confint.default`).
 
 ## How it works, and how it is checked
 

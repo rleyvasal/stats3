@@ -98,3 +98,19 @@ def test_shorthand_runs_alongside_tidy3_in_ipython():
         assert result.success, (cell, result.error_before_exec or result.error_in_exec)
     assert type(ip.user_ns["r4"]).__name__ == "TidyFrame"
     assert "adj" in ip.user_ns["r5"].collect().columns
+
+
+def test_model_formulas_run_unquoted_in_ipython():
+    ip = _shell()
+    cells = [
+        f"%load_ext stats3.jupyter\nimport polars as pl\nfrom stats3 import *\n"
+        f"penguins = pl.read_csv({str(PENGUINS)!r}, null_values='NA')",
+        "fit = penguins >> lm(body_mass_g ~ flipper_length_mm + species)",
+        "logit = glm(penguins, sex ~ body_mass_g, family=binomial)",
+        "coefs = fit >> tidy()",
+    ]
+    for cell in cells:
+        result = ip.run_cell(cell)
+        assert result.success, (cell, result.error_before_exec or result.error_in_exec)
+    assert ip.user_ns["coefs"]["term"].to_list()[-1] == "speciesGentoo"
+    assert ip.user_ns["logit"].family.family == "binomial"

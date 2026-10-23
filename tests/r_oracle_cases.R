@@ -345,6 +345,113 @@ result <- switch(
       pw_p_strict=power_row(power.prop.test(n=30, p1=0.4, p2=0.6, strict=TRUE, alternative="two.sided"), c("n", "p1", "p2", "sig.level"))
     ))
   },
+  models = {
+    p <- read.csv("tests/data/penguins.csv", na.strings="NA")
+    m <- read.csv("tests/data/mtcars.csv")
+    tidy_fit <- function(f) {
+      co <- coef(f)
+      s <- summary(f)$coefficients
+      i <- match(names(co), rownames(s))
+      ci <- if (inherits(f, "glm")) confint.default(f) else confint(f)
+      data.frame(term=names(co), estimate=unname(co), std_error=unname(s[i, 2]),
+                 statistic=unname(s[i, 3]), p_value=unname(s[i, 4]),
+                 conf_low=unname(ci[, 1]), conf_high=unname(ci[, 2]))
+    }
+    glance_fit <- function(f) {
+      if (inherits(f, "glm")) {
+        return(data.frame(null_deviance=f$null.deviance, df_null=f$df.null,
+          logLik=as.numeric(logLik(f)), AIC=AIC(f), BIC=BIC(f), deviance=deviance(f),
+          df_residual=f$df.residual, nobs=nobs(f)))
+      }
+      s <- summary(f)
+      fs <- s$fstatistic
+      data.frame(r_squared=s$r.squared, adj_r_squared=s$adj.r.squared, sigma=s$sigma,
+        statistic=unname(fs[1]), p_value=unname(pf(fs[1], fs[2], fs[3], lower.tail=FALSE)),
+        df=unname(fs[2]), logLik=as.numeric(logLik(f)), AIC=AIC(f), BIC=BIC(f),
+        deviance=deviance(f), df_residual=f$df.residual, nobs=nobs(f))
+    }
+    augment_fit <- function(f) {
+      data.frame(.fitted=unname(predict(f)), .resid=unname(residuals(f)), .hat=unname(hatvalues(f)),
+        .sigma=unname(influence(f)$sigma), .cooksd=unname(cooks.distance(f)),
+        .std_resid=unname(rstandard(f)), check.names=FALSE)
+    }
+    anova_fit <- function(f) {
+      a <- anova(f)
+      if (inherits(f, "glm")) {
+        out <- data.frame(term=rownames(a), df=a$Df, deviance=a$Deviance,
+          df_residual=a$`Resid. Df`, residual_deviance=a$`Resid. Dev`)
+        if (!is.null(a$F)) out$statistic <- a$F
+        out$p_value <- a[[ncol(a)]]
+        return(out)
+      }
+      data.frame(term=trimws(rownames(a)), df=a$Df, sumsq=a$`Sum Sq`, meansq=a$`Mean Sq`,
+        statistic=a$`F value`, p_value=a$`Pr(>F)`)
+    }
+    compare <- function(...) {
+      fits <- list(...)
+      a <- do.call(anova, fits)
+      terms <- vapply(fits, function(f) paste(deparse(formula(f)), collapse=" "), "")
+      if (inherits(fits[[1]], "glm")) {
+        out <- data.frame(term=terms, df_residual=a$`Resid. Df`, residual_deviance=a$`Resid. Dev`,
+          df=a$Df, deviance=a$Deviance)
+        if (!is.null(a$F)) out$statistic <- a$F
+        out$p_value <- a[[ncol(a)]]
+        return(out)
+      }
+      data.frame(term=terms, df_residual=a$Res.Df, rss=a$RSS, df=a$Df, sumsq=a$`Sum of Sq`,
+        statistic=a$F, p_value=a$`Pr(>F)`)
+    }
+    by <- function(data, groups, f) {
+      data |> group_by(across(all_of(groups))) |>
+        group_modify(function(d, k) f(d)) |> ungroup() |> as.data.frame()
+    }
+    fits <- list(
+      lm_simple=lm(body_mass_g ~ flipper_length_mm, p),
+      lm_factor=lm(body_mass_g ~ flipper_length_mm + species, p),
+      lm_interaction=lm(body_mass_g ~ flipper_length_mm * species, p),
+      lm_two_factors=lm(body_mass_g ~ species * sex, p),
+      lm_no_intercept=lm(body_mass_g ~ 0 + species, p),
+      lm_margins=lm(body_mass_g ~ species + species:sex, p),
+      lm_transform=lm(log(body_mass_g) ~ log(flipper_length_mm) + I(bill_length_mm^2), p),
+      lm_weights=lm(mpg ~ wt + hp, m, weights=cyl),
+      lm_factor_numeric=lm(mpg ~ wt + factor(cyl), m),
+      lm_aliased=lm(mpg ~ wt + I(2 * wt) + hp, m),
+      lm_dot=lm(mpg ~ ., m[c("mpg", "wt", "hp", "qsec")]),
+      glm_binomial=glm(factor(sex) ~ body_mass_g + species, binomial, p),
+      glm_binomial_01=glm(am ~ wt + hp, binomial, m),
+      glm_probit=glm(am ~ wt, binomial(link="probit"), m),
+      glm_cloglog=glm(am ~ wt, binomial(link="cloglog"), m),
+      glm_cbind=glm(cbind(carb, gear) ~ wt + am, binomial, m),
+      glm_poisson=glm(carb ~ hp + factor(cyl), poisson, m),
+      glm_poisson_offset=glm(carb ~ hp + offset(log(gear)), poisson, m),
+      glm_quasipoisson=glm(carb ~ hp, quasipoisson, m),
+      glm_gamma_log=glm(mpg ~ wt + hp, Gamma(link="log"), m),
+      glm_gamma_inverse=glm(mpg ~ wt, Gamma, m),
+      glm_inverse_gaussian=glm(mpg ~ wt, inverse.gaussian, m),
+      glm_gaussian_log=glm(mpg ~ wt, gaussian(link="log"), m)
+    )
+    out <- list()
+    for (name in names(fits)) {
+      f <- fits[[name]]
+      out[[paste0(name, "__tidy")]] <- tidy_fit(f)
+      out[[paste0(name, "__glance")]] <- glance_fit(f)
+      out[[paste0(name, "__augment")]] <- augment_fit(f)
+      out[[paste0(name, "__anova")]] <- anova_fit(f)
+    }
+    out$lm_by_species__tidy <- by(p, "species", function(d) tidy_fit(lm(body_mass_g ~ flipper_length_mm, d)))
+    out$lm_by_species__glance <- by(p, "species", function(d) glance_fit(lm(body_mass_g ~ flipper_length_mm, d)))
+    out$glm_by_species__tidy <- by(p, "species", function(d) tidy_fit(glm(factor(sex) ~ body_mass_g, binomial, d)))
+    out$compare_lm <- compare(lm(mpg ~ wt, m), lm(mpg ~ wt + hp, m), lm(mpg ~ wt + hp + qsec, m))
+    out$compare_glm <- compare(glm(am ~ wt, binomial, m), glm(am ~ wt + hp, binomial, m))
+    out$compare_gamma <- compare(glm(mpg ~ wt, Gamma(link="log"), m), glm(mpg ~ wt + hp, Gamma(link="log"), m))
+    new <- data.frame(flipper_length_mm=c(190, 210), species=c("Adelie", "Gentoo"))
+    out$predict_confidence <- as.data.frame(predict(fits$lm_factor, new, interval="confidence"))
+    out$predict_prediction <- as.data.frame(predict(fits$lm_factor, new, interval="prediction", level=0.9))
+    newcars <- data.frame(wt=c(2.5, 3.5), hp=c(100, 200))
+    pr <- predict(fits$glm_binomial_01, newcars, type="response", se.fit=TRUE)
+    out$predict_glm <- data.frame(fit=unname(pr$fit), se_fit=unname(pr$se.fit))
+    out
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 
