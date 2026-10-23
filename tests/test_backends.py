@@ -122,3 +122,32 @@ def test_by_is_refused_on_a_grouped_tidy3_frame(tidy3):
 
 def test_power_as_tidy3(tidy3):
     assert type(power_t_test(n=20, delta=1, as_="tidy3")).__name__ == "TidyFrame"
+
+
+def _relevelled(tidy3):
+    return tidy3.tidy(P()) >> tidy3.mutate(sex=tidy3.fct_relevel(tidy3.col("sex"), "male"))
+
+
+def test_tidy3_factor_levels_accessor_is_used(tidy3, monkeypatch):
+    cls = type(tidy3.tidy({"x": [1]}))
+    if not hasattr(cls, "factor_levels"):
+        pytest.skip("this tidy3 has no factor_levels() yet")
+    calls = []
+    original = cls.factor_levels
+
+    def spy(self):
+        calls.append(self)
+        return original(self)
+
+    monkeypatch.setattr(cls, "factor_levels", spy)
+    result = _relevelled(tidy3) >> t_test("body_mass_g ~ sex")
+    assert calls, "stats3 did not call TidyFrame.factor_levels()"
+    assert result.collect()["estimate"][0] > 0  # male first
+
+
+def test_tidy3_without_the_accessor_falls_back(tidy3, monkeypatch):
+    cls = type(tidy3.tidy({"x": [1]}))
+    if hasattr(cls, "factor_levels"):
+        monkeypatch.delattr(cls, "factor_levels")
+    result = _relevelled(tidy3) >> t_test("body_mass_g ~ sex")
+    assert result.collect()["estimate"][0] > 0
