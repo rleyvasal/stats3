@@ -10,6 +10,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A stalled R install fails the run instead of holding it for hours.
+    timeout-minutes: 30
     strategy:
       matrix:
         python-version: ["3.12", "3.14"]
@@ -29,6 +31,7 @@ jobs:
         run: python -m pytest -q --tb=short
 
   build:
+    timeout-minutes: 15
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -54,6 +57,7 @@ jobs:
           path: dist/
 
   pypi:
+    timeout-minutes: 15
     needs: build
     runs-on: ubuntu-latest
     environment:
@@ -69,6 +73,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   release:
+    timeout-minutes: 15
     needs: pypi
     runs-on: ubuntu-latest
     permissions:

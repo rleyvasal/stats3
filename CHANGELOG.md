@@ -4,7 +4,9 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.1.2 — 2026-10-23
+
+`predict()` keeps `offset=` on new rows and gives intervals on the fitted rows.
 
 ### Fixed
 
