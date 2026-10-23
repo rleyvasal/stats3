@@ -53,6 +53,9 @@ class Formula:
     offsets: list[str] = field(default_factory=list)
     # Contrasts per factor: "treatment" (R's default) or "sum" (contr.sum).
     contrasts: dict[str, str] = field(default_factory=dict)
+    # The fit's offset= argument (a column or expression), kept so that
+    # predictions on new rows add it, as R's predict does.
+    offset_arg: Any = None
 
     @property
     def term_labels(self) -> list[str]:

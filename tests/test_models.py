@@ -151,6 +151,44 @@ def test_predictions_match_r():
     assert_matches_r(predict(logistic, cars, type="response", se_fit=True), _oracle("models")["predict_glm"])
 
 
+def test_offset_arguments_reach_predictions_on_new_rows():
+    m = M()
+    fit = lm(m, "mpg ~ wt", offset="qsec")
+    new = pl.DataFrame({"wt": [2.5, 3.5], "qsec": [16.0, 19.0]})
+    assert_matches_r(predict(fit, new), _oracle("models")["predict_offset_lm"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        counts = glm(m, "carb ~ hp", poisson(), offset=pl.col("gear").log())
+    rows = pl.DataFrame({"hp": [100.0, 200.0], "gear": [3.0, 5.0]})
+    assert_matches_r(predict(counts, rows, type="response", se_fit=True), _oracle("models")["predict_offset_glm"])
+    # The same rows the model was fitted to give its fitted values.
+    np.testing.assert_allclose(predict(fit, m)["fit"].to_numpy(), fit.fitted, rtol=1e-12)
+
+
+def test_intervals_and_standard_errors_on_the_fitted_rows():
+    fit = lm(P(), "body_mass_g ~ flipper_length_mm + species")
+    assert_matches_r(predict(fit, interval="confidence", se_fit=True), _oracle("models")["predict_current_confidence"])
+    with pytest.warns(UserWarning, match="_future_ responses"):
+        simple = predict(lm(P(), "body_mass_g ~ flipper_length_mm"), interval="prediction")
+    assert_matches_r(simple, _oracle("models")["predict_current_prediction"])
+    with pytest.warns(UserWarning) as caught:
+        weighted = predict(lm(M(), "mpg ~ wt + hp", weights="cyl"), interval="prediction")
+    messages = [str(w.message) for w in caught]
+    assert any("_future_ responses" in m for m in messages)
+    assert any("inversely proportional to weights" in m for m in messages)
+    assert_matches_r(weighted, _oracle("models")["predict_current_weighted"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        counts = glm(M(), "carb ~ hp + offset(log(gear))", poisson())
+    assert_matches_r(predict(counts, type="response", se_fit=True), _oracle("models")["predict_current_glm"])
+
+
+def test_new_rows_from_a_weighted_fit_warn_as_r_does():
+    fit = lm(M(), "mpg ~ wt + hp", weights="cyl")
+    with pytest.warns(UserWarning, match="constant prediction variance"):
+        predict(fit, pl.DataFrame({"wt": [3.0], "hp": [120.0]}), interval="prediction")
+
+
 # behaviour --------------------------------------------------------------------------
 
 

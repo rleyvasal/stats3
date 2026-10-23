@@ -489,6 +489,8 @@ class _Fit:
             exprs[label] = variable_expr(label, "predict")[0]
         for i, label in enumerate(self.formula.offsets):
             exprs[f"__offset{i}"] = variable_expr(label, "predict")[0].cast(pl.Float64)
+        if self.formula.offset_arg is not None:
+            exprs["__offset_arg"] = expression(self.formula.offset_arg).cast(pl.Float64)
         frame = data._lf.select(**exprs).collect() if exprs else data._lf.select(pl.len()).collect()
         n = frame.height if exprs else int(frame.item())
         variables = {}
@@ -507,9 +509,17 @@ class _Fit:
         offset = np.zeros(n)
         for i in range(len(self.formula.offsets)):
             offset = offset + frame[f"__offset{i}"].to_numpy()
+        if self.formula.offset_arg is not None:
+            offset = offset + frame["__offset_arg"].to_numpy()
         if self.qr.kept != list(range(len(self.design.names))):
             _warn("prediction from rank-deficient fit; attr(*, \"non-estim\") has doubtful cases")
         return x, offset, data._lf.collect(), data
+
+    def _design_for(self, newdata: Any) -> tuple[np.ndarray, np.ndarray, pl.DataFrame, Data]:
+        """The model matrix and offset to predict: new rows, or the fit's own."""
+        if newdata is None:
+            return self.design.matrix, self.frame.offset, self.frame.rows, self._data
+        return self._new_design(newdata)
 
     def _write(self, frame: pl.DataFrame, data: Data | None = None) -> Any:
         return (data or self._data).write(frame)
@@ -651,14 +661,14 @@ class LinearModel(_Fit):
 
     def predict(self, newdata: Any = None, *, interval: str = "none", level: float = 0.95,
                 se_fit: bool = False) -> Any:
-        if newdata is None:
-            return self._write(pl.DataFrame({"fit": self.fitted}))
+        """Predictions for ``newdata``, or for the rows the model was fitted
+        to; ``interval`` and ``se_fit`` apply to both, as in R."""
         return self._predict_frame(newdata, interval, level, se_fit, augment=False)
 
     def _predict_frame(self, newdata, interval, level, se_fit, augment):
         if interval not in ("none", "confidence", "prediction"):
             raise ValueError("interval must be 'none', 'confidence', or 'prediction'")
-        x, off, rows, data = self._new_design(newdata)
+        x, off, rows, data = self._design_for(newdata)
         kept = self.qr.kept
         xk = x[:, kept]
         fit = xk @ self.coef[kept] + off
@@ -667,7 +677,19 @@ class LinearModel(_Fit):
         cols = {names[0]: fit}
         if interval != "none":
             q = self._quantile((1 + level) / 2)
-            width = q * (se if interval == "confidence" else np.sqrt(se**2 + self.scale))
+            weighted = bool(np.any(self.weights != 1))
+            pred_var = np.full(len(fit), self.scale)
+            if interval == "prediction":
+                # R's predict.lm: on the fitted rows the variance of a new
+                # response uses the fitting weights; on new rows it does not.
+                if newdata is None:
+                    _warn("predictions on current data refer to _future_ responses")
+                    if weighted:
+                        _warn("assuming prediction variance inversely proportional to weights used for fitting")
+                        pred_var = self.scale / self.weights
+                elif weighted:
+                    _warn("Assuming constant prediction variance even though model fit is weighted")
+            width = q * (se if interval == "confidence" else np.sqrt(se**2 + pred_var))
             cols[names[1]], cols[names[2]] = fit - width, fit + width
         if se_fit:
             cols[names[3]] = se
@@ -930,14 +952,14 @@ class GeneralizedLinearModel(_Fit):
         return frame.with_columns(pl.col(c).fill_nan(None) for c in cols)
 
     def predict(self, newdata: Any = None, *, type: str = "link", se_fit: bool = False) -> Any:  # noqa: A002
-        if newdata is None:
-            return self._write(pl.DataFrame({"fit": self.eta if type == "link" else self.mu}))
+        """Predictions for ``newdata``, or for the rows the model was fitted
+        to; ``type`` and ``se_fit`` apply to both, as in R."""
         return self._predict(newdata, type, se_fit, augment=False)
 
     def _predict(self, newdata, type_, se_fit, augment):
         if type_ not in ("link", "response"):
             raise ValueError("type must be 'link' or 'response'")
-        x, off, rows, data = self._new_design(newdata)
+        x, off, rows, data = self._design_for(newdata)
         kept = self.qr.kept
         eta = x[:, kept] @ self.coef[kept] + off
         se = np.sqrt(np.sum((x[:, kept] @ _solve_upper(self.qr.r, np.eye(len(kept)))) ** 2, axis=1) * self.scale)
@@ -1304,6 +1326,7 @@ def _model(verb: str, build: Callable[[Formula, _Frame, Data], _Fit], formula: s
     def _apply(data: Data) -> Any:
         parsed = parse_formula(formula, verb, data.columns)
         parsed.contrasts = _contrasts(contrasts, parsed, verb)
+        parsed.offset_arg = offset
         frames = _model_frames(data, parsed, weights, offset, verb)
         fits = [build(parsed, frame, data) for frame in frames]
         return Models(fits, data) if data._groups else fits[0]

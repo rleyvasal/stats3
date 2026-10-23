@@ -459,6 +459,21 @@ result <- switch(
     newcars <- data.frame(wt=c(2.5, 3.5), hp=c(100, 200))
     pr <- predict(fits$glm_binomial_01, newcars, type="response", se.fit=TRUE)
     out$predict_glm <- data.frame(fit=unname(pr$fit), se_fit=unname(pr$se.fit))
+    # Offsets given as an argument are added to predictions on new rows.
+    m$log_gear <- log(m$gear)
+    lm_off <- lm(mpg ~ wt, m, offset=qsec)
+    out$predict_offset_lm <- data.frame(fit=unname(predict(lm_off, newcars2 <- data.frame(wt=c(2.5, 3.5), qsec=c(16, 19)))))
+    glm_off <- glm(carb ~ hp, poisson, m, offset=log_gear)
+    pg <- predict(glm_off, data.frame(hp=c(100, 200), log_gear=log(c(3, 5))), type="response", se.fit=TRUE)
+    out$predict_offset_glm <- data.frame(fit=unname(pg$fit), se_fit=unname(pg$se.fit))
+    # interval and se.fit apply to the rows the model was fitted to as well.
+    pc <- predict(fits$lm_factor, interval="confidence", se.fit=TRUE)
+    out$predict_current_confidence <- data.frame(fit=unname(pc$fit[, 1]), lwr=unname(pc$fit[, 2]),
+                                                 upr=unname(pc$fit[, 3]), se_fit=unname(pc$se.fit))
+    out$predict_current_prediction <- suppressWarnings(as.data.frame(predict(fits$lm_simple, interval="prediction")))
+    out$predict_current_weighted <- suppressWarnings(as.data.frame(predict(fits$lm_weights, interval="prediction")))
+    pgc <- predict(fits$glm_poisson_offset, type="response", se.fit=TRUE)
+    out$predict_current_glm <- data.frame(fit=unname(pgc$fit), se_fit=unname(pgc$se.fit))
     # Type II and III tests by car's definitions, in base R (car is not
     # needed): drop a term's columns (type III), or a term and its
     # higher-order relatives against the relatives alone (type II), from
