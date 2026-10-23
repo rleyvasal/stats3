@@ -144,8 +144,12 @@ want), and redundant columns are reported as aliased, as in R. For a `glm`,
 `tidy(conf_int=True)` gives R's profile-likelihood intervals (`confint`);
 `conf_method="wald"` gives `confint.default`.
 Families: `gaussian`, `binomial`, `poisson`, `Gamma`, `inverse_gaussian`,
-`quasibinomial`, `quasipoisson`, with R's links. `fit >> tidy()` works too,
-and with tidy3 loaded, `tidy(data)` still makes a tidy3 frame.
+`quasibinomial`, `quasipoisson`, with R's links. `fit >> tidy()` works too.
+
+tidy3 has a `tidy()` of its own, for data. stats3's `tidy` hands data to
+it, and from tidy3 0.8.3 tidy3's `tidy` hands models to stats3, so either
+import order works. With tidy3 0.8.2 or earlier, import stats3 after tidy3
+(or call `stats3.tidy(fit)`).
 
 The engine is stats3's own: weighted least squares by QR for `lm`, and a
 port of R's `glm.fit` (same starting values, convergence rule and step

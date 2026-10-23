@@ -201,6 +201,24 @@ def test_augment_with_newdata_adds_fitted_values():
     assert out.columns == ["flipper_length_mm", ".fitted", ".lower", ".upper"]
 
 
+def test_models_give_their_table_to_any_tidy():
+    fit = lm(P(), "body_mass_g ~ flipper_length_mm + species")
+    assert fit.__tidy__(conf_int=True).equals(tidy(fit, conf_int=True))
+    models = lm(P(), "body_mass_g ~ flipper_length_mm", by="species")
+    assert models.__tidy__().equals(tidy(models))
+
+
+def test_tidy3_tidy_works_on_models_when_imported_last():
+    tidy3 = pytest.importorskip("tidy3")
+    fit = lm(P(), "body_mass_g ~ flipper_length_mm + species")
+    try:
+        result = tidy3.tidy(fit, conf_int=True)
+    except TypeError:
+        pytest.skip("this tidy3 has no __tidy__ hook yet")
+    assert result.equals(tidy(fit, conf_int=True))
+    assert (fit >> tidy3.tidy()).equals(tidy(fit))
+
+
 def test_tidy_hands_data_to_tidy3():
     tidy3 = pytest.importorskip("tidy3")
     assert type(tidy({"x": [1, 2]})).__name__ == "TidyFrame"

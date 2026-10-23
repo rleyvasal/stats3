@@ -449,6 +449,11 @@ class _Fit:
 
     # -- shared tables ----------------------------------------------------------
 
+    def __tidy__(self, **kwargs: Any) -> Any:
+        """The coefficient table for any ``tidy()``: tidy3's calls this, so
+        ``tidy(fit)`` works whichever package's ``tidy`` was imported last."""
+        return tidy(self, **kwargs)
+
     @property
     def coefficients(self) -> dict[str, float]:
         return dict(zip(self.design.names, self.coef.tolist()))
@@ -1252,6 +1257,9 @@ class Models:
 
     def __getitem__(self, i: int) -> _Fit:
         return self.fits[i]
+
+    def __tidy__(self, **kwargs: Any) -> Any:
+        return tidy(self, **kwargs)
 
     def _stack(self, frames: list[pl.DataFrame]) -> Any:
         return self._data.write(pl.concat(frames, how="diagonal_relaxed"))

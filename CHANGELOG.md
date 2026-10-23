@@ -4,6 +4,12 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Fixed
+
+- `tidy(fit)` failed when tidy3 was imported after stats3, because tidy3's `tidy()` replaced stats3's and treated the model as data. Fitted models (and grouped models) now have a `__tidy__` method that tidy3's `tidy()` calls from tidy3 0.8.3 on, so `tidy(fit)` and `fit >> tidy()` work whichever package is imported last.
+
 ## 0.1.0 — 2026-10-23
 
 The first version: R's common statistical tests for Polars, pandas and tidy3 data.
