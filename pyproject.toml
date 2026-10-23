@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stats3"
+dynamic = ["version"]
+description = "R's statistical tests on Polars, as tidy3 pipe steps with R's results"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Rigoberto Leyva Salmeron" }]
+keywords = ["statistics", "hypothesis tests", "polars", "tidyverse", "R"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = [
+  # stats3 builds on tidy3's frames, groups and column selection.
+  "tidy3>=0.8.1",
+  "polars>=1.39",
+  "numpy>=1.24",
+  # p-values and intervals come from scipy's distribution functions.
+  "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/rleyvasal/stats3"
+Changelog = "https://github.com/rleyvasal/stats3/blob/main/CHANGELOG.md"
+
+[tool.setuptools.dynamic]
+version = { attr = "stats3.__version__.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+stats3 = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]

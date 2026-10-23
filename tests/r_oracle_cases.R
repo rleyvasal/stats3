@@ -1,0 +1,351 @@
+# R oracle for stats3: each case runs R's own tests and prints the results
+# as JSON for tests/oracle.py. Run from the repository root:
+#   Rscript tests/r_oracle_cases.R stats_tier1
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(jsonlite))
+
+column_type <- function(x) {
+  if (is.factor(x)) return("factor")
+  if (inherits(x, "Date")) return("date")
+  if (inherits(x, "POSIXt")) return("datetime")
+  if (is.list(x)) return("list")
+  if (is.logical(x)) return("logical")
+  if (is.integer(x)) return("integer")
+  if (is.numeric(x)) return("double")
+  if (is.character(x)) return("character")
+  class(x)[[1]]
+}
+
+normalise_value <- function(x) {
+  if (is.data.frame(x)) return(normalise(x))
+  if (inherits(x, "Date")) return(format(x, "%Y-%m-%d"))
+  if (inherits(x, "POSIXt")) return(format(x, "%Y-%m-%dT%H:%M:%S", tz="UTC"))
+  if (is.factor(x)) return(as.character(x))
+  if (is.list(x)) return(lapply(x, normalise_value))
+  x
+}
+
+normalise <- function(x) {
+  if (is.data.frame(x)) {
+    return(list(
+      kind="dataframe",
+      columns=unname(names(x)),
+      types=unname(vapply(x, column_type, character(1))),
+      data=unname(lapply(x, function(column) {
+        cells <- lapply(as.list(column), normalise_value)
+        # Keep list-column cells as arrays: auto_unbox would turn list(3)
+        # into a bare 3.
+        if (is.list(column)) {
+          cells <- lapply(cells, function(v) if (is.atomic(v) && !is.null(v)) I(v) else v)
+        }
+        unname(cells)
+      }))
+    ))
+  }
+  if (is.list(x)) return(unname_or_names(x))
+  if (length(x) == 1) return(normalise_value(x))
+  list(kind="vector", data=unname(lapply(as.list(x), normalise_value)))
+}
+
+unname_or_names <- function(x) {
+  values <- lapply(x, normalise)
+  if (is.null(names(x))) unname(values) else values
+}
+
+case_name <- commandArgs(trailingOnly=TRUE)[[1]]
+
+result <- switch(
+  case_name,
+  t_test = {
+    p <- read.csv("tests/data/penguins.csv", na.strings="NA")
+    # One row per test, in tidy3's column names. jsonlite writes the
+    # infinite bound of a one-sided interval as null.
+    row <- function(h) {
+      estimates <- unname(h$estimate)
+      out <- data.frame(estimate=if (length(estimates) == 2) estimates[1] - estimates[2] else estimates)
+      if (length(estimates) == 2) {
+        out$estimate1 <- estimates[1]
+        out$estimate2 <- estimates[2]
+      }
+      out$statistic <- unname(h$statistic)
+      out$df <- unname(h$parameter)
+      out$p_value <- h$p.value
+      out$conf_low <- h$conf.int[1]
+      out$conf_high <- h$conf.int[2]
+      out$method <- trimws(h$method)
+      out$alternative <- h$alternative
+      out
+    }
+    by <- function(data, groups, test) {
+      data |> group_by(across(all_of(groups))) |>
+        group_modify(function(d, k) row(test(d))) |> ungroup() |> as.data.frame()
+    }
+    welch <- function(d) t.test(body_mass_g ~ sex, data=d)
+    student <- function(d) t.test(body_mass_g ~ sex, data=d, var.equal=TRUE)
+    paired <- function(d) t.test(d$bill_length_mm, d$bill_depth_mm, paired=TRUE)
+    one <- function(d) t.test(d$flipper_length_mm, mu=200)
+    list(
+      welch=row(welch(p)),
+      student=row(student(p)),
+      paired=row(paired(p)),
+      one_sample=row(one(p)),
+      one_sample_formula=row(t.test(flipper_length_mm ~ 1, data=p, mu=200)),
+      two_columns=row(t.test(p$bill_length_mm, p$bill_depth_mm)),
+      welch_mu_less=row(t.test(body_mass_g ~ sex, data=p, mu=-500, alternative="less", conf.level=0.9)),
+      student_greater=row(t.test(body_mass_g ~ sex, data=p, var.equal=TRUE, alternative="greater", conf.level=0.99)),
+      paired_less=row(t.test(p$bill_length_mm, p$bill_depth_mm, paired=TRUE, mu=27, alternative="less")),
+      one_sample_greater=row(t.test(p$flipper_length_mm, mu=200, alternative="greater")),
+      welch_by_species=by(p, "species", welch),
+      student_by_species=by(p, "species", student),
+      paired_by_species=by(p, "species", paired),
+      one_sample_by_species=by(p, "species", one),
+      welch_by_species_island=by(p, c("species", "island"), welch),
+      student_by_island_less=by(p, "island", function(d) t.test(body_mass_g ~ sex, data=d, var.equal=TRUE, alternative="less")),
+      welch_by_sex_species_levels=by(p, "sex", function(d) t.test(flipper_length_mm ~ species, data=d[d$species != "Chinstrap", ]))
+    )
+  },
+  stats_tier1 = {
+    p <- read.csv("tests/data/penguins.csv", na.strings="NA")
+    p$dream <- p$island == "Dream"
+    p$first_year <- p$year == 2007
+    s <- read.csv("tests/data/ranks.csv")
+    # One row per test in tidy3's column names; jsonlite writes infinite
+    # interval bounds as null.
+    row <- function(h, parameter="df", conf=FALSE) {
+      out <- list()
+      est <- unname(h$estimate)
+      if (length(est) == 1) out$estimate <- est
+      if (length(est) > 1) for (i in seq_along(est)) out[[paste0("estimate", i)]] <- est[i]
+      if (!is.null(h$statistic)) out$statistic <- unname(h$statistic)
+      if (!is.null(h$parameter)) out[[parameter]] <- unname(h$parameter)
+      out$p_value <- h$p.value
+      if (!is.null(h$conf.int) || conf) {
+        out$conf_low <- if (is.null(h$conf.int)) NA_real_ else h$conf.int[1]
+        out$conf_high <- if (is.null(h$conf.int)) NA_real_ else h$conf.int[2]
+      }
+      out$method <- trimws(h$method)
+      if (!is.null(h$alternative) && !grepl("Chi-squared|Kruskal", h$method)) out$alternative <- h$alternative
+      as.data.frame(out, check.names=FALSE)
+    }
+    aov_table <- function(fit) {
+      t <- summary(fit)[[1]]
+      data.frame(term=trimws(rownames(t)), df=t$Df, sumsq=t$`Sum Sq`, meansq=t$`Mean Sq`,
+                 statistic=t$`F value`, p_value=t$`Pr(>F)`)
+    }
+    tukey_table <- function(fit, ...) {
+      t <- TukeyHSD(fit, ...)
+      m <- t[[1]]
+      data.frame(term=names(t)[1], contrast=rownames(m), estimate=m[, "diff"],
+                 conf_low=m[, "lwr"], conf_high=m[, "upr"], adj_p_value=m[, "p adj"])
+    }
+    by <- function(data, groups, f) {
+      data |> group_by(across(all_of(groups))) |>
+        group_modify(function(d, k) f(d)) |> ungroup() |> as.data.frame()
+    }
+    props <- function(d) {
+      d <- d[!is.na(d$sex), ]
+      list(x=as.vector(tapply(d$sex == "male", d$island, sum)), n=as.vector(table(d$island)))
+    }
+    q <- props(p)
+    two <- props(p[p$island != "Biscoe", ])
+    suppressWarnings(list(
+      w_two=row(wilcox.test(body_mass_g ~ sex, data=p)),
+      w_two_no_correct=row(wilcox.test(body_mass_g ~ sex, data=p, correct=FALSE)),
+      w_two_exact=row(wilcox.test(a ~ g, data=s)),
+      w_two_exact_less_mu=row(wilcox.test(a ~ g, data=s, mu=0.3, alternative="less")),
+      w_two_edgeworth=row(wilcox.test(a ~ g, data=s, exact=FALSE, correct=2)),
+      w_two_exact_ties_by=by(p, c("species", "island"), function(d) row(wilcox.test(body_mass_g ~ sex, data=d))),
+      w_columns=row(wilcox.test(p$bill_length_mm, p$bill_depth_mm)),
+      w_one=row(wilcox.test(p$flipper_length_mm, mu=200)),
+      w_one_exact=row(wilcox.test(s$a, mu=0.1)),
+      w_one_exact_zeros=row(wilcox.test(s$c, alternative="greater")),
+      w_one_zeros_asymp=row(wilcox.test(s$c, exact=FALSE)),
+      w_one_edgeworth=row(wilcox.test(s$a, exact=FALSE, correct=3)),
+      w_paired=row(wilcox.test(p$bill_length_mm, p$bill_depth_mm, paired=TRUE)),
+      w_paired_exact=row(wilcox.test(s$e, s$a, paired=TRUE, alternative="greater")),
+      w_by_species=by(p, "species", function(d) row(wilcox.test(body_mass_g ~ sex, data=d))),
+      k_species=row(kruskal.test(body_mass_g ~ species, data=p)),
+      k_by_sex=by(p, "sex", function(d) row(kruskal.test(flipper_length_mm ~ island, data=d))),
+      k_small=row(kruskal.test(a ~ h, data=s)),
+      c_pearson=row(cor.test(p$bill_length_mm, p$bill_depth_mm)),
+      c_pearson_by=by(p, "species", function(d) row(cor.test(d$bill_length_mm, d$bill_depth_mm))),
+      c_pearson_less=row(cor.test(p$bill_length_mm, p$bill_depth_mm, alternative="less", conf.level=0.9)),
+      c_pearson_four=row(cor.test(s$a[1:4], s$b[1:4], alternative="greater")),
+      c_pearson_three=row(cor.test(s$a[1:3], s$b[1:3]), conf=TRUE),
+      c_spearman=row(cor.test(p$bill_length_mm, p$bill_depth_mm, method="spearman")),
+      c_spearman_by_h=by(s, "h", function(d) row(cor.test(d$a, d$b, method="spearman"))),
+      c_spearman_all=row(cor.test(s$a, s$b, method="spearman")),
+      c_spearman_greater_by_h=by(s, "h", function(d) row(cor.test(d$a, d$e, method="spearman", alternative="greater"))),
+      c_spearman_less=row(cor.test(s$a, s$b, method="spearman", alternative="less")),
+      c_kendall=row(cor.test(p$bill_length_mm, p$bill_depth_mm, method="kendall")),
+      c_kendall_continuity=row(cor.test(p$bill_length_mm, p$bill_depth_mm, method="kendall", continuity=TRUE)),
+      c_kendall_exact=row(cor.test(s$a, s$b, method="kendall")),
+      c_kendall_by_h=by(s, "h", function(d) row(cor.test(d$a, d$e, method="kendall", alternative="less"))),
+      a_species=aov_table(aov(body_mass_g ~ species, data=p)),
+      a_by_sex=by(p, "sex", function(d) aov_table(aov(flipper_length_mm ~ island, data=d))),
+      a_small=aov_table(aov(a ~ h, data=s)),
+      t_species=tukey_table(aov(body_mass_g ~ species, data=p)),
+      t_by_sex=by(p, "sex", function(d) tukey_table(aov(flipper_length_mm ~ island, data=d))),
+      t_small_99=tukey_table(aov(a ~ h, data=s), conf.level=0.99),
+      x_species_island=row(chisq.test(p$species, p$island)),
+      x_yates=row(chisq.test(p$sex, p$dream)),
+      x_no_yates=row(chisq.test(p$sex, p$dream, correct=FALSE)),
+      x_gof=row(chisq.test(table(p$species))),
+      x_gof_p=row(chisq.test(table(p$species), p=c(0.5, 0.2, 0.3))),
+      x_gof_rescale=row(chisq.test(table(p$species), p=c(5, 2, 3), rescale.p=TRUE)),
+      x_by_year=by(p, "year", function(d) row(chisq.test(d$species, d$sex))),
+      f_sex_dream=row(fisher.test(p$sex, p$dream)),
+      f_by_species=by(p, "species", function(d) row(fisher.test(d$sex, d$first_year))),
+      f_less=row(fisher.test(p$sex, p$dream, alternative="less", conf.level=0.9)),
+      f_greater=row(fisher.test(p$sex, p$first_year, alternative="greater")),
+      p_three=row(prop.test(q$x, q$n), conf=TRUE),
+      p_three_given=row(prop.test(q$x, q$n, p=c(0.5, 0.4, 0.6)), conf=TRUE),
+      p_two=row(prop.test(two$x, two$n)),
+      p_two_less=row(prop.test(two$x, two$n, alternative="less", conf.level=0.9)),
+      p_two_no_correct=row(prop.test(two$x, two$n, correct=FALSE)),
+      p_one=row(prop.test(q$x[1], q$n[1], p=0.4)),
+      p_one_greater=row(prop.test(q$x[2], q$n[2], alternative="greater")),
+      b_male=row(binom.test(sum(p$sex == "male", na.rm=TRUE), sum(!is.na(p$sex))), parameter="trials"),
+      b_counts=row(binom.test(7, 20, p=0.4, alternative="greater"), parameter="trials"),
+      b_zero=row(binom.test(0, 12, p=0.1), parameter="trials"),
+      b_less=row(binom.test(9, 30, p=0.5, alternative="less", conf.level=0.9), parameter="trials"),
+      b_by_species=by(p, "species", function(d) row(binom.test(sum(d$sex == "male", na.rm=TRUE), sum(!is.na(d$sex)), p=0.45), parameter="trials"))
+    ))
+  },
+  stats_tier2 = {
+    p <- read.csv("tests/data/penguins.csv", na.strings="NA")
+    s <- read.csv("tests/data/ranks.csv")
+    row <- function(h, alternative=NULL, drop=character()) {
+      out <- list()
+      est <- unname(h$estimate)
+      if (length(est) == 1) out$estimate <- est
+      if (!is.null(h$parameter) && length(h$parameter) == 2) {
+        out$num_df <- unname(h$parameter[1]); out$den_df <- unname(h$parameter[2])
+      }
+      out$statistic <- unname(h$statistic)
+      if (!is.null(h$parameter) && length(h$parameter) == 1) out$df <- unname(h$parameter)
+      out$p_value <- h$p.value
+      if (!is.null(h$conf.int)) { out$conf_low <- h$conf.int[1]; out$conf_high <- h$conf.int[2] }
+      out$method <- trimws(h$method)
+      if (!is.null(alternative)) out$alternative <- alternative
+      else if (!is.null(h$alternative)) out$alternative <- h$alternative
+      as.data.frame(out[setdiff(names(out), drop)], check.names=FALSE)
+    }
+    by <- function(data, groups, f) {
+      data |> group_by(across(all_of(groups))) |>
+        group_modify(function(d, k) f(d)) |> ungroup() |> as.data.frame()
+    }
+    levene <- function(formula, d, center="median") {
+      y <- d[[all.vars(formula)[1]]]; g <- d[[all.vars(formula)[2]]]
+      ok <- !is.na(y) & !is.na(g); y <- y[ok]; g <- factor(g[ok])
+      if (requireNamespace("car", quietly=TRUE)) {
+        a <- car::leveneTest(y, g, center=center)
+        return(data.frame(statistic=a$`F value`[1], df=a$Df[1], df_residual=a$Df[2], p_value=a$`Pr(>F)`[1],
+          method=sprintf("Levene's Test for Homogeneity of Variance (center = %s)", center)))
+      }
+      # car's definition: a one-way ANOVA on absolute deviations from each level's centre.
+      dev <- abs(y - ave(y, g, FUN=if (center == "median") median else mean))
+      a <- anova(lm(dev ~ g))
+      data.frame(statistic=a$`F value`[1], df=a$Df[1], df_residual=a$Df[2], p_value=a$`Pr(>F)`[1],
+        method=sprintf("Levene's Test for Homogeneity of Variance (center = %s)", center))
+    }
+    ks <- function(..., alternative="two.sided") row(ks.test(..., alternative=alternative), alternative=alternative)
+    adjust <- function(pv, method, n=NULL) data.frame(adj=if (is.null(n)) p.adjust(pv, method) else p.adjust(pv, method, n))
+    pvalues <- c(0.01, 0.04, NA, 0.03, 0.2, 0.0005, 0.04, 0.6, 0.012)
+    # Effect sizes: effectsize's noncentral-t and noncentral-F intervals.
+    ncp_ci <- function(t, df, conf=0.95) {
+      f <- function(prob) uniroot(function(ncp) pt(t, df, ncp) - prob, c(t - 60, t + 60), tol=1e-13)$root
+      c(f((1 + conf) / 2), f((1 - conf) / 2))
+    }
+    hedges_j <- function(df) exp(lgamma(df / 2) - log(sqrt(df / 2)) - lgamma((df - 1) / 2))
+    d_two <- function(y, g, pooled=TRUE, hedges=FALSE) {
+      ok <- !is.na(y) & !is.na(g); y <- y[ok]; g <- factor(g[ok])
+      a <- y[g == levels(g)[1]]; b <- y[g == levels(g)[2]]
+      n1 <- length(a); n2 <- length(b); v1 <- var(a); v2 <- var(b)
+      if (pooled) { df <- n1 + n2 - 2; sd <- sqrt(((n1 - 1) * v1 + (n2 - 1) * v2) / df); scale <- sqrt(1/n1 + 1/n2) }
+      else { sd <- sqrt((v1 + v2) / 2); se <- sqrt(v1/n1 + v2/n2); df <- se^4 / ((v1/n1)^2/(n1-1) + (v2/n2)^2/(n2-1)); scale <- se / sd }
+      d <- (mean(a) - mean(b)) / sd
+      j <- if (hedges) hedges_j(df) else 1
+      ci <- ncp_ci(d / scale, df) * scale * j
+      data.frame(estimate=d * j, conf_low=ci[1], conf_high=ci[2])
+    }
+    d_one <- function(x, mu=0) {
+      x <- x[!is.na(x)]; n <- length(x); d <- (mean(x) - mu) / sd(x)
+      ci <- ncp_ci(d * sqrt(n), n - 1) / sqrt(n)
+      data.frame(estimate=d, conf_low=ci[1], conf_high=ci[2])
+    }
+    eta2 <- function(formula, d, conf=0.95) {
+      a <- summary(aov(formula, data=d))[[1]]
+      f <- a$`F value`[1]; df1 <- a$Df[1]; df2 <- a$Df[2]
+      ncp <- if (pf(f, df1, df2) < conf) 0 else
+        uniroot(function(nc) pf(f, df1, df2, nc) - conf, c(0, f * df1 * 50), tol=1e-13)$root
+      data.frame(term=all.vars(formula)[2], estimate=a$`Sum Sq`[1] / sum(a$`Sum Sq`),
+                 conf_low=ncp / (ncp + df1 + df2 + 1), conf_high=1)
+    }
+    power_row <- function(h, values) {
+      out <- as.data.frame(h[values])
+      names(out) <- sub(".", "_", names(out), fixed=TRUE)
+      out$power <- h$power; out$alternative <- h$alternative; out$method <- h$method
+      out
+    }
+    suppressWarnings(list(
+      s_mass=row(shapiro.test(p$body_mass_g)),
+      s_by_species=by(p, "species", function(d) row(shapiro.test(d$flipper_length_mm))),
+      s_small=row(shapiro.test(s$a)),
+      b_species=row(bartlett.test(body_mass_g ~ species, data=p)),
+      b_by_year=by(p, "year", function(d) row(bartlett.test(flipper_length_mm ~ species, data=d))),
+      l_species=levene(body_mass_g ~ species, p),
+      l_mean=levene(body_mass_g ~ species, p, center="mean"),
+      l_by_sex=by(p, "sex", function(d) levene(flipper_length_mm ~ island, d)),
+      v_sex=row(var.test(body_mass_g ~ sex, data=p)),
+      v_columns_less=row(var.test(s$a, s$b, ratio=2, alternative="less", conf.level=0.9)),
+      v_greater=row(var.test(s$a, s$e, alternative="greater")),
+      v_by_species=by(p, "species", function(d) row(var.test(body_mass_g ~ sex, data=d))),
+      k1_pnorm=ks(p$flipper_length_mm, "pnorm", 200, 14),
+      k1_exact=ks(s$a, "pnorm"),
+      k1_greater=ks(s$a, "pnorm", 0.4, alternative="greater"),
+      k1_less=ks(s$a, "pnorm", 0.4, alternative="less"),
+      k1_punif=ks(s$a, "punif", -3, 3),
+      k1_asymp=ks(s$a, "pnorm", exact=FALSE),
+      k1_asymp_less=ks(s$a, "pnorm", exact=FALSE, alternative="less"),
+      k2_sex=ks(body_mass_g ~ sex, data=p),
+      k2_exact=ks(s$a, s$b),
+      k2_ties=ks(s$c, s$b),
+      k2_greater=ks(s$a, s$e, alternative="greater"),
+      k2_less_ties=ks(s$c, s$e, alternative="less"),
+      k2_by_species=by(p, "species", function(d) ks(flipper_length_mm ~ sex, data=d)),
+      pa_holm=adjust(pvalues, "holm"),
+      pa_hochberg=adjust(pvalues, "hochberg"),
+      pa_hommel=adjust(pvalues, "hommel"),
+      pa_bonferroni=adjust(pvalues, "bonferroni"),
+      pa_BH=adjust(pvalues, "BH"),
+      pa_BY=adjust(pvalues, "BY"),
+      pa_fdr=adjust(pvalues, "fdr"),
+      pa_none=adjust(pvalues, "none"),
+      pa_hommel_n=adjust(pvalues, "hommel", n=12),
+      pa_BH_n=adjust(pvalues, "BH", n=12),
+      d_pooled=d_two(p$body_mass_g, p$sex),
+      d_unpooled=d_two(p$body_mass_g, p$sex, pooled=FALSE),
+      g_pooled=d_two(p$body_mass_g, p$sex, hedges=TRUE),
+      d_one=d_one(p$flipper_length_mm, mu=200),
+      d_paired=d_one(p$bill_length_mm - p$bill_depth_mm),
+      d_by_species=by(p, "species", function(d) d_two(d$body_mass_g, d$sex)),
+      e_species=eta2(body_mass_g ~ species, p),
+      e_by_sex=by(p, "sex", function(d) eta2(flipper_length_mm ~ island, d)),
+      e_small=eta2(a ~ h, s),
+      pw_t_power=power_row(power.t.test(n=20, delta=1), c("n", "delta", "sd", "sig.level")),
+      pw_t_n=power_row(power.t.test(power=0.9, delta=1), c("n", "delta", "sd", "sig.level")),
+      pw_t_delta=power_row(power.t.test(n=30, power=0.8, type="paired", alternative="one.sided"), c("n", "delta", "sd", "sig.level")),
+      pw_t_sd=power_row(power.t.test(n=25, delta=2, sd=NULL, power=0.85, type="one.sample"), c("n", "delta", "sd", "sig.level")),
+      pw_t_sig=power_row(power.t.test(n=20, delta=1, sig.level=NULL, power=0.9), c("n", "delta", "sd", "sig.level")),
+      pw_t_strict=power_row(power.t.test(n=10, delta=0.5, strict=TRUE), c("n", "delta", "sd", "sig.level")),
+      pw_p_power=power_row(power.prop.test(n=50, p1=0.5, p2=0.75), c("n", "p1", "p2", "sig.level")),
+      pw_p_n=power_row(power.prop.test(p1=0.5, p2=0.75, power=0.9), c("n", "p1", "p2", "sig.level")),
+      pw_p_p2=power_row(power.prop.test(n=50, p1=0.5, power=0.9), c("n", "p1", "p2", "sig.level")),
+      pw_p_strict=power_row(power.prop.test(n=30, p1=0.4, p2=0.6, strict=TRUE, alternative="two.sided"), c("n", "p1", "p2", "sig.level"))
+    ))
+  },
+  stop(sprintf("unknown oracle case: %s", case_name))
+)
+
+cat(toJSON(normalise(result), auto_unbox=TRUE, na="null", null="null", digits=15))
