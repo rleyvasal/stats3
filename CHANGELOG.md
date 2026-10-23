@@ -4,7 +4,9 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.1.1 — 2026-10-23
+
+`tidy(fit)` works whichever of stats3 and tidy3 is imported last (with tidy3 0.8.3 or later).
 
 ### Fixed
 
