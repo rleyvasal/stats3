@@ -1,11 +1,13 @@
-"""R's statistical tests on Polars, as pipe steps for tidy3.
+"""R's statistical tests on Polars, for Polars, pandas and tidy3 data.
 
-    from tidy3 import *
     from stats3 import *
 
-    penguins >> group_by(species) >> t_test("body_mass_g ~ sex")
+    penguins >> t_test("body_mass_g ~ sex", by="species")    # Polars or pandas
+    t_test(penguins, "body_mass_g ~ sex", by="species")      # data first
+    penguins >> group_by(species) >> t_test(body_mass_g ~ sex)  # tidy3, notebook
 
-Each test returns one row per group, with R's defaults and R's results.
+Each test returns one row per group, with R's defaults and R's results, in
+the kind of frame it was given.
 """
 
 from stats3.__version__ import __version__
@@ -21,6 +23,15 @@ from stats3.effects import (
     power_t_test,
 )
 from stats3.ranks import cor_test, kruskal_test, wilcox_test
+
+# In IPython / Jupyter, turn on unquoted formulas and bare column names in
+# stats3 calls (from the next cell on), as tidy3 does for its verbs.
+try:
+    from stats3.jupyter import enable as _enable_notebook
+
+    _enable_notebook()
+except Exception:  # pragma: no cover - never let the shell block an import
+    pass
 
 __all__ = [
     "aov",

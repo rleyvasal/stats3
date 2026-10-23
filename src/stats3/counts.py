@@ -9,15 +9,15 @@ test, ``scipy.stats``).
 from __future__ import annotations
 
 import math
-import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
 import polars as pl
 
-from tidy3.verbs import Verb, _pl_expr
+from stats3._data import Step, column_name, expression, step
 from stats3.core import (
+    _warn,
     _alternative,
     _check_conf_level,
     _column,
@@ -81,6 +81,7 @@ def _labels(keys: pl.DataFrame, groups: list[str]) -> list[str]:
 # chisq_test ------------------------------------------------------------------
 
 
+@step
 def chisq_test(
     x: Any,
     y: Any = None,
@@ -88,7 +89,7 @@ def chisq_test(
     p: Sequence[float] | Mapping[Any, float] | None = None,
     correct: bool = True,
     rescale_p: bool = False,
-) -> Verb:
+) -> Step:
     """Pearson's chi-squared test, as R's ``chisq.test``.
 
     - ``chisq_test(species, island)``: independence of two columns, on the
@@ -137,7 +138,7 @@ def chisq_test(
                 stat = float(np.sum((observed - expected) ** 2 / expected))
                 dof = len(levels) - 1
             if np.any(expected < 5):
-                warnings.warn(_CHISQ_WARNING, stacklevel=3)
+                _warn(_CHISQ_WARNING)
             statistic.append(stat)
             df.append(float(dof))
             method.append(name)
@@ -149,7 +150,7 @@ def chisq_test(
             "method": pl.Series(method, dtype=pl.String),
         })
 
-    return Verb(_apply, "chisq_test")
+    return Step(_apply, "chisq_test")
 
 
 def _probabilities(p: Any, levels: list[Any], rescale: bool) -> np.ndarray:
@@ -179,9 +180,10 @@ def _probabilities(p: Any, levels: list[Any], rescale: bool) -> np.ndarray:
 # fisher_test -----------------------------------------------------------------
 
 
+@step
 def fisher_test(
     x: Any, y: Any, *, alternative: str = "two.sided", conf_level: float = 0.95
-) -> Verb:
+) -> Step:
     """Fisher's exact test for a 2 x 2 table, as R's ``fisher.test(x, y)``.
 
     ``estimate`` is the conditional maximum likelihood odds ratio, as in R,
@@ -223,7 +225,7 @@ def fisher_test(
             "alternative": alternative,
         })
 
-    return Verb(_apply, "fisher_test")
+    return Step(_apply, "fisher_test")
 
 
 # prop_test -------------------------------------------------------------------
@@ -231,7 +233,7 @@ def fisher_test(
 
 def _count_lists(tf: Any, groups: list[str], columns: list[Any]) -> tuple[pl.DataFrame, list[dict[str, Any]]]:
     """Per group, each count column's values in row order."""
-    exprs = [_pl_expr(c) if not isinstance(c, str) else pl.col(c) for c in columns]
+    exprs = [expression(c) for c in columns]
     lf = tf._lf
     named = [e.cast(pl.Float64).alias(f"__stats3_c{i}") for i, e in enumerate(exprs)]
     if groups:
@@ -249,13 +251,13 @@ def _count_lists(tf: Any, groups: list[str], columns: list[Any]) -> tuple[pl.Dat
 
 
 def _counts_column(tf: Any, spec: Any, role: str, verb: str) -> Any:
-    from tidy3.expr import Expr
-
-    if isinstance(spec, Expr) and spec.node[0] not in {"col", "name"}:
+    """A column's name, checked; or a computed expression as it is."""
+    if column_name(spec) is None:
         return spec
     return _column(tf, spec, role, verb)
 
 
+@step
 def prop_test(
     x: Any,
     n: Any,
@@ -264,7 +266,7 @@ def prop_test(
     alternative: str = "two.sided",
     conf_level: float = 0.95,
     correct: bool = True,
-) -> Verb:
+) -> Step:
     """Test of equal or given proportions, as R's ``prop.test(x, n)``.
 
     ``x`` and ``n`` are columns of successes and trials, one row per sample
@@ -309,7 +311,7 @@ def prop_test(
         columns["alternative"] = pl.Series([r["alternative"] for r in rows], dtype=pl.String)
         return _finish(tf, table, groups, columns)
 
-    return Verb(_apply, "prop_test")
+    return Step(_apply, "prop_test")
 
 
 def _prop_row(x, n, p, alternative, conf_level, correct, label, special) -> dict[str, Any]:
@@ -377,7 +379,7 @@ def _prop_row(x, n, p, alternative, conf_level, correct, label, special) -> dict
     observed = np.column_stack([x, n - x])
     expected = np.column_stack([n * pooled, n * (1 - pooled)])
     if np.any(expected < 5):
-        warnings.warn(_CHISQ_WARNING, stacklevel=4)
+        _warn(_CHISQ_WARNING)
     statistic = float(np.sum((np.abs(observed - expected) - yates) ** 2 / expected))
     if alternative == "two.sided":
         p_value = float(special.chdtrc(df, statistic))
@@ -400,6 +402,7 @@ def _prop_row(x, n, p, alternative, conf_level, correct, label, special) -> dict
 # binom_test ------------------------------------------------------------------
 
 
+@step
 def binom_test(
     x: Any,
     n: Any = None,
@@ -407,7 +410,7 @@ def binom_test(
     p: float = 0.5,
     alternative: str = "two.sided",
     conf_level: float = 0.95,
-) -> Verb:
+) -> Step:
     """Exact binomial test, as R's ``binom.test``, one test per group.
 
     - ``binom_test(sex == "male")``: a logical column or expression; successes
@@ -427,7 +430,7 @@ def binom_test(
         groups = list(tf._groups or [])
         if n is None:
             spec = _counts_column(tf, x, "x", "binom_test")
-            value = pl.col(spec) if isinstance(spec, str) else _pl_expr(spec)
+            value = expression(spec)
             aggs = [value.cast(pl.Boolean).sum().cast(pl.Float64).alias("x"),
                     value.count().cast(pl.Float64).alias("n")]
             lf = tf._lf
@@ -455,7 +458,7 @@ def binom_test(
             **columns, "method": "Exact binomial test", "alternative": alternative,
         })
 
-    return Verb(_apply, "binom_test")
+    return Step(_apply, "binom_test")
 
 
 def _binom_row(x: float, n: float, p: float, alternative: str, conf_level: float, label: str) -> dict[str, float]:

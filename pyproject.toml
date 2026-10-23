@@ -5,13 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "stats3"
 dynamic = ["version"]
-description = "R's statistical tests on Polars, as tidy3 pipe steps with R's results"
+description = "R's statistical tests on Polars, for Polars, pandas and tidy3 data, with R's results"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Rigoberto Leyva Salmeron" }]
-keywords = ["statistics", "hypothesis tests", "polars", "tidyverse", "R"]
+keywords = ["statistics", "hypothesis tests", "polars", "pandas", "tidyverse", "R"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
@@ -19,16 +19,24 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Mathematics",
 ]
 dependencies = [
-  # stats3 builds on tidy3's frames, groups and column selection.
-  "tidy3>=0.8.1",
+  # Summary statistics for every group come from one Polars query.
   "polars>=1.39",
-  "numpy>=1.24",
-  # p-values and intervals come from scipy's distribution functions.
+  # p-values and intervals come from scipy's distribution functions
+  # (Polars has none); NumPy arrives with scipy.
   "scipy>=1.10",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+# pandas frames in and out: Polars converts them through pyarrow.
+pandas = ["pandas>=2.0", "pyarrow>=14"]
+dev = [
+  "pytest>=7.0",
+  "pandas>=2.0",
+  "pyarrow>=14",
+  # Only to test that tidy3 frames, groups and expressions work.
+  "tidy3>=0.8.1",
+  "ipython>=8.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/stats3"

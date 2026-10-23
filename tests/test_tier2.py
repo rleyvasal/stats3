@@ -7,17 +7,11 @@ from __future__ import annotations
 import math
 import warnings
 
+import numpy as np
 import polars as pl
 import pytest
+import scipy.stats as scipy_stats
 
-from tidy3 import (
-    col,
-    filter,
-    group_by,
-    mutate,
-    select,
-    tidy,
-)
 from stats3 import (
     bartlett_test,
     cohens_d,
@@ -32,66 +26,60 @@ from stats3 import (
     t_test,
     var_test,
 )
-from oracle import PENGUINS as PENGUINS_CSV
-from oracle import RANKS as RANKS_CSV
-from oracle import _oracle, assert_matches_r, penguins, ranks
+from stats3.effects import adjust_p
+from oracle import (
+    BACKENDS,
+    _oracle,
+    assert_matches_r,
+    case,
+    penguins,
+    ranks,
+    run_case,
+)
 
-scipy_stats = pytest.importorskip("scipy.stats")
-
+P, S = penguins, ranks
 PVALUES = [0.01, 0.04, None, 0.03, 0.2, 0.0005, 0.04, 0.6, 0.012]
-
-
-def _adjust(method, n=None):
-    return tidy({"p": PVALUES}) >> mutate(adj=p_adjust("p", method, n=n)) >> select("adj")
-
-
-def _p():
-    return penguins()
-
-
-def _s():
-    return ranks()
-
+METHODS = ("holm", "hochberg", "hommel", "bonferroni", "BH", "BY", "fdr", "none")
 
 CASES = {
-    "s_mass": lambda: _p() >> shapiro_test("body_mass_g"),
-    "s_by_species": lambda: _p() >> group_by("species") >> shapiro_test("flipper_length_mm"),
-    "s_small": lambda: _s() >> shapiro_test("a"),
-    "b_species": lambda: _p() >> bartlett_test("body_mass_g ~ species"),
-    "b_by_year": lambda: _p() >> group_by("year") >> bartlett_test("flipper_length_mm ~ species"),
-    "l_species": lambda: _p() >> levene_test("body_mass_g ~ species"),
-    "l_mean": lambda: _p() >> levene_test("body_mass_g ~ species", center="mean"),
-    "l_by_sex": lambda: _p() >> group_by("sex") >> levene_test("flipper_length_mm ~ island"),
-    "v_sex": lambda: _p() >> var_test("body_mass_g ~ sex"),
-    "v_columns_less": lambda: _s() >> var_test("a", "b", ratio=2, alternative="less", conf_level=0.9),
-    "v_greater": lambda: _s() >> var_test("a", "e", alternative="greater"),
-    "v_by_species": lambda: _p() >> group_by("species") >> var_test("body_mass_g ~ sex"),
-    "k1_pnorm": lambda: _p() >> ks_test("flipper_length_mm", "pnorm", mean=200, sd=14),
-    "k1_exact": lambda: _s() >> ks_test("a", "pnorm"),
-    "k1_greater": lambda: _s() >> ks_test("a", "pnorm", mean=0.4, alternative="greater"),
-    "k1_less": lambda: _s() >> ks_test("a", "pnorm", mean=0.4, alternative="less"),
-    "k1_punif": lambda: _s() >> ks_test("a", "punif", min=-3, max=3),
-    "k1_asymp": lambda: _s() >> ks_test("a", "pnorm", exact=False),
-    "k1_asymp_less": lambda: _s() >> ks_test("a", "pnorm", exact=False, alternative="less"),
-    "k2_sex": lambda: _p() >> ks_test("body_mass_g ~ sex"),
-    "k2_exact": lambda: _s() >> ks_test("a", "b"),
-    "k2_ties": lambda: _s() >> ks_test("c", "b"),
-    "k2_greater": lambda: _s() >> ks_test("a", "e", alternative="greater"),
-    "k2_less_ties": lambda: _s() >> ks_test("c", "e", alternative="less"),
-    "k2_by_species": lambda: _p() >> group_by("species") >> ks_test("flipper_length_mm ~ sex"),
-    **{f"pa_{m}": (lambda m=m: _adjust(m)) for m in
-       ("holm", "hochberg", "hommel", "bonferroni", "BH", "BY", "fdr", "none")},
-    "pa_hommel_n": lambda: _adjust("hommel", n=12),
-    "pa_BH_n": lambda: _adjust("BH", n=12),
-    "d_pooled": lambda: _p() >> cohens_d("body_mass_g ~ sex"),
-    "d_unpooled": lambda: _p() >> cohens_d("body_mass_g ~ sex", pooled_sd=False),
-    "g_pooled": lambda: _p() >> hedges_g("body_mass_g ~ sex"),
-    "d_one": lambda: _p() >> cohens_d("flipper_length_mm", mu=200),
-    "d_paired": lambda: _p() >> cohens_d("bill_length_mm", "bill_depth_mm", paired=True),
-    "d_by_species": lambda: _p() >> group_by("species") >> cohens_d("body_mass_g ~ sex"),
-    "e_species": lambda: _p() >> eta_squared("body_mass_g ~ species"),
-    "e_by_sex": lambda: _p() >> group_by("sex") >> eta_squared("flipper_length_mm ~ island"),
-    "e_small": lambda: _s() >> eta_squared("a ~ h"),
+    "s_mass": case(P, lambda: shapiro_test("body_mass_g")),
+    "s_by_species": case(P, lambda: shapiro_test("flipper_length_mm"), "species"),
+    "s_small": case(S, lambda: shapiro_test("a")),
+    "b_species": case(P, lambda: bartlett_test("body_mass_g ~ species")),
+    "b_by_year": case(P, lambda: bartlett_test("flipper_length_mm ~ species"), "year"),
+    "l_species": case(P, lambda: levene_test("body_mass_g ~ species")),
+    "l_mean": case(P, lambda: levene_test("body_mass_g ~ species", center="mean")),
+    "l_by_sex": case(P, lambda: levene_test("flipper_length_mm ~ island"), "sex"),
+    "v_sex": case(P, lambda: var_test("body_mass_g ~ sex")),
+    "v_columns_less": case(S, lambda: var_test("a", "b", ratio=2, alternative="less", conf_level=0.9)),
+    "v_greater": case(S, lambda: var_test("a", "e", alternative="greater")),
+    "v_by_species": case(P, lambda: var_test("body_mass_g ~ sex"), "species"),
+    "k1_pnorm": case(P, lambda: ks_test("flipper_length_mm", "pnorm", mean=200, sd=14)),
+    "k1_exact": case(S, lambda: ks_test("a", "pnorm")),
+    "k1_greater": case(S, lambda: ks_test("a", "pnorm", mean=0.4, alternative="greater")),
+    "k1_less": case(S, lambda: ks_test("a", "pnorm", mean=0.4, alternative="less")),
+    "k1_punif": case(S, lambda: ks_test("a", "punif", min=-3, max=3)),
+    "k1_asymp": case(S, lambda: ks_test("a", "pnorm", exact=False)),
+    "k1_asymp_less": case(S, lambda: ks_test("a", "pnorm", exact=False, alternative="less")),
+    "k2_sex": case(P, lambda: ks_test("body_mass_g ~ sex")),
+    "k2_exact": case(S, lambda: ks_test("a", "b")),
+    "k2_ties": case(S, lambda: ks_test("c", "b")),
+    "k2_greater": case(S, lambda: ks_test("a", "e", alternative="greater")),
+    "k2_less_ties": case(S, lambda: ks_test("c", "e", alternative="less")),
+    "k2_by_species": case(P, lambda: ks_test("flipper_length_mm ~ sex"), "species"),
+    "d_pooled": case(P, lambda: cohens_d("body_mass_g ~ sex")),
+    "d_unpooled": case(P, lambda: cohens_d("body_mass_g ~ sex", pooled_sd=False)),
+    "g_pooled": case(P, lambda: hedges_g("body_mass_g ~ sex")),
+    "d_one": case(P, lambda: cohens_d("flipper_length_mm", mu=200)),
+    "d_paired": case(P, lambda: cohens_d("bill_length_mm", "bill_depth_mm", paired=True)),
+    "d_by_species": case(P, lambda: cohens_d("body_mass_g ~ sex"), "species"),
+    "e_species": case(P, lambda: eta_squared("body_mass_g ~ species")),
+    "e_by_sex": case(P, lambda: eta_squared("flipper_length_mm ~ island"), "sex"),
+    "e_small": case(S, lambda: eta_squared("a ~ h")),
+}
+
+# Calculators: no data, so one run each.
+POWER = {
     "pw_t_power": lambda: power_t_test(n=20, delta=1),
     "pw_t_n": lambda: power_t_test(power=0.9, delta=1),
     "pw_t_delta": lambda: power_t_test(n=30, power=0.8, type="paired", alternative="one.sided"),
@@ -104,7 +92,7 @@ CASES = {
     "pw_p_strict": lambda: power_prop_test(n=30, p1=0.4, p2=0.6, strict=True),
 }
 
-# Where R's own numerics are approximate, compare to R's accuracy (tidy3
+# Where R's own numerics are approximate, compare to R's accuracy (stats3
 # computes these to full precision):
 # - power: uniroot at tol = .Machine$double.eps^0.25, about 1.2e-4 on the
 #   solved value;
@@ -118,7 +106,7 @@ _SOLVED = {"pw_t_n": "n", "pw_t_delta": "delta", "pw_t_sd": "sd", "pw_t_sig": "s
            "pw_p_n": "n", "pw_p_p2": "p2"}
 _ETA = {"conf_low": 1e-8}
 LOOSE = {
-    **{case: {column: (0.0, 2e-4)} for case, column in _SOLVED.items()},
+    **{name: {column: (0.0, 2e-4)} for name, column in _SOLVED.items()},
     "k1_asymp": {"p_value": (0.0, 5e-5)},
     "k2_sex": {"p_value": (0.0, 5e-5)},
     "d_paired": {"conf_low": 1e-3, "conf_high": 1e-3},
@@ -126,76 +114,104 @@ LOOSE = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(CASES))
-def test_matches_r(case):
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_matches_r(name, backend):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        result = CASES[case]()
-    assert_matches_r(result, _oracle("stats_tier2")[case], loose=LOOSE.get(case))
+        result = run_case(CASES[name], backend)
+    assert_matches_r(result, _oracle("stats_tier2")[name], loose=LOOSE.get(name))
 
 
-# behaviour -------------------------------------------------------------------
+@pytest.mark.parametrize("name", sorted(POWER))
+def test_power_matches_r(name):
+    assert_matches_r(POWER[name](), _oracle("stats_tier2")[name], loose=LOOSE.get(name))
+
+
+ADJUST = {f"pa_{m}": (m, None) for m in METHODS} | {"pa_hommel_n": ("hommel", 12), "pa_BH_n": ("BH", 12)}
+
+
+@pytest.mark.parametrize("name", sorted(ADJUST))
+def test_p_adjust_matches_r(name):
+    method, n = ADJUST[name]
+    frame = pl.DataFrame({"p": PVALUES}).select(adj=p_adjust("p", method, n=n))
+    assert_matches_r(frame, _oracle("stats_tier2")[name])
+
+
+# p_adjust on values and columns -------------------------------------------------
+
+
+def test_p_adjust_returns_the_type_it_is_given():
+    want = adjust_p(np.array([np.nan if v is None else v for v in PVALUES]), "BH")
+    as_array = p_adjust(np.array(PVALUES, dtype=float), "BH")
+    assert isinstance(as_array, np.ndarray)
+    np.testing.assert_allclose(as_array, want, equal_nan=True)
+    np.testing.assert_allclose(p_adjust(PVALUES, "BH"), want, equal_nan=True)
+    series = p_adjust(pl.Series("p", PVALUES), "BH")
+    assert isinstance(series, pl.Series) and series.null_count() == 1
+    assert isinstance(p_adjust("p", "BH"), pl.Expr)
+
+
+def test_p_adjust_keeps_a_pandas_series_index():
+    pd = pytest.importorskip("pandas")
+    want = adjust_p(np.array([np.nan if v is None else v for v in PVALUES]), "BH")
+    indexed = pd.Series(PVALUES, index=list("abcdefghi"), name="p", dtype=float)
+    out = p_adjust(indexed, "BH")
+    assert isinstance(out, pd.Series) and list(out.index) == list("abcdefghi")
+    np.testing.assert_allclose(out.to_numpy(), want, equal_nan=True)
 
 
 def test_p_adjust_adjusts_each_group_on_its_own():
-    tests = _p() >> group_by("species", "island") >> t_test("body_mass_g ~ sex")
-    grouped = (tests >> group_by("species") >> mutate(adj=p_adjust("p_value", "BH"))).collect()
+    tests = t_test(P(), "body_mass_g ~ sex", by=["species", "island"])
+    grouped = tests.with_columns(adj=p_adjust("p_value", "BH").over("species"))
     for species in ("Adelie", "Chinstrap", "Gentoo"):
-        alone = (tests >> filter(col("species") == species) >> mutate(adj=p_adjust("p_value", "BH"))).collect()
-        assert grouped.filter(pl.col("species") == species)["adj"].to_list() == alone["adj"].to_list()
-
-
-def test_p_adjust_methods_match_on_numpy_and_in_mutate():
-    from stats3.effects import adjust_p
-    import numpy as np
-
-    values = np.array([np.nan if v is None else v for v in PVALUES])
-    for method in ("holm", "hochberg", "hommel", "bonferroni", "BH", "BY"):
-        got = _adjust(method).collect()["adj"].to_list()
-        want = [None if math.isnan(v) else v for v in adjust_p(values, method)]
-        assert got == want, method
+        part = grouped.filter(pl.col("species") == species)
+        assert part["adj"].to_list() == pytest.approx(
+            list(adjust_p(part["p_value"].to_numpy(), "BH"))
+        )
 
 
 def test_power_round_trips():
-    n = power_t_test(power=0.9, delta=1).collect()["n"][0]
-    assert power_t_test(n=n, delta=1).collect()["power"][0] == pytest.approx(0.9, abs=1e-10)
-    n = power_prop_test(p1=0.5, p2=0.75, power=0.9).collect()["n"][0]
-    assert power_prop_test(n=n, p1=0.5, p2=0.75).collect()["power"][0] == pytest.approx(0.9, abs=1e-10)
+    n = power_t_test(power=0.9, delta=1)["n"][0]
+    assert power_t_test(n=n, delta=1)["power"][0] == pytest.approx(0.9, abs=1e-10)
+    n = power_prop_test(p1=0.5, p2=0.75, power=0.9)["n"][0]
+    assert power_prop_test(n=n, p1=0.5, p2=0.75)["power"][0] == pytest.approx(0.9, abs=1e-10)
+
+
+def test_power_as_pandas():
+    pytest.importorskip("pandas")
+    frame = power_t_test(n=20, delta=1, as_="pandas")
+    assert type(frame).__module__.startswith("pandas")
+    assert frame["power"].iloc[0] == pytest.approx(0.8689528, rel=1e-6)
 
 
 # scipy reference (runs without R) ---------------------------------------------
 
 
-def _column(name, where=None):
-    frame = pl.read_csv(PENGUINS_CSV, null_values="NA")
-    if where is not None:
-        frame = frame.filter(where)
-    return frame[name].drop_nulls().cast(pl.Float64).to_numpy()
-
-
 def _by_species(name):
-    return [_column(name, pl.col("species") == s) for s in ("Adelie", "Chinstrap", "Gentoo")]
+    frame = P().drop_nulls(name)
+    return [frame.filter(pl.col("species") == s)[name].cast(pl.Float64).to_numpy()
+            for s in ("Adelie", "Chinstrap", "Gentoo")]
 
 
 def test_checks_match_scipy():
-    row = (_p() >> shapiro_test("body_mass_g")).collect().row(0, named=True)
-    ref = scipy_stats.shapiro(_column("body_mass_g"))
+    row = shapiro_test(P(), "body_mass_g").row(0, named=True)
+    ref = scipy_stats.shapiro(P()["body_mass_g"].drop_nulls().cast(pl.Float64).to_numpy())
     assert (row["statistic"], row["p_value"]) == pytest.approx((ref.statistic, ref.pvalue), rel=1e-10)
-    row = (_p() >> bartlett_test("body_mass_g ~ species")).collect().row(0, named=True)
+    row = bartlett_test(P(), "body_mass_g ~ species").row(0, named=True)
     ref = scipy_stats.bartlett(*_by_species("body_mass_g"))
     assert (row["statistic"], row["p_value"]) == pytest.approx((ref.statistic, ref.pvalue), rel=1e-10)
-    row = (_p() >> levene_test("body_mass_g ~ species")).collect().row(0, named=True)
+    row = levene_test(P(), "body_mass_g ~ species").row(0, named=True)
     ref = scipy_stats.levene(*_by_species("body_mass_g"), center="median")
     assert (row["statistic"], row["p_value"]) == pytest.approx((ref.statistic, ref.pvalue), rel=1e-10)
 
 
 def test_ks_matches_scipy_without_ties():
-    s = pl.read_csv(RANKS_CSV)
-    a, b = s["a"].to_numpy(), s["b"].to_numpy()
-    row = (_s() >> ks_test("a", "pnorm")).collect().row(0, named=True)
+    a, b = S()["a"].to_numpy(), S()["b"].to_numpy()
+    row = ks_test(S(), "a", "pnorm").row(0, named=True)
     ref = scipy_stats.kstest(a, "norm", method="exact")
     assert (row["statistic"], row["p_value"]) == pytest.approx((ref.statistic, ref.pvalue), rel=1e-10)
-    row = (_s() >> ks_test("a", "b")).collect().row(0, named=True)
+    row = ks_test(S(), "a", "b").row(0, named=True)
     ref = scipy_stats.ks_2samp(a, b, method="exact")
     assert (row["statistic"], row["p_value"]) == pytest.approx((ref.statistic, ref.pvalue), rel=1e-9)
 
@@ -205,9 +221,9 @@ def test_ks_matches_scipy_without_ties():
 
 def test_ties_warn_as_r_does():
     with pytest.warns(UserWarning, match="ties should not be present"):
-        _p() >> ks_test("flipper_length_mm", "pnorm", mean=200, sd=14)
+        ks_test(P(), "flipper_length_mm", "pnorm", mean=200, sd=14)
     with pytest.warns(UserWarning, match="approximate in the presence of ties"):
-        _p() >> ks_test("body_mass_g ~ sex")
+        ks_test(P(), "body_mass_g ~ sex")
 
 
 @pytest.mark.parametrize(
@@ -224,7 +240,7 @@ def test_ties_warn_as_r_does():
 )
 def test_errors_follow_r(frame, call, message):
     with pytest.raises(ValueError, match=message):
-        tidy(frame) >> call()
+        pl.DataFrame(frame) >> call()
 
 
 @pytest.mark.parametrize(

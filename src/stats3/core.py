@@ -16,15 +16,15 @@ in ``checks``, and p-value adjustment, effect sizes and power in
 from __future__ import annotations
 
 import math
+import os
+import sys
+import warnings
 from typing import Any
 
 import numpy as np
 import polars as pl
 
-from tidy3.expr import Expr
-from tidy3.groups import _levels
-from tidy3.tidyselect import resolve_selection
-from tidy3.verbs import Verb, _factor_rank
+from stats3._data import Step, step
 
 _ALTERNATIVES = {
     "two.sided": "two.sided",
@@ -40,6 +40,15 @@ def _special() -> Any:
     import scipy.special
 
     return scipy.special
+
+
+def _warn(message: str) -> None:
+    """Warn as R does, pointing at the caller's line rather than at stats3."""
+    root = os.path.dirname(os.path.abspath(__file__))
+    frame, level = sys._getframe(1), 2
+    while frame is not None and os.path.abspath(frame.f_code.co_filename).startswith(root):
+        frame, level = frame.f_back, level + 1
+    warnings.warn(message, UserWarning, stacklevel=level)
 
 
 def _alternative(value: str) -> str:
@@ -67,12 +76,16 @@ def _is_formula(value: Any) -> bool:
 
 
 def _column(tf: Any, spec: Any, role: str, verb: str = "t_test") -> str:
-    if isinstance(spec, Expr) and spec.node[0] in {"col", "name"}:
-        spec = spec.node[1]
-    names = resolve_selection(tf, [spec])
-    if len(names) != 1:
-        raise ValueError(f"{verb}(): {role} must name one column, got {names}")
-    return names[0]
+    return tf.column(spec, role, verb)
+
+
+def _factor_rank(name: str, levels: Any) -> pl.Expr:
+    """Sort key for a factor: level index, unknown values and missing last."""
+    return pl.col(name).replace_strict(
+        {value: index for index, value in enumerate(levels)},
+        default=None,
+        return_dtype=pl.Int64,
+    )
 
 
 def _parse_formula(
@@ -133,13 +146,13 @@ def _sorted_keys(tf: Any, frame: pl.DataFrame, groups: list[str]) -> pl.DataFram
         return frame
     keys = []
     for name in groups:
-        levels = _levels(tf, name)
+        levels = tf.levels_of(name)
         keys.append(_factor_rank(name, levels) if levels is not None else pl.col(name))
     return frame.sort(keys, nulls_last=True, maintain_order=True)
 
 
 def _level_rank(tf: Any, by: str) -> pl.Expr:
-    levels = _levels(tf, by)
+    levels = tf.levels_of(by)
     return _factor_rank(by, levels) if levels is not None else pl.col(by)
 
 
@@ -182,8 +195,8 @@ def _by_levels(
     return _sorted_keys(tf, stacked, groups)
 
 
-def _finish(tf: Any, table: pl.DataFrame, groups: list[str], columns: dict[str, Any]) -> Any:
-    """The result: group keys, then the test's columns; ungrouped."""
+def _finish(tf: Any, table: pl.DataFrame, groups: list[str], columns: dict[str, Any]) -> pl.DataFrame:
+    """The result: group keys, then the test's columns."""
     data = {g: table[g] for g in groups}
     for name, values in columns.items():
         if isinstance(values, pl.Series):
@@ -192,8 +205,7 @@ def _finish(tf: Any, table: pl.DataFrame, groups: list[str], columns: dict[str, 
             data[name] = [values] * table.height
         else:
             data[name] = values
-    result = pl.DataFrame(data) if data else pl.DataFrame()
-    return tf._with_lf(result.lazy(), groups=None, rowwise=False)
+    return pl.DataFrame(data) if data else pl.DataFrame()
 
 
 def _p_normal(z: np.ndarray, alternative: str) -> np.ndarray:
@@ -205,6 +217,7 @@ def _p_normal(z: np.ndarray, alternative: str) -> np.ndarray:
     return 2 * special.ndtr(-np.abs(z))
 
 
+@step
 def t_test(
     x: Any,
     y: Any = None,
@@ -214,7 +227,7 @@ def t_test(
     var_equal: bool = False,
     alternative: str = "two.sided",
     conf_level: float = 0.95,
-) -> Verb:
+) -> Step:
     """Student's and Welch's t-tests, as R's ``t.test``, one row per group.
 
     ``x`` is a formula or a column:
@@ -272,7 +285,7 @@ def t_test(
         )
         return _finish(tf, table, groups, columns)
 
-    return Verb(_apply, "t_test")
+    return Step(_apply, "t_test")
 
 
 def _one_sample(lf: pl.LazyFrame, groups: list[str], name: str) -> pl.DataFrame:
@@ -415,7 +428,8 @@ def _within(n: np.ndarray, v: np.ndarray) -> float:
     return float(np.sum(np.where(n > 1, (n - 1) * np.nan_to_num(v), 0.0)))
 
 
-def aov(formula: str) -> Verb:
+@step
+def aov(formula: str) -> Step:
     """One-way analysis of variance, as ``tidy(aov(y ~ g))`` in R.
 
     ``penguins >> aov("body_mass_g ~ species")`` gives the ANOVA table: one row
@@ -457,10 +471,11 @@ def aov(formula: str) -> Verb:
         }
         return _finish(tf, keys, groups, columns)
 
-    return Verb(_apply, "aov")
+    return Step(_apply, "aov")
 
 
-def tukey_hsd(formula: str, *, conf_level: float = 0.95) -> Verb:
+@step
+def tukey_hsd(formula: str, *, conf_level: float = 0.95) -> Step:
     """Tukey's honest significant differences, as ``tidy(TukeyHSD(aov(y ~ g)))``.
 
     One row per pair of levels, in R's order (``"b-a"``, ``"c-a"``, ``"c-b"``):
@@ -512,4 +527,4 @@ def tukey_hsd(formula: str, *, conf_level: float = 0.95) -> Verb:
         }
         return _finish(tf, keys, groups, columns)
 
-    return Verb(_apply, "tukey_hsd")
+    return Step(_apply, "tukey_hsd")

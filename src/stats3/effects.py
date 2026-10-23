@@ -1,7 +1,8 @@
 """Multiple-testing adjustment, effect sizes and power.
 
-``p_adjust`` is R's ``p.adjust`` as a column expression for ``mutate`` (by
-group after ``group_by``). ``cohens_d``, ``hedges_g`` and ``eta_squared``
+``p_adjust`` is R's ``p.adjust``: on a vector it returns a vector, and on a
+column name it returns a Polars expression for ``with_columns`` or tidy3's
+``mutate`` (by group after ``group_by``). ``cohens_d``, ``hedges_g`` and ``eta_squared``
 follow the effectsize package's definitions and its noncentral-t and
 noncentral-F intervals. ``power_t_test`` and ``power_prop_test`` are R's
 ``power.t.test`` and ``power.prop.test``.
@@ -15,8 +16,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from tidy3.expr import Expr, to_polars
-from tidy3.verbs import Verb
+from stats3._data import OUTPUTS, Data, Step, _is_pandas_series, expression, step
 from stats3.core import (
     _by_levels,
     _check_conf_level,
@@ -39,36 +39,36 @@ P_ADJUST_METHODS = ("holm", "hochberg", "hommel", "bonferroni", "BH", "BY", "fdr
 # p_adjust ------------------------------------------------------------------------
 
 
-def p_adjust(p: Any, method: str = "holm", n: int | None = None) -> pl.Expr:
+def p_adjust(p: Any, method: str = "holm", n: int | None = None) -> Any:
     """Adjust p-values for multiple comparisons, as R's ``p.adjust``.
 
-    Use it in ``mutate``: ``tests >> mutate(p_adj=p_adjust(p_value, "BH"))``.
-    After ``group_by`` each group is adjusted on its own. ``method`` is one of
-    ``"holm"`` (R's default), ``"hochberg"``, ``"hommel"``, ``"bonferroni"``,
-    ``"BH"`` (or ``"fdr"``), ``"BY"``, ``"none"``. ``n`` defaults to the number
-    of non-missing p-values; missing values stay missing.
+    On values (a list, NumPy array, or pandas or Polars Series) it returns
+    the adjusted values in the same type. On a column (a name or expression)
+    it returns a Polars expression, for ``df.with_columns(p_adj=p_adjust(
+    "p_value", "BH"))`` or tidy3's ``mutate``, where each group is adjusted on
+    its own after ``group_by``. ``method`` is one of ``"holm"`` (R's default),
+    ``"hochberg"``, ``"hommel"``, ``"bonferroni"``, ``"BH"`` (or ``"fdr"``),
+    ``"BY"``, ``"none"``. ``n`` defaults to the number of non-missing
+    p-values; missing values stay missing.
     """
     if method not in P_ADJUST_METHODS:
         raise ValueError(f"p_adjust(): method must be one of {list(P_ADJUST_METHODS)}, got {method!r}")
     if n is not None and (not isinstance(n, int) or isinstance(n, bool) or n < 1):
         raise ValueError(f"p_adjust(): n must be a positive integer, got {n!r}")
+    if isinstance(p, pl.Series):
+        return _adjust_series(p, method, n)
+    if _is_pandas_series(p):
+        values = adjust_p(p.to_numpy(dtype=float, na_value=np.nan), method, n)
+        return type(p)(values, index=p.index, name=p.name)
+    if isinstance(p, (list, tuple, np.ndarray)):
+        return adjust_p(np.array([np.nan if v is None else v for v in p], dtype=float), method, n)
+    # A Polars expression: tidy3's mutate runs it per group with over().
+    return expression(p).map_batches(lambda s: _adjust_series(s, method, n), return_dtype=pl.Float64)
 
-    def adjust(series: pl.Series) -> pl.Series:
-        values = series.cast(pl.Float64).to_numpy().astype(float)
-        return pl.Series(series.name, adjust_p(values, method, n), dtype=pl.Float64).fill_nan(None)
 
-    # A plain Polars expression: tidy3's mutate runs it per group with over().
-    return _polars(p).map_batches(adjust, return_dtype=pl.Float64)
-
-
-def _polars(value: Any) -> pl.Expr:
-    if isinstance(value, pl.Expr):
-        return value
-    if isinstance(value, str):  # a name, including a bare notebook name
-        return pl.col(str(value))
-    if isinstance(value, Expr):
-        return to_polars(value)
-    raise TypeError(f"p_adjust(): p must be a column name or expression, got {value!r}")
+def _adjust_series(series: pl.Series, method: str, n: int | None) -> pl.Series:
+    values = series.cast(pl.Float64).to_numpy().astype(float)
+    return pl.Series(series.name, adjust_p(values, method, n), dtype=pl.Float64).fill_nan(None)
 
 
 def adjust_p(p: np.ndarray, method: str, n: int | None = None) -> np.ndarray:
@@ -168,7 +168,7 @@ def _hedges_j(df: np.ndarray) -> np.ndarray:
 def _d_family(
     x: Any, y: Any, mu: float, paired: bool, pooled_sd: bool, conf_level: float,
     verb: str, hedges: bool,
-) -> Verb:
+) -> Step:
     _check_mu(mu)
     _check_conf_level(conf_level)
     formula = _is_formula(x)
@@ -246,13 +246,14 @@ def _d_family(
             "estimate": np.array(estimate), "conf_low": np.array(low), "conf_high": np.array(high),
         })
 
-    return Verb(_apply, verb)
+    return Step(_apply, verb)
 
 
+@step
 def cohens_d(
     x: Any, y: Any = None, *, mu: float = 0.0, paired: bool = False,
     pooled_sd: bool = True, conf_level: float = 0.95,
-) -> Verb:
+) -> Step:
     """Cohen's d, as effectsize's ``cohens_d``, with its noncentral-t interval.
 
     ``cohens_d("body_mass_g ~ sex")`` (first level minus second, divided by
@@ -264,16 +265,18 @@ def cohens_d(
     return _d_family(x, y, mu, paired, pooled_sd, conf_level, "cohens_d", hedges=False)
 
 
+@step
 def hedges_g(
     x: Any, y: Any = None, *, mu: float = 0.0, paired: bool = False,
     pooled_sd: bool = True, conf_level: float = 0.95,
-) -> Verb:
+) -> Step:
     """Hedges' g: Cohen's d with the exact small-sample correction, as
     effectsize's ``hedges_g``. Arguments and columns as ``cohens_d``."""
     return _d_family(x, y, mu, paired, pooled_sd, conf_level, "hedges_g", hedges=True)
 
 
-def eta_squared(formula: str, *, conf_level: float = 0.95) -> Verb:
+@step
+def eta_squared(formula: str, *, conf_level: float = 0.95) -> Step:
     """Eta squared for a one-way ANOVA, as effectsize's ``eta_squared``.
 
     The share of the response's variance between the levels. The interval is
@@ -320,7 +323,7 @@ def eta_squared(formula: str, *, conf_level: float = 0.95) -> Verb:
             "conf_high": np.ones(len(low)),
         })
 
-    return Verb(_apply, "eta_squared")
+    return Step(_apply, "eta_squared")
 
 
 # power -------------------------------------------------------------------------------
@@ -343,6 +346,12 @@ def _solve(f: Any, low: float, high: float, extend: str) -> float:
     raise ValueError("no solution found in the search range")
 
 
+def _one_row(as_: str, columns: dict[str, list[Any]]) -> Any:
+    if as_ not in OUTPUTS:
+        raise ValueError(f"as_ must be one of {OUTPUTS}, got {as_!r}")
+    return Data(pl.LazyFrame(), [], {}, as_).write(pl.DataFrame(columns))
+
+
 def _one_null(**values: Any) -> str:
     missing = [k for k, v in values.items() if v is None]
     if len(missing) != 1:
@@ -360,14 +369,15 @@ def power_t_test(
     type: str = "two.sample",  # noqa: A002
     alternative: str = "two.sided",
     strict: bool = False,
+    as_: str = "polars",
 ) -> Any:
     """Power of a t-test, or the value of whichever argument is None that
-    reaches the given power, as R's ``power.t.test``. Returns a one-row frame.
+    reaches the given power, as R's ``power.t.test``. Returns a one-row
+    frame: Polars, or ``as_="pandas"`` / ``"tidy3"``.
 
     ``n`` is per group for two samples and the number of pairs for paired.
     """
     from scipy.stats import nct, t as t_dist
-    from tidy3.frame import tidy
 
     missing = _one_null(n=n, delta=delta, sd=sd, power=power, sig_level=sig_level)
     if type not in ("two.sample", "one.sample", "paired"):
@@ -404,7 +414,7 @@ def power_t_test(
         else:
             values["sig_level"] = _solve(f, 1e-10, 1 - 1e-10, "both")
     method = {"one.sample": "One-sample", "two.sample": "Two-sample", "paired": "Paired"}[type]
-    return tidy({
+    return _one_row(as_, {
         **{k: [float(v)] for k, v in values.items()},
         "power": [float(power)],
         "alternative": [alternative],
@@ -421,11 +431,12 @@ def power_prop_test(
     *,
     alternative: str = "two.sided",
     strict: bool = False,
+    as_: str = "polars",
 ) -> Any:
     """Power of a two-sample test of proportions, or the value of whichever
     argument is None that reaches the given power, as R's
-    ``power.prop.test``. ``n`` is per group. Returns a one-row frame."""
-    from tidy3.frame import tidy
+    ``power.prop.test``. ``n`` is per group. Returns a one-row frame:
+    Polars, or ``as_="pandas"`` / ``"tidy3"``."""
 
     special = _special()
     missing = _one_null(n=n, p1=p1, p2=p2, power=power, sig_level=sig_level)
@@ -462,7 +473,7 @@ def power_prop_test(
             values["p2"] = _solve(f, p1, 1 - 1e-12, "both")
         else:
             values["sig_level"] = _solve(f, 1e-10, 1 - 1e-10, "up")
-    return tidy({
+    return _one_row(as_, {
         **{k: [float(v)] for k, v in values.items()},
         "power": [float(power)],
         "alternative": [alternative],

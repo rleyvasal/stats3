@@ -17,7 +17,6 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from tidy3 import col, mutate, tidy
 
 ROOT = Path(__file__).resolve().parents[1]
 R_CASES = ROOT / "tests" / "r_oracle_cases.R"
@@ -26,18 +25,56 @@ PENGUINS = DATA / "penguins.csv"
 RANKS = DATA / "ranks.csv"
 
 
-def penguins():
-    return tidy(pl.read_csv(PENGUINS, null_values="NA"))
-
-
-def penguins_flags():
-    return penguins() >> mutate(
-        dream=col("island") == "Dream", first_year=col("year") == 2007
+def penguins() -> pl.DataFrame:
+    """R's penguins, with two logical columns for the 2 x 2 tables."""
+    return pl.read_csv(PENGUINS, null_values="NA").with_columns(
+        dream=pl.col("island") == "Dream", first_year=pl.col("year") == 2007
     )
 
 
-def ranks():
-    return tidy(pl.read_csv(RANKS))
+def ranks() -> pl.DataFrame:
+    """Small tie-free data for the exact rank tests."""
+    return pl.read_csv(RANKS)
+
+
+# Every R case runs on each kind of input stats3 reads.
+BACKENDS = ("polars", "lazy", "pandas", "tidy3")
+
+
+def case(data, make, *by):
+    """An R oracle case: Polars data, a function making the stats3 step,
+    and the grouping columns."""
+    return (data, make, list(by))
+
+
+def as_input(frame: pl.DataFrame, backend: str, by: list[str]):
+    """``frame`` as ``backend``'s frame, and the ``by=`` to pass with it."""
+    if backend == "polars":
+        return frame, by or None
+    if backend == "lazy":
+        return frame.lazy(), by or None
+    if backend == "pandas":
+        pytest.importorskip("pandas")
+        pytest.importorskip("pyarrow")
+        return frame.to_pandas(), by or None
+    if backend == "tidy3":
+        tidy3 = pytest.importorskip("tidy3")
+        data = tidy3.tidy(frame)
+        return (data >> tidy3.group_by(*by) if by else data), None
+    raise ValueError(backend)
+
+
+def run_case(spec, backend: str):
+    """Run one case on one backend; check the result is that backend's type."""
+    data, make, by = spec
+    frame, by_arg = as_input(data(), backend, by)
+    step = make()
+    step.by = by_arg
+    result = frame >> step
+    expected = {"polars": "DataFrame", "lazy": "LazyFrame", "pandas": "DataFrame", "tidy3": "TidyFrame"}
+    assert type(result).__name__ == expected[backend], type(result)
+    assert type(result).__module__.split(".")[0] == {"lazy": "polars"}.get(backend, backend)
+    return result
 
 
 def _r_command() -> list[str] | None:
@@ -69,8 +106,19 @@ def _oracle(case: str) -> dict:
     return json.loads(completed.stdout)
 
 
+def as_polars(result) -> pl.DataFrame:
+    """Any result (Polars, Polars lazy, pandas, tidy3) as a Polars DataFrame."""
+    if isinstance(result, pl.DataFrame):
+        return result
+    if isinstance(result, pl.LazyFrame):
+        return result.collect()
+    if type(result).__module__.startswith("pandas"):
+        return pl.from_pandas(result)
+    return result.collect()
+
+
 def _columns(result) -> dict[str, list]:
-    frame = result.collect()
+    frame = as_polars(result)
     # jsonlite writes infinite interval bounds as null.
     return {
         name: [None if isinstance(v, float) and math.isinf(v) else v for v in frame[name]]

@@ -1,29 +1,29 @@
 # stats3
 
-**R's statistical tests on Polars, as [tidy3](https://github.com/rleyvasal/tidy3) pipe steps.**
+**R's statistical tests on Polars, for Polars, pandas and tidy3 data.**
 Write a test the way R users do, run it once per group, and get R's numbers
-back as a table you can keep piping.
+back as a table in the same kind of frame you passed in.
 
 ```bash
-pip install stats3
+pip install stats3              # Polars data
+pip install "stats3[pandas]"    # pandas data too
 ```
 
-stats3 is the statistics half of tidy3: tidy3 wrangles the data, stats3 tests
-it. Every test takes R's arguments and defaults, drops missing values as R
-does, raises R's errors and warnings, and is checked against R 4.6.
+Every test takes R's arguments and defaults, drops missing values as R does,
+raises R's errors and warnings, and is checked against R 4.6.
 
 ## One test per group
 
 ```python
-from tidy3 import *
+import polars as pl
 from stats3 import *
 
-penguins = scan_csv(
+penguins = pl.read_csv(
     "https://raw.githubusercontent.com/allisonhorst/palmerpenguins/main/inst/extdata/penguins.csv",
     null_values="NA",
-) >> compute()
+)
 
-penguins >> group_by(species) >> t_test("body_mass_g ~ sex")
+t_test(penguins, "body_mass_g ~ sex", by="species")
 ```
 
 ```text
@@ -39,32 +39,57 @@ penguins >> group_by(species) >> t_test("body_mass_g ~ sex")
 ```
 
 (The table also has `estimate1`, `estimate2`, `method` and `alternative`.)
-The result is an ordinary tidy3 frame, so the next step can adjust the
-p-values within each group:
+`by=` is dplyr's `.by`: one test per group, one row per test, groups in order.
+
+## Any frame in, the same frame out
+
+| You pass | Groups | You get back |
+|---|---|---|
+| Polars `DataFrame` / `LazyFrame` | `by=` | Polars `DataFrame` / `LazyFrame` |
+| pandas `DataFrame` | `by=` | pandas `DataFrame` |
+| tidy3 frame | `group_by()` | tidy3 frame |
+| dict of columns | `by=` | Polars `DataFrame` |
+
+`as_="polars"`, `"pandas"` or `"tidy3"` asks for another type. Factor levels
+come from the data: pandas `category` and Polars `Enum` columns order the
+levels of `y ~ g` (the first level is `estimate1`) and of the groups.
+
+Each test can be called with the data first, or piped:
 
 ```python
-penguins
+t_test(penguins, "body_mass_g ~ sex", by="species")       # data first
+penguins >> t_test("body_mass_g ~ sex", by="species")     # pipe
+penguins_pd.pipe(t_test("body_mass_g ~ sex", by="species"))  # pandas .pipe
+```
+
+With [tidy3](https://github.com/rleyvasal/tidy3) the tests are pipe steps
+like any verb, and its groups and factor levels carry through:
+
+```python
+from tidy3 import *
+
+tidy(penguins)
 >> group_by(species, island)
->> wilcox_test("body_mass_g ~ sex")
+>> wilcox_test(body_mass_g ~ sex)
+>> group_by(species)
 >> mutate(p_adj = p_adjust(p_value, "BH"))
 ```
 
-ANOVA and Tukey's comparisons read the same way:
+## In a notebook: R's shorthand
+
+In Jupyter or IPython, after `from stats3 import *` (or `%load_ext
+stats3.jupyter`), from the next cell on formulas need no quotes and columns
+are bare names, inside stats3's calls:
 
 ```python
-penguins >> aov("body_mass_g ~ species")
-penguins >> tukey_hsd("body_mass_g ~ species")
+penguins >> t_test(body_mass_g ~ sex, by=species)
+penguins >> binom_test(sex == "male")
+cor_test(penguins, bill_length_mm, bill_depth_mm, method="kendall")
 ```
 
-```text
-┌─────────┬──────────────────┬─────────────┬─────────────┬─────────────┬─────────────┐
-│ term    ┆ contrast         ┆ estimate    ┆ conf_low    ┆ conf_high   ┆ adj_p_value │
-╞═════════╪══════════════════╪═════════════╪═════════════╪═════════════╪═════════════╡
-│ species ┆ Chinstrap-Adelie ┆ 32.425984   ┆ -126.500196 ┆ 191.352163  ┆ 0.880667    │
-│ species ┆ Gentoo-Adelie    ┆ 1375.354009 ┆ 1243.178628 ┆ 1507.529389 ┆ 1.4433e-14  │
-│ species ┆ Gentoo-Chinstrap ┆ 1342.928025 ┆ 1178.481013 ┆ 1507.375037 ┆ 1.4433e-14  │
-└─────────┴──────────────────┴─────────────┴─────────────┴─────────────┴─────────────┘
-```
+A name the notebook defines keeps its value; any other bare name in a stats3
+call is a column. With tidy3 loaded the two packages share the shorthand. In
+a `.py` script write `"body_mass_g ~ sex"` and `pl.col("sex") == "male"`.
 
 ## What's in it
 
@@ -80,7 +105,7 @@ penguins >> tukey_hsd("body_mass_g ~ species")
 | `prop.test`, `binom.test` | `prop_test(x, n)`, `binom_test(sex == "male")` |
 | `shapiro.test`, `ks.test` | `shapiro_test(x)`, `ks_test(x, "pnorm", mean=, sd=)`, `ks_test(x, y)` |
 | `bartlett.test`, `var.test`, `car::leveneTest` | `bartlett_test`, `var_test`, `levene_test` |
-| `p.adjust` | `p_adjust(p_value, "BH")` inside `mutate` |
+| `p.adjust` | `p_adjust(p, "BH")`: on a vector or Series, or a column in `with_columns` / `mutate` |
 | effectsize | `cohens_d`, `hedges_g`, `eta_squared` |
 | `power.t.test`, `power.prop.test` | `power_t_test`, `power_prop_test` |
 
@@ -90,17 +115,19 @@ Models (`lm`, `glm`) are next.
 
 Most tests need only a few numbers per group: counts, means, variances,
 rank sums, cross-tabulated counts. Polars computes them for every group in
-one lazy query, and scipy's distribution functions turn them into p-values
-for all groups at once. Over 1,000 groups of 1,000 rows most tests run 4-30 times
-faster than calling scipy once per group. Tests that need every value
-(Shapiro-Wilk, Kendall's tau) run per group.
+one lazy query, and SciPy's distribution functions (Polars has none) turn
+them into p-values for all groups at once. Over 1,000 groups of 1,000 rows
+most tests run 4-30 times faster than calling SciPy once per group. Tests
+that need every value (Shapiro-Wilk, Kendall's tau) run per group. stats3
+needs only Polars and SciPy.
 
 `tests/r_oracle_cases.R` runs the same tests in R; `pytest` compares every
-column, to 1e-9 relative. Where R's own numerics are approximate (Tukey's
-distribution, intervals found with `uniroot`, the noncentral t above ncp
-37.62, the asymptotic Kolmogorov series), stats3 computes to full precision
-and the test compares at R's accuracy, with the reason written next to the
-tolerance. Without R, the scipy comparisons still run.
+column, to 1e-9 relative, on Polars, lazy Polars, pandas and tidy3 input.
+Where R's own numerics are approximate (Tukey's distribution, intervals
+found with `uniroot`, the noncentral t above ncp 37.62, the asymptotic
+Kolmogorov series), stats3 computes to full precision and the test compares
+at R's accuracy, with the reason written next to the tolerance. Without R,
+the SciPy comparisons still run.
 
 ```bash
 pip install -e ".[dev]"

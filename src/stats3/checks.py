@@ -11,14 +11,14 @@ R 4.6, by counting lattice paths here.
 from __future__ import annotations
 
 import math
-import warnings
 from typing import Any, Callable
 
 import numpy as np
 import polars as pl
 
-from tidy3.verbs import Verb
+from stats3._data import Step, column_name, expression, step
 from stats3.core import (
+    _warn,
     _alternative,
     _by_levels,
     _check_conf_level,
@@ -54,7 +54,8 @@ def _group_values(
 # shapiro_test ------------------------------------------------------------------
 
 
-def shapiro_test(x: Any) -> Verb:
+@step
+def shapiro_test(x: Any) -> Step:
     """Shapiro-Wilk normality test, as R's ``shapiro.test``, one row per group.
 
     Missing values are dropped; each group needs 3 to 5000 values that are not
@@ -86,13 +87,14 @@ def shapiro_test(x: Any) -> Verb:
             "method": "Shapiro-Wilk normality test",
         })
 
-    return Verb(_apply, "shapiro_test")
+    return Step(_apply, "shapiro_test")
 
 
 # variance tests --------------------------------------------------------------------
 
 
-def bartlett_test(formula: str) -> Verb:
+@step
+def bartlett_test(formula: str) -> Step:
     """Bartlett's test of equal variances, as R's ``bartlett.test(y ~ g)``.
 
     Columns: ``statistic`` (Bartlett's K-squared), ``df``, ``p_value``,
@@ -130,10 +132,11 @@ def bartlett_test(formula: str) -> Verb:
             "method": "Bartlett test of homogeneity of variances",
         })
 
-    return Verb(_apply, "bartlett_test")
+    return Step(_apply, "bartlett_test")
 
 
-def levene_test(formula: str, *, center: str = "median") -> Verb:
+@step
+def levene_test(formula: str, *, center: str = "median") -> Step:
     """Levene's test of equal variances, as car's ``leveneTest(y ~ g)``.
 
     A one-way ANOVA on absolute deviations from each level's median (the
@@ -173,9 +176,10 @@ def levene_test(formula: str, *, center: str = "median") -> Verb:
             "method": f"Levene's Test for Homogeneity of Variance (center = {center})",
         })
 
-    return Verb(_apply, "levene_test")
+    return Step(_apply, "levene_test")
 
 
+@step
 def var_test(
     x: Any,
     y: Any = None,
@@ -183,7 +187,7 @@ def var_test(
     ratio: float = 1.0,
     alternative: str = "two.sided",
     conf_level: float = 0.95,
-) -> Verb:
+) -> Step:
     """F test comparing two variances, as R's ``var.test``.
 
     ``var_test("body_mass_g ~ sex")`` or ``var_test(x, y)``. Columns:
@@ -246,7 +250,7 @@ def var_test(
             "method": "F test to compare two variances", "alternative": alternative,
         })
 
-    return Verb(_apply, "var_test")
+    return Step(_apply, "var_test")
 
 
 # ks_test -------------------------------------------------------------------------
@@ -329,6 +333,7 @@ def _kolmogorov_upper(stat: float, n: int, two_sided: bool, exact: bool) -> floa
     return float(math.exp(-2 * n * stat * stat))
 
 
+@step
 def ks_test(
     x: Any,
     y: Any = "pnorm",
@@ -336,7 +341,7 @@ def ks_test(
     alternative: str = "two.sided",
     exact: bool | None = None,
     **params: float,
-) -> Verb:
+) -> Step:
     """Kolmogorov-Smirnov test, as R's ``ks.test``.
 
     - ``ks_test(x, "pnorm", mean=..., sd=...)``: one sample against a
@@ -383,7 +388,7 @@ def ks_test(
             table, rows = _group_values(tf, groups, {"x": pl.col(name).cast(pl.Float64)}, _present(lf, name))
         cdf = None if (two or _is_formula(x)) else _distribution(y, params)
         if (two or _is_formula(x)) and params:
-            warnings.warn(f"Parameter(s) {', '.join(params)} ignored", stacklevel=3)
+            _warn(f"Parameter(s) {', '.join(params)} ignored")
         statistic, p_value, method = [], [], []
         for row in rows:
             if cdf is None:
@@ -398,7 +403,7 @@ def ks_test(
             "method": pl.Series(method, dtype=pl.String), "alternative": alternative,
         })
 
-    return Verb(_apply, "ks_test")
+    return Step(_apply, "ks_test")
 
 
 def _one_sample(x: np.ndarray, cdf: Any, alternative: str, exact: bool | None, label: str):
@@ -407,7 +412,7 @@ def _one_sample(x: np.ndarray, cdf: Any, alternative: str, exact: bool | None, l
         raise ValueError(f"ks_test(): not enough 'x' data{label}")
     ties = len(np.unique(x)) < n
     if ties:
-        warnings.warn("ties should not be present for the one-sample Kolmogorov-Smirnov test", stacklevel=4)
+        _warn("ties should not be present for the one-sample Kolmogorov-Smirnov test")
     use_exact = (n < 100 and not ties) if exact is None else exact
     v = cdf(np.sort(x)) - np.arange(n) / n
     d = {"two.sided": max(np.max(v), np.max(1 / n - v)),
@@ -441,7 +446,7 @@ def _two_sample(x: np.ndarray, y: np.ndarray, alternative: str, exact: bool | No
         z = z[last]
         ends[1:] = last
         if not use_exact:
-            warnings.warn("p-value will be approximate in the presence of ties", stacklevel=4)
+            _warn("p-value will be approximate in the presence of ties")
     d = float({"two.sided": np.max(np.abs(z)), "greater": np.max(z), "less": -np.min(z)}[alternative])
     if d <= 0:
         p = 1.0

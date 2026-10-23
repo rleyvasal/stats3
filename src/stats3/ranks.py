@@ -12,15 +12,15 @@ from __future__ import annotations
 
 import itertools
 import math
-import warnings
 from functools import lru_cache
 from typing import Any
 
 import numpy as np
 import polars as pl
 
-from tidy3.verbs import Verb
+from stats3._data import Step, column_name, expression, step
 from stats3.core import (
+    _warn,
     _alternative,
     _by_levels,
     _check_conf_level,
@@ -245,6 +245,7 @@ def _shift(z: float, alternative: str, level: int) -> float:
     return 0.5 if alternative == "greater" else -0.5
 
 
+@step
 def wilcox_test(
     x: Any,
     y: Any = None,
@@ -254,7 +255,7 @@ def wilcox_test(
     exact: bool | None = None,
     correct: bool | int = True,
     alternative: str = "two.sided",
-) -> Verb:
+) -> Step:
     """Wilcoxon rank sum and signed rank tests, as R 4.6's ``wilcox.test``.
 
     - ``wilcox_test("body_mass_g ~ sex")`` or ``wilcox_test(x, y)``: rank
@@ -460,7 +461,7 @@ def wilcox_test(
         table = _join_ties(table, _tie_term(stacked, groups, pl.col("__stats3_v")), groups)
         return _rank_sum(tf, groups, _sorted_keys(tf, table, groups), stacked)
 
-    return Verb(_apply, "wilcox_test")
+    return Step(_apply, "wilcox_test")
 
 
 def _scores_for(
@@ -495,7 +496,8 @@ def _scores_for(
 # kruskal_test ------------------------------------------------------------------
 
 
-def kruskal_test(formula: str) -> Verb:
+@step
+def kruskal_test(formula: str) -> Step:
     """Kruskal-Wallis rank sum test, as R's ``kruskal.test(y ~ g)``.
 
     Ranks are computed per group after dropping rows missing the response or
@@ -533,7 +535,7 @@ def kruskal_test(formula: str) -> Verb:
             "method": "Kruskal-Wallis rank sum test",
         })
 
-    return Verb(_apply, "kruskal_test")
+    return Step(_apply, "kruskal_test")
 
 
 # cor_test ----------------------------------------------------------------------
@@ -541,6 +543,7 @@ def kruskal_test(formula: str) -> Verb:
 _COR_METHODS = {"pearson", "spearman", "kendall"}
 
 
+@step
 def cor_test(
     x: Any,
     y: Any,
@@ -550,7 +553,7 @@ def cor_test(
     conf_level: float = 0.95,
     exact: bool | None = None,
     continuity: bool = False,
-) -> Verb:
+) -> Step:
     """Correlation test, as R's ``cor.test(x, y)``, on rows where both are present.
 
     - ``method="pearson"``: ``estimate`` is r; ``statistic`` is t on ``df``
@@ -648,7 +651,7 @@ def cor_test(
             this_exact = use_exact
             if ties and this_exact:
                 this_exact = False
-                warnings.warn("cannot compute exact p-value with ties", stacklevel=3)
+                _warn("cannot compute exact p-value with ties")
             q = (n**3 - n) * (1 - r) / 6
 
             def pspearman(q: float, lower: bool) -> float:
@@ -721,7 +724,7 @@ def cor_test(
                 v2 = np.sum(tx * (tx - 1) * (tx - 2)) * np.sum(ty * (ty - 1) * (ty - 2))
                 var_s = (v0 - vt - vu) / 18 + v1 / (2 * n * (n - 1)) + v2 / (9 * n * (n - 1) * (n - 2))
                 if use_exact and ties:
-                    warnings.warn("cannot compute exact p-value with ties", stacklevel=3)
+                    _warn("cannot compute exact p-value with ties")
                 if continuity:
                     s = math.copysign(abs(s) - 1, s)
                 stat = s / math.sqrt(var_s)
@@ -737,4 +740,4 @@ def cor_test(
             "alternative": alternative,
         })
 
-    return Verb(_apply, "cor_test")
+    return Step(_apply, "cor_test")
