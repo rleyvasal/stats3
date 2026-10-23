@@ -682,23 +682,29 @@ def cor_test(
     def _kendall(tf: Any, groups: list[str], kept: pl.LazyFrame) -> Any:
         from scipy.stats import kendalltau
 
-        values = kept.select(*groups, "__stats3_x", "__stats3_y").collect()
-        parts = (
-            values.partition_by(groups, maintain_order=True, as_dict=True)
-            if groups else {(): values}
-        )
-        keys = pl.DataFrame([dict(zip(groups, key)) for key in parts], schema={g: values.schema[g] for g in groups}) if groups else pl.DataFrame({"__stats3_k": [0]})
-        keys = _sorted_keys(tf, keys, groups) if groups else keys
+        # One query: each group's rows, contiguous in dplyr's group order,
+        # with its size and distinct counts; then one SciPy call per slice.
+        sizes = [pl.len().alias("__stats3_n"), pl.col("__stats3_x").n_unique().alias("__stats3_ux"),
+                 pl.col("__stats3_y").n_unique().alias("__stats3_uy")]
+        if groups:
+            keys = _sorted_keys(tf, kept.group_by(groups).agg(sizes).collect(), groups)
+            order = keys.select(groups).with_row_index("__stats3_order")
+            values = (kept.join(order.lazy(), on=groups, how="left", nulls_equal=True)
+                      .sort("__stats3_order", maintain_order=True)
+                      .select("__stats3_x", "__stats3_y").collect())
+        else:
+            keys = kept.select(sizes).collect()
+            values = kept.select("__stats3_x", "__stats3_y").collect()
+        xs, ys = values["__stats3_x"].to_numpy(), values["__stats3_y"].to_numpy()
+        ends = np.cumsum(keys["__stats3_n"].to_numpy())
         estimate, statistic, p_value = [], [], []
-        for key in (keys.select(groups).iter_rows() if groups else [()]):
-            part = parts[tuple(key)]
-            row = dict(zip(groups, key))
-            xv, yv = part["__stats3_x"].to_numpy(), part["__stats3_y"].to_numpy()
-            n = len(xv)
+        for index, row in enumerate(keys.iter_rows(named=True)):
+            n = row["__stats3_n"]
+            xv, yv = xs[ends[index] - n:ends[index]], ys[ends[index] - n:ends[index]]
             if n < 2:
                 raise ValueError(f"cor_test(): not enough finite observations{_group_label(row, groups)}")
             tau = float(kendalltau(xv, yv).statistic)
-            ties = min(len(np.unique(xv)), len(np.unique(yv))) < n
+            ties = min(row["__stats3_ux"], row["__stats3_uy"]) < n
             use_exact = n < 50 if exact is None else exact
             if use_exact and not ties:
                 q = round((tau + 1) * n * (n - 1) / 4)
@@ -710,8 +716,9 @@ def cor_test(
                 )
                 stat = float(q)
             else:
-                tx = np.unique(xv, return_counts=True)[1].astype(float)
-                ty = np.unique(yv, return_counts=True)[1].astype(float)
+                # Tie runs, counted only in a column that has ties.
+                tx = np.unique(xv, return_counts=True)[1].astype(float) if row["__stats3_ux"] < n else np.empty(0)
+                ty = np.unique(yv, return_counts=True)[1].astype(float) if row["__stats3_uy"] < n else np.empty(0)
                 tx, ty = tx[tx > 1], ty[ty > 1]
                 t0 = n * (n - 1) / 2
                 t1 = np.sum(tx * (tx - 1)) / 2

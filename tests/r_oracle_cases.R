@@ -127,6 +127,9 @@ result <- switch(
       if (!is.null(h$alternative) && !grepl("Chi-squared|Kruskal", h$method)) out$alternative <- h$alternative
       as.data.frame(out, check.names=FALSE)
     }
+    # r x c Fisher tests have no estimate or interval; stats3 keeps the columns.
+    rxc <- function(h) data.frame(estimate=NA_real_, p_value=h$p.value, conf_low=NA_real_,
+                                  conf_high=NA_real_, method=trimws(h$method), alternative=h$alternative)
     aov_table <- function(fit) {
       t <- summary(fit)[[1]]
       data.frame(term=trimws(rownames(t)), df=t$Df, sumsq=t$`Sum Sq`, meansq=t$`Mean Sq`,
@@ -198,6 +201,9 @@ result <- switch(
       f_by_species=by(p, "species", function(d) row(fisher.test(d$sex, d$first_year))),
       f_less=row(fisher.test(p$sex, p$dream, alternative="less", conf.level=0.9)),
       f_greater=row(fisher.test(p$sex, p$first_year, alternative="greater")),
+      f_rxc_sex_island=rxc(fisher.test(p$sex, p$island)),
+      f_rxc_by_sex=by(p, "sex", function(d) rxc(fisher.test(d$species, d$island, workspace=2e8))),
+      f_rxc_island_year=rxc(fisher.test(p$island, p$year, workspace=2e8)),
       p_three=row(prop.test(q$x, q$n), conf=TRUE),
       p_three_given=row(prop.test(q$x, q$n, p=c(0.5, 0.4, 0.6)), conf=TRUE),
       p_two=row(prop.test(two$x, two$n)),
@@ -352,7 +358,7 @@ result <- switch(
       co <- coef(f)
       s <- summary(f)$coefficients
       i <- match(names(co), rownames(s))
-      ci <- if (inherits(f, "glm")) confint.default(f) else confint(f)
+      ci <- if (inherits(f, "glm")) suppressMessages(confint(f)) else confint(f)
       data.frame(term=names(co), estimate=unname(co), std_error=unname(s[i, 2]),
                  statistic=unname(s[i, 3]), p_value=unname(s[i, 4]),
                  conf_low=unname(ci[, 1]), conf_high=unname(ci[, 2]))
@@ -438,6 +444,9 @@ result <- switch(
       out[[paste0(name, "__augment")]] <- augment_fit(f)
       out[[paste0(name, "__anova")]] <- anova_fit(f)
     }
+    wald <- fits$glm_binomial
+    out$glm_binomial__wald <- transform(tidy_fit(wald), conf_low=unname(confint.default(wald)[, 1]),
+                                        conf_high=unname(confint.default(wald)[, 2]))
     out$lm_by_species__tidy <- by(p, "species", function(d) tidy_fit(lm(body_mass_g ~ flipper_length_mm, d)))
     out$lm_by_species__glance <- by(p, "species", function(d) glance_fit(lm(body_mass_g ~ flipper_length_mm, d)))
     out$glm_by_species__tidy <- by(p, "species", function(d) tidy_fit(glm(factor(sex) ~ body_mass_g, binomial, d)))
@@ -450,6 +459,81 @@ result <- switch(
     newcars <- data.frame(wt=c(2.5, 3.5), hp=c(100, 200))
     pr <- predict(fits$glm_binomial_01, newcars, type="response", se.fit=TRUE)
     out$predict_glm <- data.frame(fit=unname(pr$fit), se_fit=unname(pr$se.fit))
+    # Type II and III tests by car's definitions, in base R (car is not
+    # needed): drop a term's columns (type III), or a term and its
+    # higher-order relatives against the relatives alone (type II), from
+    # the full model matrix, and compare the fits.
+    anova_type <- function(f, type) {
+      X <- model.matrix(f)
+      asg <- attr(X, "assign")
+      tt <- terms(f)
+      labels <- attr(tt, "term.labels")
+      fac <- attr(tt, "factors")
+      is_glm <- inherits(f, "glm")
+      n <- nrow(X)
+      y <- if (is_glm) f$y else model.response(model.frame(f))
+      w <- if (is_glm) f$prior.weights else if (is.null(weights(f))) rep(1, n) else weights(f)
+      off <- if (is_glm && !is.null(f$offset)) f$offset else rep(0, n)
+      refit <- function(drop) {
+        keep <- setdiff(seq_len(ncol(X)), drop)
+        if (is_glm) {
+          g <- glm.fit(X[, keep, drop=FALSE], y, weights=w, offset=off, family=family(f))
+          c(g$deviance, g$rank)
+        } else {
+          l <- lm.wfit(X[, keep, drop=FALSE], y - off, w)
+          c(sum(w * l$residuals^2), l$rank)
+        }
+      }
+      hyp <- list()
+      if (type == 3 && attr(tt, "intercept") == 1) hyp[["(Intercept)"]] <- list(which(asg == 0), integer())
+      for (k in seq_along(labels)) {
+        own <- which(asg == k)
+        if (type == 3) { hyp[[labels[k]]] <- list(own, integer()); next }
+        vars <- fac[, k] > 0
+        rel <- which(vapply(seq_along(labels), function(j)
+          j != k && all(fac[vars, j] > 0) && sum(fac[, j] > 0) > sum(vars), NA))
+        relc <- which(asg %in% rel)
+        hyp[[labels[k]]] <- list(c(relc, own), relc)
+      }
+      disp <- if (is_glm) summary(f)$dispersion else 1
+      fixed <- is_glm && family(f)$family %in% c("binomial", "poisson")
+      rows <- lapply(names(hyp), function(term) {
+        a <- refit(hyp[[term]][[1]])
+        b <- refit(hyp[[term]][[2]])
+        df <- b[2] - a[2]
+        diff <- a[1] - b[1]
+        if (!is_glm) {
+          ms <- deviance(f) / f$df.residual
+          return(data.frame(term=term, df=df, sumsq=diff, meansq=diff / df,
+            statistic=(diff / df) / ms, p_value=pf((diff / df) / ms, df, f$df.residual, lower.tail=FALSE)))
+        }
+        if (fixed) return(data.frame(term=term, df=df, statistic=diff / disp,
+                                     p_value=pchisq(diff / disp, df, lower.tail=FALSE)))
+        fv <- (diff / df) / disp
+        data.frame(term=term, df=df, statistic=fv, p_value=pf(fv, df, f$df.residual, lower.tail=FALSE))
+      })
+      table <- do.call(rbind, rows)
+      if (!is_glm) {
+        table <- rbind(table, data.frame(term="Residuals", df=f$df.residual, sumsq=deviance(f),
+          meansq=deviance(f) / f$df.residual, statistic=NA, p_value=NA))
+      }
+      table
+    }
+    sum_contrasts <- list(species="contr.sum", sex="contr.sum")
+    two <- lm(body_mass_g ~ species * sex, p)
+    two_sum <- lm(body_mass_g ~ species * sex, p, contrasts=sum_contrasts)
+    mixed <- lm(body_mass_g ~ flipper_length_mm * species + sex, p)
+    logit <- glm(factor(sex) ~ body_mass_g * species, binomial, p)
+    logit_sum <- glm(factor(sex) ~ body_mass_g * species, binomial, p, contrasts=list(species="contr.sum"))
+    gamma <- glm(mpg ~ wt * factor(am) + hp, Gamma(link="log"), m)
+    out$type2_lm <- anova_type(two, 2)
+    out$type3_lm_sum <- anova_type(two_sum, 3)
+    out$tidy_lm_sum <- tidy_fit(two_sum)
+    out$type2_mixed <- anova_type(mixed, 2)
+    out$type3_mixed <- anova_type(mixed, 3)
+    out$type2_glm <- anova_type(logit, 2)
+    out$type3_glm_sum <- anova_type(logit_sum, 3)
+    out$type2_gamma <- anova_type(gamma, 2)
     out
   },
   stop(sprintf("unknown oracle case: %s", case_name))

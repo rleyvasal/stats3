@@ -51,6 +51,8 @@ class Formula:
     terms: list[tuple[str, ...]]
     intercept: bool
     offsets: list[str] = field(default_factory=list)
+    # Contrasts per factor: "treatment" (R's default) or "sum" (contr.sum).
+    contrasts: dict[str, str] = field(default_factory=dict)
 
     @property
     def term_labels(self) -> list[str]:
@@ -402,10 +404,18 @@ def build_design(
             # R: contrasts when the term without this factor is in the model
             # (the intercept stands for the empty term), else indicators.
             contrasts = (margin in term_sets) if margin else formula.intercept
-            levels = v.levels if not contrasts else v.levels[1:]
-            start = 0 if not contrasts else 1
-            cols = [(v.codes == i + start).astype(float) for i in range(len(levels))]
-            pieces.append(([f"{var}{_level_name(lv)}" for lv in levels], cols))
+            kind = formula.contrasts.get(var, "treatment")
+            if not contrasts:
+                cols = [(v.codes == i).astype(float) for i in range(len(v.levels))]
+                pieces.append(([f"{var}{_level_name(lv)}" for lv in v.levels], cols))
+            elif kind == "sum":
+                # contr.sum: level j against the last level, named var1, var2, ...
+                last = len(v.levels) - 1
+                cols = [(v.codes == j).astype(float) - (v.codes == last).astype(float) for j in range(last)]
+                pieces.append(([f"{var}{j + 1}" for j in range(last)], cols))
+            else:
+                cols = [(v.codes == i).astype(float) for i in range(1, len(v.levels))]
+                pieces.append(([f"{var}{_level_name(lv)}" for lv in v.levels[1:]], cols))
         # The first variable varies fastest, as in R.
         for combo in itertools.product(*[range(len(p[0])) for p in reversed(pieces)]):
             combo = combo[::-1]

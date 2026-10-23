@@ -522,6 +522,37 @@ class _Fit:
         return f"\n{len(aliased)} not estimated (aliased): {', '.join(aliased)}"
 
 
+def _hypotheses(design: Design, formula: Formula, kind: int) -> list[tuple[str, list[int], list[int]]]:
+    """For each tested term: its label, the columns dropped in the smaller
+    model, and the columns dropped in the larger one (car's definitions).
+
+    Type II tests a term after every other term except its higher-order
+    relatives (the terms containing it); type III after all other terms,
+    the intercept included.
+    """
+    assign = np.array(design.assign)
+    terms = [frozenset(t) for t in formula.terms]
+    out = []
+    if kind == 3 and formula.intercept:
+        out.append(("(Intercept)", list(np.where(assign == 0)[0]), []))
+    for index, (label, term) in enumerate(zip(design.term_labels, terms), start=1):
+        own = list(np.where(assign == index)[0])
+        if kind == 3:
+            out.append((label, own, []))
+            continue
+        relatives = [j for j, other in enumerate(terms, start=1) if term < other]
+        rel_cols = list(np.where(np.isin(assign, relatives))[0])
+        out.append((label, rel_cols + own, rel_cols))
+    return out
+
+
+def _check_type(type_: Any) -> int:
+    kinds = {1: 1, 2: 2, 3: 3, "I": 1, "II": 2, "III": 3}
+    if type_ not in kinds:
+        raise ValueError(f"type must be 1, 2, or 3 (or 'I', 'II', 'III'), got {type_!r}")
+    return kinds[type_]
+
+
 class LinearModel(_Fit):
     """A fitted ``lm``."""
 
@@ -666,6 +697,45 @@ class LinearModel(_Fit):
         })
         return self._with_key(frame)
 
+    def _rss_without(self, drop: list[int]) -> tuple[float, int]:
+        """Residual sum of squares and rank with some columns dropped."""
+        keep = [j for j in range(self.design.matrix.shape[1]) if j not in set(drop)]
+        sw = np.sqrt(self.weights)
+        yw = (self.y - self.frame.offset) * sw
+        if not keep:
+            return float(np.sum(yw**2)), 0
+        xw = self.design.matrix[:, keep] * sw[:, None]
+        qr = _qr(xw, 1e-7, yw)
+        resid = yw - xw[:, qr.kept] @ qr.coefficients()
+        return float(np.sum(resid**2)), len(qr.kept)
+
+    def anova_type(self, kind: int) -> pl.DataFrame:
+        """Type II or III sums of squares, as car's ``Anova(type=)``."""
+        special = _special()
+        res_ms = self.rss / self.df_residual
+        rows: dict[str, list[Any]] = {k: [] for k in ("term", "df", "sumsq", "meansq", "statistic", "p_value")}
+        for label, smaller, larger in _hypotheses(self.design, self.formula, kind):
+            rss_small, rank_small = self._rss_without(smaller)
+            rss_large, rank_large = self._rss_without(larger)
+            df = rank_large - rank_small
+            if df == 0:
+                continue
+            ss = rss_small - rss_large
+            fval = (ss / df) / res_ms
+            rows["term"].append(label)
+            rows["df"].append(float(df))
+            rows["sumsq"].append(ss)
+            rows["meansq"].append(ss / df)
+            rows["statistic"].append(fval)
+            rows["p_value"].append(float(special.fdtrc(df, self.df_residual, fval)))
+        rows["term"].append("Residuals")
+        rows["df"].append(float(self.df_residual))
+        rows["sumsq"].append(self.rss)
+        rows["meansq"].append(res_ms)
+        rows["statistic"].append(None)
+        rows["p_value"].append(None)
+        return self._with_key(pl.DataFrame(rows, schema_overrides={"statistic": pl.Float64, "p_value": pl.Float64}))
+
     # -- printing ---------------------------------------------------------------------
 
     def __repr__(self) -> str:
@@ -739,11 +809,78 @@ class GeneralizedLinearModel(_Fit):
         # R's confint.default does.
         return float(_special().ndtri(p))
 
-    def tidy(self, conf_int: bool = False, conf_level: float = 0.95, exponentiate: bool = False) -> pl.DataFrame:
-        """Coefficients. ``conf_int=True`` adds Wald intervals (estimate ± z or t
-        times the standard error, R's ``confint.default``); R's ``confint``
-        for a glm profiles the likelihood instead."""
-        return self._with_key(self._coef_table(conf_int, conf_level, exponentiate))
+    def tidy(self, conf_int: bool = False, conf_level: float = 0.95, exponentiate: bool = False,
+             conf_method: str = "profile") -> pl.DataFrame:
+        """Coefficients. ``conf_int=True`` adds intervals: by default profile
+        likelihood intervals as R's ``confint`` (``profile.glm``'s grid,
+        spline and inversion), or ``conf_method="wald"`` for estimate ± z
+        times the standard error, R's ``confint.default``."""
+        if conf_method not in ("profile", "wald"):
+            raise ValueError("conf_method must be 'profile' or 'wald'")
+        table = self._coef_table(conf_int, conf_level, False)
+        if conf_int and conf_method == "profile":
+            low, high = self._profile_intervals(conf_level)
+            table = table.with_columns(conf_low=pl.Series(low).fill_nan(None), conf_high=pl.Series(high).fill_nan(None))
+        if exponentiate:
+            cols = ["estimate"] + (["conf_low", "conf_high"] if conf_int else [])
+            table = table.with_columns(pl.col(c).exp() for c in cols)
+        return self._with_key(table)
+
+    def _profile_intervals(self, conf_level: float) -> tuple[np.ndarray, np.ndarray]:
+        """R's ``confint(glm)``: ``profile.glm`` then ``confint.profile.glm``.
+
+        Each coefficient is fixed at up to 9 points either side of its
+        estimate (steps of zmax/5 standard errors), the others refitted from
+        the previous point's linear predictor; the signed root deviance
+        profile is splined (FMM) at three times as many points and inverted
+        by linear interpolation at the normal quantiles, as R does.
+        """
+        from scipy import stats
+
+        special = _special()
+        alpha = (1 - conf_level) / 4
+        x = self.design.matrix
+        n, p = x.shape
+        if self.family.family in ("binomial", "poisson"):
+            zmax = math.sqrt(float(stats.chi2.isf(alpha, 1)))
+        else:
+            zmax = math.sqrt(float(stats.f.isf(alpha, 1, n - p)))
+        delta = zmax / 5
+        se = np.full(p, np.nan)
+        se[self.qr.kept] = np.sqrt(np.diag(self.cov_unscaled) * self.scale)
+        cut = special.ndtri(np.array([(1 - conf_level) / 2, 1 - (1 - conf_level) / 2]))
+        offset = self.frame.offset
+        nona = np.zeros(p, dtype=bool)
+        nona[self.qr.kept] = True
+        low, high = np.full(p, np.nan), np.full(p, np.nan)
+        b0 = np.nan_to_num(self.coef)
+        for i in range(p):
+            if not nona[i]:
+                continue
+            others = nona.copy()
+            others[i] = False
+            xi = x[:, others]
+            zs, values = [0.0], [b0[i]]
+            for sign in (-1, 1):
+                lp = x[:, nona] @ b0[nona] + offset
+                step, z = 0, 0.0
+                while (step := step + 1) < 10 and abs(z) < zmax:
+                    bi = b0[i] + sign * step * delta * se[i]
+                    o = offset + x[:, i] * bi
+                    fit = _glm_fit(xi, self.y, self.prior_weights, o, self.family, self.n_trials,
+                                   25, 1e-8, self.verb, etastart=lp)
+                    coef = np.nan_to_num(fit["coef"])
+                    lp = xi @ coef + o
+                    zz = (fit["deviance"] - self.deviance) / self.scale
+                    if zz <= -0.001:
+                        raise ValueError("profiling has found a better solution, so original fit had not converged")
+                    z = sign * math.sqrt(max(zz, 0.0))
+                    zs.append(z)
+                    values.append(bi)
+            order = np.argsort(zs, kind="stable")
+            sx, sy = _spline(np.array(values)[order], np.array(zs)[order])
+            low[i], high[i] = _approx(sy, sx, cut)
+        return low, high
 
     def log_lik(self) -> float:
         p = self.rank + (1 if self.family.family in ("gaussian", "Gamma", "inverse.gaussian") else 0)
@@ -841,6 +978,41 @@ class GeneralizedLinearModel(_Fit):
         table.update(_deviance_tests(table["df"], table["deviance"], self.scale, self.df_residual, test, self.family))
         return self._with_key(pl.DataFrame(table, schema_overrides={"df": pl.Float64, "deviance": pl.Float64}))
 
+    def _deviance_without(self, drop: list[int]) -> tuple[float, int]:
+        keep = [j for j in range(self.design.matrix.shape[1]) if j not in set(drop)]
+        x = self.design.matrix[:, keep]
+        fit = _glm_fit(x, self.y, self.prior_weights, self.frame.offset, self.family, self.n_trials,
+                       25, 1e-8, self.verb)
+        return fit["deviance"], fit["rank"]
+
+    def anova_type(self, kind: int, test: str | None = None) -> pl.DataFrame:
+        """Type II or III tests, as car's ``Anova(type=)``: likelihood ratio
+        chi-squared tests for binomial and Poisson models, F tests on the
+        deviance (with the model's dispersion) for the others."""
+        special = _special()
+        test = test or ("LR" if self.family.dispersion is not None else "F")
+        if test not in ("LR", "F"):
+            raise ValueError("test must be 'LR' or 'F' for type II and III tables")
+        rows: dict[str, list[Any]] = {k: [] for k in ("term", "df", "statistic", "p_value")}
+        for label, smaller, larger in _hypotheses(self.design, self.formula, kind):
+            dev_small, rank_small = self._deviance_without(smaller)
+            dev_large, rank_large = self._deviance_without(larger)
+            df = rank_large - rank_small
+            if df == 0:
+                continue
+            diff = dev_small - dev_large
+            if test == "LR":
+                stat = diff / self.scale
+                p = float(special.chdtrc(df, stat))
+            else:
+                stat = (diff / df) / self.scale
+                p = float(special.fdtrc(df, self.df_residual, stat))
+            rows["term"].append(label)
+            rows["df"].append(float(df))
+            rows["statistic"].append(stat)
+            rows["p_value"].append(p)
+        return self._with_key(pl.DataFrame(rows))
+
     def __repr__(self) -> str:
         table = self._coef_table(False, 0.95, False).select("term", "estimate", "std_error", "statistic", "p_value")
         head = f"glm({self.formula.text}, family = {self.family!r})" + _key_text(self.key)
@@ -850,6 +1022,69 @@ class GeneralizedLinearModel(_Fit):
                 f"{self.deviance:.5g} on {self.df_residual} df\n"
                 f"AIC {self.aic:.5g} · {disp} · {self.iter} Fisher scoring iterations")
         return f"{head}\n{_table_text(table)}\n{foot}{self._aliased_note()}"
+
+
+def _ties_mean(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """R's ``regularize.values(ties = mean)``: sort by x, average tied x."""
+    order = np.argsort(x, kind="stable")
+    x, y = x[order], y[order]
+    ux, start = np.unique(x, return_index=True)
+    sums = np.add.reduceat(y, start)
+    counts = np.diff(np.r_[start, len(x)])
+    return ux, sums / counts
+
+
+def _spline(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """R's ``spline(x, y)``: the FMM cubic spline through the points,
+    evaluated at ``3 * length(x)`` equally spaced points."""
+    x, y = _ties_mean(x, y)
+    n = len(x)
+    xout = np.linspace(x[0], x[-1], 3 * n)
+    b, c, d = np.zeros(n), np.zeros(n), np.zeros(n)
+    if n < 2:
+        return xout, np.full(len(xout), y[0] if n else np.nan)
+    if n < 3:
+        b[:] = (y[1] - y[0]) / (x[1] - x[0])
+    else:
+        # Forsythe, Malcolm & Moler, as R's fmm_spline (0-based here).
+        d[0] = x[1] - x[0]
+        c[1] = (y[1] - y[0]) / d[0]
+        for i in range(1, n - 1):
+            d[i] = x[i + 1] - x[i]
+            b[i] = 2.0 * (d[i - 1] + d[i])
+            c[i + 1] = (y[i + 1] - y[i]) / d[i]
+            c[i] = c[i + 1] - c[i]
+        b[0], b[n - 1] = -d[0], -d[n - 2]
+        c[0] = c[n - 1] = 0.0
+        if n > 3:
+            c[0] = c[2] / (x[3] - x[1]) - c[1] / (x[2] - x[0])
+            c[n - 1] = c[n - 2] / (x[n - 1] - x[n - 3]) - c[n - 3] / (x[n - 2] - x[n - 4])
+            c[0] = c[0] * d[0] * d[0] / (x[3] - x[0])
+            c[n - 1] = -c[n - 1] * d[n - 2] * d[n - 2] / (x[n - 1] - x[n - 4])
+        for i in range(1, n):
+            t = d[i - 1] / b[i - 1]
+            b[i] -= t * d[i - 1]
+            c[i] -= t * c[i - 1]
+        c[n - 1] /= b[n - 1]
+        for i in range(n - 2, -1, -1):
+            c[i] = (c[i] - d[i] * c[i + 1]) / b[i]
+        b[n - 1] = (y[n - 1] - y[n - 2]) / d[n - 2] + d[n - 2] * (c[n - 2] + 2.0 * c[n - 1])
+        for i in range(n - 1):
+            b[i] = (y[i + 1] - y[i]) / d[i] - d[i] * (c[i + 1] + 2.0 * c[i])
+            d[i] = (c[i + 1] - c[i]) / d[i]
+            c[i] = 3.0 * c[i]
+        c[n - 1] = 3.0 * c[n - 1]
+        d[n - 1] = d[n - 2]
+    idx = np.clip(np.searchsorted(x, xout, side="right") - 1, 0, n - 1)
+    dx = xout - x[idx]
+    return xout, y[idx] + dx * (b[idx] + dx * (c[idx] + dx * d[idx]))
+
+
+def _approx(x: np.ndarray, y: np.ndarray, xout: np.ndarray) -> np.ndarray:
+    """R's ``approx(x, y, xout)``: linear interpolation, NA outside."""
+    x, y = _ties_mean(x, y)
+    out = np.interp(xout, x, y)
+    return np.where((xout < x[0]) | (xout > x[-1]), np.nan, out)
 
 
 def _leave_one_out_sigma(e: np.ndarray, h: np.ndarray, rank: int) -> np.ndarray:
@@ -874,9 +1109,9 @@ def _deviance_tests(df, dev, scale, df_scale, test, family) -> dict[str, list]:
     raise ValueError("test must be 'Chisq', 'F', or False")
 
 
-def _glm_fit(x, y, w, offset, family, n_trials, maxit, epsilon, verb) -> dict[str, Any]:
-    """R's ``glm.fit``: IRLS from R's starting values; standard errors from
-    the last iteration's QR."""
+def _glm_fit(x, y, w, offset, family, n_trials, maxit, epsilon, verb, etastart=None) -> dict[str, Any]:
+    """R's ``glm.fit``: IRLS from R's starting values (or ``etastart``);
+    standard errors from the last iteration's QR."""
     link = family.link
     nobs, nvars = x.shape
     if family.family in ("binomial", "quasibinomial"):
@@ -897,7 +1132,7 @@ def _glm_fit(x, y, w, offset, family, n_trials, maxit, epsilon, verb) -> dict[st
         if (link.name == "inverse" and np.any(y == 0)) or (link.name == "log" and np.any(y <= 0)):
             raise ValueError(f"{verb}(): cannot find valid starting values: please specify some")
         mustart = y.copy()
-    eta = link.linkfun(mustart)
+    eta = link.linkfun(mustart) if etastart is None else np.asarray(etastart, dtype=float)
     mu = link.linkinv(eta)
     if not (link.valideta(eta) and family.validmu(mu)):
         raise ValueError(f"{verb}(): cannot find valid starting values: please specify some")
@@ -1043,9 +1278,24 @@ class _ModelStep(Step):
         return self._fn(frame)
 
 
-def _model(verb: str, build: Callable[[Formula, _Frame, Data], _Fit], formula: str, weights: Any, offset: Any):
+def _contrasts(contrasts: Any, parsed: Formula, verb: str) -> dict[str, str]:
+    if contrasts is None:
+        return {}
+    variables = parsed.variables()
+    spec = {v: contrasts for v in variables} if isinstance(contrasts, str) else dict(contrasts)
+    for name, kind in spec.items():
+        if kind not in ("treatment", "sum"):
+            raise ValueError(f"{verb}(): contrasts must be 'treatment' or 'sum', got {kind!r}")
+        if name not in variables:
+            raise ValueError(f"{verb}(): contrasts for {name!r}, which is not in the formula")
+    return spec
+
+
+def _model(verb: str, build: Callable[[Formula, _Frame, Data], _Fit], formula: str, weights: Any, offset: Any,
+           contrasts: Any = None):
     def _apply(data: Data) -> Any:
         parsed = parse_formula(formula, verb, data.columns)
+        parsed.contrasts = _contrasts(contrasts, parsed, verb)
         frames = _model_frames(data, parsed, weights, offset, verb)
         fits = [build(parsed, frame, data) for frame in frames]
         return Models(fits, data) if data._groups else fits[0]
@@ -1054,21 +1304,23 @@ def _model(verb: str, build: Callable[[Formula, _Frame, Data], _Fit], formula: s
 
 
 @step
-def lm(formula: str, *, weights: Any = None, offset: Any = None) -> Step:
+def lm(formula: str, *, weights: Any = None, offset: Any = None, contrasts: Any = None) -> Step:
     """Fit a linear model, as R's ``lm``.
 
     ``lm(penguins, "body_mass_g ~ flipper_length_mm + species")`` or
     ``penguins >> lm(...)``; ``by=`` (or tidy3's ``group_by``) fits one model
-    per group. Rows missing any model variable are dropped. Print the fit
-    for a summary; ``tidy``, ``glance``, ``augment``, ``anova`` and
-    ``predict`` give tables.
+    per group. Rows missing any model variable are dropped. Factors use
+    treatment contrasts (first level as reference); ``contrasts="sum"`` (or
+    ``{"species": "sum"}``) uses R's ``contr.sum``, as type III ANOVA
+    wants. Print the fit for a summary; ``tidy``, ``glance``, ``augment``,
+    ``anova`` and ``predict`` give tables.
     """
-    return _model("lm", lambda f, fr, d: LinearModel(f, fr, d), formula, weights, offset)
+    return _model("lm", lambda f, fr, d: LinearModel(f, fr, d), formula, weights, offset, contrasts)
 
 
 @step
 def glm(formula: str, family: Any = "gaussian", *, weights: Any = None, offset: Any = None,
-        maxit: int = 25, epsilon: float = 1e-8) -> Step:
+        contrasts: Any = None, maxit: int = 25, epsilon: float = 1e-8) -> Step:
     """Fit a generalized linear model, as R's ``glm``.
 
     ``family`` is ``binomial()``, ``poisson()``, ``Gamma()``,
@@ -1079,7 +1331,7 @@ def glm(formula: str, family: Any = "gaussian", *, weights: Any = None, offset: 
     """
     fam = _as_family(family)
     return _model("glm", lambda f, fr, d: GeneralizedLinearModel(f, fr, d, fam, maxit, epsilon),
-                  formula, weights, offset)
+                  formula, weights, offset, contrasts)
 
 
 # broom verbs ------------------------------------------------------------------------------
@@ -1116,12 +1368,17 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
     loaded, so ``from stats3 import *`` keeps tidy3's constructor working.
     """
     def run(model):
-        opts = {"conf_int": conf_int, "conf_level": conf_level}
+        opts = {"conf_int": conf_int, "conf_level": conf_level, **kwargs}
         if exponentiate:
             opts["exponentiate"] = True
+        unknown = set(kwargs) - {"conf_method"}
+        if unknown:
+            raise TypeError(f"tidy(): unexpected arguments for a model: {sorted(unknown)}")
+        if "conf_method" in opts and not all(isinstance(f, GeneralizedLinearModel) for f in _fits(model)):
+            raise TypeError("tidy(): conf_method is for glm fits")
         return _table(model, "tidy", **opts)
 
-    if x is None and not args and not kwargs:
+    if x is None and not args and set(kwargs) <= {"conf_method"}:
         return _ModelVerb(run, "tidy")
     if _is_model(x):
         return run(x)
@@ -1168,24 +1425,32 @@ def predict(model: Any, newdata: Any = None, **kwargs: Any) -> Any:
     return model.predict(newdata, **kwargs)
 
 
-def anova(*models: Any, test: Any = None) -> Any:
-    """Analysis of variance or deviance, as R's ``anova``.
+def anova(*models: Any, test: Any = None, type: Any = 1) -> Any:  # noqa: A002
+    """Analysis of variance or deviance, as R's ``anova`` and car's ``Anova``.
 
-    One model: the sequential table by term. Several nested models fitted to
-    the same rows: one row per model, with the F test (lm), or the
-    chi-squared test for binomial and Poisson glms and the F test for the
-    others (R's defaults; ``test="Chisq"`` / ``"F"`` / ``False``).
+    One model: ``type=1`` (default) is R's sequential table by term;
+    ``type=2`` and ``type=3`` are car's type II and III tests (for type III
+    use ``contrasts="sum"`` in the model, as car advises). Several nested
+    models fitted to the same rows: one row per model, with the F test (lm),
+    or the chi-squared test for binomial and Poisson glms and the F test for
+    the others (R's defaults; ``test="Chisq"`` / ``"F"`` / ``False``).
     ``fit >> anova()`` works too.
     """
+    kind = _check_type(type)
     if not models:
-        return _ModelVerb(lambda m: anova(m, test=test), "anova")
+        return _ModelVerb(lambda m: anova(m, test=test, type=type), "anova")
     if len(models) == 1:
         model = models[0]
         if not _is_model(model):
             raise TypeError("anova(): expected models from lm() or glm()")
         fits = _fits(model)
-        frames = [f.anova_table() if isinstance(f, LinearModel) else f.anova_table(test) for f in fits]
+        if kind == 1:
+            frames = [f.anova_table() if isinstance(f, LinearModel) else f.anova_table(test) for f in fits]
+        else:
+            frames = [f.anova_type(kind) if isinstance(f, LinearModel) else f.anova_type(kind, test) for f in fits]
         return model._stack(frames) if isinstance(model, Models) else fits[0]._write(frames[0])
+    if kind != 1:
+        raise ValueError("anova(): type 2 and 3 tables are for one model; compare models with type=1")
     fits = []
     for m in models:
         if isinstance(m, Models) or not isinstance(m, _Fit):

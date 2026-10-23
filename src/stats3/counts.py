@@ -184,12 +184,14 @@ def _probabilities(p: Any, levels: list[Any], rescale: bool) -> np.ndarray:
 def fisher_test(
     x: Any, y: Any, *, alternative: str = "two.sided", conf_level: float = 0.95
 ) -> Step:
-    """Fisher's exact test for a 2 x 2 table, as R's ``fisher.test(x, y)``.
+    """Fisher's exact test, as R's ``fisher.test(x, y)``.
 
-    ``estimate`` is the conditional maximum likelihood odds ratio, as in R,
-    with its exact confidence interval. Larger tables are not supported yet.
-    Columns: ``estimate``, ``p_value``, ``conf_low``, ``conf_high``,
-    ``method``, ``alternative``.
+    For a 2 x 2 table, ``estimate`` is the conditional maximum likelihood
+    odds ratio with its exact confidence interval, as in R. For larger
+    tables the two-sided p-value is exact (R's network algorithm: the tables
+    with the same margins no more likely than the observed one), and the
+    estimate and interval are missing, as in R. Columns: ``estimate``,
+    ``p_value``, ``conf_low``, ``conf_high``, ``method``, ``alternative``.
     """
     alternative = _alternative(alternative)
     _check_conf_level(conf_level)
@@ -202,30 +204,158 @@ def fisher_test(
         names = [_column(tf, x, "x", "fisher_test"), _column(tf, y, "y", "fisher_test")]
         keys, tables = _tables(tf, groups, names)
         side = "two-sided" if alternative == "two.sided" else alternative
-        out: dict[str, list[float]] = {"estimate": [], "p_value": [], "conf_low": [], "conf_high": []}
+        out: dict[str, list[Any]] = {"estimate": [], "p_value": [], "conf_low": [], "conf_high": [], "alternative": []}
         for label, table in zip(_labels(keys, groups), tables):
             cells = table["counts"]
             if min(cells.shape) < 2:
                 raise ValueError(f"fisher_test(): 'x' and 'y' must have at least 2 levels{label}")
-            if cells.shape != (2, 2):
-                raise ValueError(
-                    f"fisher_test(): only 2 x 2 tables are supported, got "
-                    f"{cells.shape[0]} x {cells.shape[1]}{label}"
-                )
             counts = cells.astype(np.int64)
+            if counts.shape != (2, 2):
+                # R tests larger tables two-sided only, without an estimate.
+                out["estimate"].append(None)
+                out["p_value"].append(_fisher_rxc(counts, label))
+                out["conf_low"].append(None)
+                out["conf_high"].append(None)
+                out["alternative"].append("two.sided")
+                continue
             ratio = odds_ratio(counts, kind="conditional")
             ci = ratio.confidence_interval(confidence_level=conf_level, alternative=side)
             out["estimate"].append(float(ratio.statistic))
             out["p_value"].append(float(fisher_exact(counts, alternative=side).pvalue))
             out["conf_low"].append(float(ci.low))
             out["conf_high"].append(float(ci.high))
+            out["alternative"].append(alternative)
+        columns = {k: pl.Series(v, dtype=pl.Float64) for k, v in out.items() if k != "alternative"}
         return _finish(tf, keys, groups, {
-            **{k: np.array(v, dtype=float) for k, v in out.items()},
+            "estimate": columns["estimate"],
+            "p_value": columns["p_value"],
+            "conf_low": columns["conf_low"],
+            "conf_high": columns["conf_high"],
             "method": "Fisher's Exact Test for Count Data",
-            "alternative": alternative,
+            "alternative": pl.Series(out["alternative"], dtype=pl.String),
         })
 
     return Step(_apply, "fisher_test")
+
+
+_FISHER_LIMIT = 5_000_000
+
+
+def _fisher_rxc(table: np.ndarray, label: str = "") -> float:
+    """Exact two-sided p-value of an r x c table with fixed margins.
+
+    The probability of a table is K * prod(1 / n_ij!) with K fixed by the
+    margins; the p-value adds the tables no more likely than the observed
+    one (R's relative slack 1e-7). Tables are built a column at a time; a
+    node is the column reached and the row totals still to fill. Exact
+    bounds on what the remaining columns can contribute (the most and least
+    likely completions) and the closed-form total of all completions let a
+    whole node be counted in or left out at once, as in R's network
+    algorithm (FEXACT); equal partial paths are merged.
+    """
+    lf = [math.lgamma(k + 1) for k in range(int(table.sum()) + 1)]
+    rows = sorted((int(r) for r in table.sum(axis=1) if r > 0), reverse=True)
+    cols = sorted((int(c) for c in table.sum(axis=0) if c > 0), reverse=True)
+    observed = -sum(lf[int(v)] for v in table.ravel())
+    threshold = observed + math.log1p(1e-7)
+    log_k = sum(lf[r] for r in rows) + sum(lf[c] for c in cols) - lf[sum(rows)]
+    ncol = len(cols)
+    suffix = [sum(cols[k:]) for k in range(ncol + 1)]
+
+    def splits(total: int, caps: tuple[int, ...]):
+        """Ways to put ``total`` into rows with room ``caps``."""
+        if len(caps) == 1:
+            if total <= caps[0]:
+                yield (total,)
+            return
+        room = sum(caps[1:])
+        for v in range(max(0, total - room), min(caps[0], total) + 1):
+            for rest in splits(total - v, caps[1:]):
+                yield (v,) + rest
+
+    def spread(total: int, caps: list[int]) -> float:
+        """Largest -sum(log x!) for sum(x) = total, x <= caps: as even as the
+        caps allow (the objective is concave)."""
+        out, left = 0.0, total
+        caps = sorted(caps)
+        for i, cap in enumerate(caps):
+            share = left // (len(caps) - i)
+            if cap <= share:
+                out -= lf[cap]
+                left -= cap
+                continue
+            # The rest share evenly: some get one more than the others.
+            m = len(caps) - i
+            base, extra = divmod(left, m)
+            return out - (m - extra) * lf[base] - extra * lf[base + 1]
+        return out
+
+    def pack(total: int, caps: list[int]) -> float:
+        """Smallest -sum(log x!) for sum(x) = total, x <= caps: filled into
+        the largest caps first (the objective is convex)."""
+        out, left = 0.0, total
+        for cap in sorted(caps, reverse=True):
+            take = min(cap, left)
+            out -= lf[take]
+            left -= take
+            if not left:
+                break
+        return out
+
+    bounds: dict[tuple[int, tuple[int, ...]], tuple[float, float]] = {}
+
+    def bound(k: int, rem: tuple[int, ...]) -> tuple[float, float]:
+        """Bounds on what the columns from k can add (sum of -log n_ij!):
+        each comes from dropping the row or the column constraints, which
+        can only loosen it, so the tighter of the two is still a bound."""
+        key = (k, rem)
+        if key in bounds:
+            return bounds[key]
+        rest = cols[k:]
+        rem_list = [r for r in rem if r > 0]
+        hi = min(sum(spread(c, rem_list) for c in rest), sum(spread(r, rest) for r in rem_list))
+        lo = max(sum(pack(c, rem_list) for c in rest), sum(pack(r, rest) for r in rem_list))
+        bounds[key] = (hi, lo)
+        return bounds[key]
+
+    def log_total(k: int, rem: tuple[int, ...]) -> float:
+        """log of the sum of prod(1/n_ij!) over all completions from column k."""
+        return lf[suffix[k]] - sum(lf[r] for r in rem) - sum(lf[c] for c in cols[k:])
+
+    pieces: list[float] = []
+    level: dict[tuple[tuple[int, ...], int], tuple[float, float]] = {(tuple(rows), 0): (0.0, 1.0)}
+    work = 0
+    for k in range(ncol):
+        nxt: dict[tuple[tuple[int, ...], int], tuple[float, float]] = {}
+        for (rem, _), (past, weight) in level.items():
+            hi, lo = bound(k, rem)
+            if past + hi <= threshold:
+                pieces.append(math.log(weight) + past + log_total(k, rem))
+                continue
+            if past + lo > threshold:
+                continue
+            for split in splits(cols[k], rem):
+                work += 1
+                if work > _FISHER_LIMIT:
+                    raise ValueError(f"fisher_test(): table too large for the exact test{label}")
+                term = -sum(lf[v] for v in split)
+                child = tuple(sorted((r - v for r, v in zip(rem, split)), reverse=True))
+                value = past + term
+                if k == ncol - 1:
+                    if value <= threshold:
+                        pieces.append(math.log(weight) + value)
+                    continue
+                key = (child, round(value * 1e9))
+                if key in nxt:
+                    nxt[key] = (nxt[key][0], nxt[key][1] + weight)
+                else:
+                    nxt[key] = (value, weight)
+        level = nxt
+    if not pieces:
+        return 0.0
+    top = max(pieces)
+    total = top + math.log(math.fsum(math.exp(v - top) for v in pieces))
+    return min(1.0, math.exp(log_k + total))
 
 
 # prop_test -------------------------------------------------------------------

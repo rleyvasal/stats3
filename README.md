@@ -123,6 +123,7 @@ tidy(fit, conf_int=True)    # term, estimate, std_error, statistic, p_value, con
 glance(fit)                 # r_squared, adj_r_squared, sigma, statistic, p_value, AIC, BIC, ...
 augment(fit)                # the rows with .fitted, .resid, .hat, .sigma, .cooksd, .std_resid
 anova(fit)                  # sequential sums of squares; anova(fit1, fit2) compares models
+anova(fit, type=2)          # car's type II tests; type=3 with contrasts="sum"
 predict(fit, new_rows, interval="prediction")
 
 glance(lm(penguins, "body_mass_g ~ flipper_length_mm", by="species"))   # one row per species
@@ -135,7 +136,10 @@ Formulas follow R: `a * b`, `a:b`, `(a + b)^2`, `0 +` / `- 1`, `.`, `log(x)`,
 `I(x^2)`, `factor(cyl)`, `offset(...)`, and `cbind(successes, failures)` for
 binomial models. Factors use treatment contrasts with the first level as the
 reference (a pandas category or Polars `Enum` sets the order), with R's
-column names, and redundant columns are reported as aliased, as in R.
+column names (`contrasts="sum"` gives R's `contr.sum`, as type III tests
+want), and redundant columns are reported as aliased, as in R. For a `glm`,
+`tidy(conf_int=True)` gives R's profile-likelihood intervals (`confint`);
+`conf_method="wald"` gives `confint.default`.
 Families: `gaussian`, `binomial`, `poisson`, `Gamma`, `inverse_gaussian`,
 `quasibinomial`, `quasipoisson`, with R's links. `fit >> tidy()` works too,
 and with tidy3 loaded, `tidy(data)` still makes a tidy3 frame.
@@ -156,7 +160,7 @@ statsmodels' formula interface.
 | `aov`, `TukeyHSD` | `aov("y ~ g")`, `tukey_hsd("y ~ g")` (one grouping column) |
 | `cor.test` | `cor_test(x, y, method="pearson" / "spearman" / "kendall")` |
 | `chisq.test` | `chisq_test(x, y)`, `chisq_test(x, p=[...])` |
-| `fisher.test` | `fisher_test(x, y)` (2 x 2) |
+| `fisher.test` | `fisher_test(x, y)`: odds ratio for 2 x 2, exact p-value for larger tables |
 | `prop.test`, `binom.test` | `prop_test(x, n)`, `binom_test(sex == "male")` |
 | `shapiro.test`, `ks.test` | `shapiro_test(x)`, `ks_test(x, "pnorm", mean=, sd=)`, `ks_test(x, y)` |
 | `bartlett.test`, `var.test`, `car::leveneTest` | `bartlett_test`, `var_test`, `levene_test` |
@@ -164,10 +168,10 @@ statsmodels' formula interface.
 | effectsize | `cohens_d`, `hedges_g`, `eta_squared` |
 | `power.t.test`, `power.prop.test` | `power_t_test`, `power_prop_test` |
 | `lm`, `glm` | `lm`, `glm`, with broom's `tidy`, `glance`, `augment`, and `anova`, `predict` |
+| `car::Anova` | `anova(fit, type=2)`, `anova(fit, type=3)` |
 
-Next: type II/III ANOVA, estimated marginal means, mixed models, and
-profile-likelihood intervals for `glm` (`tidy(conf_int=True)` gives Wald
-intervals for now, R's `confint.default`).
+Next: estimated marginal means, negative binomial, robust and quantile
+regression, ordinal models, and mixed models.
 
 ## How it works, and how it is checked
 

@@ -113,6 +113,8 @@ CASES = {
     "f_by_species": case(P, lambda: fisher_test("sex", "first_year"), "species"),
     "f_less": case(P, lambda: fisher_test("sex", "dream", alternative="less", conf_level=0.9)),
     "f_greater": case(P, lambda: fisher_test("sex", "first_year", alternative="greater")),
+    "f_rxc_sex_island": case(P, lambda: fisher_test("sex", "island")),
+    "f_rxc_by_sex": case(P, lambda: fisher_test("species", "island"), "sex"),
     "p_three": case(_all_islands, lambda: prop_test("x", "n")),
     "p_three_given": case(_all_islands, lambda: prop_test("x", "n", p=[0.5, 0.4, 0.6])),
     "p_two": case(_two_islands, lambda: prop_test("x", "n")),
@@ -146,6 +148,11 @@ def test_matches_r(name, backend):
         warnings.simplefilter("ignore")
         result = run_case(CASES[name], backend)
     assert_matches_r(result, _oracle("stats_tier1")[name], loose=LOOSE.get(name[:2]))
+
+
+def test_fisher_larger_table_matches_r():
+    # A 3 x 3 table of 344 penguins; R needs fisher.test(workspace=2e8).
+    assert_matches_r(fisher_test(P(), "island", "year"), _oracle("stats_tier1")["f_rxc_island_year"])
 
 
 # grouped results are the per-subset results ---------------------------------
@@ -277,7 +284,6 @@ def test_exact_rank_correlation_with_ties_warns_as_r_does():
         ({"x": ["a", "a"], "y": ["b", "c"]}, lambda: chisq_test("x", "y"), "at least 2 levels"),
         ({"x": ["a", "b"]}, lambda: chisq_test("x", p=[0.2, 0.2]), "sum to 1"),
         ({"x": ["a", "b"]}, lambda: chisq_test("x", p={"a": 0.5}), "no probability"),
-        ({"x": ["a", "b", "c", "a"], "y": ["u", "v", "u", "v"]}, lambda: fisher_test("x", "y"), "only 2 x 2"),
         ({"x": [5], "n": [3]}, lambda: prop_test("x", "n"), "not be greater"),
         ({"x": [1, 2], "n": [3, 4]}, lambda: binom_test("x", "n"), "one row per group"),
     ],

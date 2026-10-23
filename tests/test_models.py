@@ -124,6 +124,11 @@ def test_grouped_models_match_r(name, backend):
     assert_matches_r(result, _oracle("models")[name])
 
 
+def test_wald_intervals_match_confint_default():
+    fit = glm(P(), "factor(sex) ~ body_mass_g + species", binomial())
+    assert_matches_r(tidy(fit, conf_int=True, conf_method="wald"), _oracle("models")["glm_binomial__wald"])
+
+
 def test_model_comparisons_match_r():
     m = M()
     lm_fits = [lm(m, f) for f in ("mpg ~ wt", "mpg ~ wt + hp", "mpg ~ wt + hp + qsec")]
@@ -227,3 +232,35 @@ def test_exponentiate_gives_odds_ratios():
 def test_errors(call, message):
     with pytest.raises((ValueError, KeyError, TypeError), match=message):
         call()
+
+
+SUM = {"species": "sum", "sex": "sum"}
+TYPES = {
+    "type2_lm": lambda: anova(lm(P(), "body_mass_g ~ species * sex"), type=2),
+    "type3_lm_sum": lambda: anova(lm(P(), "body_mass_g ~ species * sex", contrasts=SUM), type=3),
+    "tidy_lm_sum": lambda: tidy(lm(P(), "body_mass_g ~ species * sex", contrasts=SUM), conf_int=True),
+    "type2_mixed": lambda: anova(lm(P(), "body_mass_g ~ flipper_length_mm * species + sex"), type="II"),
+    "type3_mixed": lambda: anova(lm(P(), "body_mass_g ~ flipper_length_mm * species + sex"), type="III"),
+    "type2_glm": lambda: anova(glm(P(), "factor(sex) ~ body_mass_g * species", binomial()), type=2),
+    "type3_glm_sum": lambda: anova(glm(P(), "factor(sex) ~ body_mass_g * species", binomial(),
+                                       contrasts={"species": "sum"}), type=3),
+    "type2_gamma": lambda: anova(glm(M(), "mpg ~ wt * factor(am) + hp", Gamma(link="log")), type=2),
+}
+
+
+@pytest.mark.parametrize("name", sorted(TYPES))
+def test_type_2_and_3_tables_match_r(name):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = TYPES[name]()
+    assert_matches_r(result, _oracle("models")[name])
+
+
+def test_type_2_and_3_need_one_model():
+    m = M()
+    with pytest.raises(ValueError, match="for one model"):
+        anova(lm(m, "mpg ~ wt"), lm(m, "mpg ~ wt + hp"), type=2)
+    with pytest.raises(ValueError, match="type must be"):
+        anova(lm(m, "mpg ~ wt"), type=4)
+    with pytest.raises(ValueError, match="contrasts must be"):
+        lm(m, "mpg ~ factor(cyl)", contrasts="helmert")
