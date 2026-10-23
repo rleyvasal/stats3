@@ -32,7 +32,7 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Pin the minimum versions
         if: matrix.deps == 'minimum'
-        run: python -m pip install "polars==1.39.*" "scipy==1.18.0" "pandas==2.2.2" "pyarrow==16.*" "tidy3==0.8.1"
+        run: python -m pip install "polars==1.39.*" "scipy==1.18.0" "pandas==2.2.2" "pyarrow==16.*" "tidy3==0.8.2"
       # Without R the oracle comparisons skip; the SciPy comparisons, the
       # backend tests and everything else still run.
       - name: Run tests

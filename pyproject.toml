@@ -39,7 +39,7 @@ dev = [
   "pandas>=2.2.2",
   "pyarrow>=16",
   # Only to test that tidy3 frames, groups and expressions work.
-  "tidy3>=0.8.1",
+  "tidy3>=0.8.2",
   "ipython>=8.0",
 ]
 
