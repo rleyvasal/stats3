@@ -1,6 +1,6 @@
 """The R oracle: runs tests/r_oracle_cases.R and compares stats3 with R.
 
-The cases need R with dplyr and jsonlite; without them the comparisons skip.
+The cases need R with dplyr, jsonlite, sandwich and lmtest; without them the comparisons skip.
 Set STATS3_R_ORACLE_MANIFEST to a pixi manifest to run R through pixi.
 """
 
@@ -86,7 +86,7 @@ def _r_command() -> list[str] | None:
     if rscript is None:
         return None
     probe = subprocess.run(
-        [rscript, "-e", "library(dplyr); library(jsonlite)"], capture_output=True
+        [rscript, "-e", "library(dplyr); library(jsonlite); library(sandwich); library(lmtest)"], capture_output=True
     )
     return [rscript] if probe.returncode == 0 else None
 
@@ -98,7 +98,7 @@ R_COMMAND = _r_command()
 def _oracle(case: str) -> dict:
     """R's results for one oracle case, as parsed JSON."""
     if R_COMMAND is None:
-        pytest.skip("R oracle unavailable; install R with dplyr and jsonlite")
+        pytest.skip("R oracle unavailable; install R with dplyr, jsonlite, sandwich and lmtest")
     completed = subprocess.run(
         [*R_COMMAND, str(R_CASES), case],
         cwd=ROOT, check=True, capture_output=True, text=True,

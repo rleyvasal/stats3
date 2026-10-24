@@ -135,6 +135,22 @@ glm(penguins, "sex ~ body_mass_g + species", family=binomial())
 glm(mtcars, "carb ~ hp + offset(log(gear))", family=poisson())
 ```
 
+Robust standard errors work as lmtest's `coeftest` with sandwich's
+estimators, and `modelsummary` puts models side by side:
+
+```python
+tidy(fit, vcov="HC3")                  # heteroskedasticity-consistent (HC0-HC5)
+tidy(fit, vcov=vcov_cl("island"))      # clustered; vcov_cl(["island", "year"]) for two-way
+tidy(fit, vcov=vcov_nw())              # Newey-West
+glance(fit, vcov="HC1")                # robust Wald F test of the slopes
+
+modelsummary({"Base": fit0, "Species": fit}, stars=True, output="markdown")
+```
+
+`na_action="exclude"` (R's `na.exclude`) keeps every row in `augment` and
+`predict`, with missing values where a row was not used, so the results line
+up with the data.
+
 Formulas follow R: `a * b`, `a:b`, `(a + b)^2`, `0 +` / `- 1`, `.`, `log(x)`,
 `I(x^2)`, `factor(cyl)`, `offset(...)`, and `cbind(successes, failures)` for
 binomial models. Factors use treatment contrasts with the first level as the
@@ -180,6 +196,8 @@ statsmodels' formula interface.
 | `power.t.test`, `power.prop.test`, `power.anova.test` | `power_t_test`, `power_prop_test`, `power_anova_test` |
 | `lm`, `glm` | `lm`, `glm`, with broom's `tidy`, `glance`, `augment`, and `anova`, `predict` |
 | `car::Anova` | `anova(fit, type=2)`, `anova(fit, type=3)` |
+| sandwich, `lmtest::coeftest` | `tidy(fit, vcov="HC3")`, `vcov_cl(...)`, `vcov_nw()`, `vcov(fit)` |
+| modelsummary | `modelsummary(fit1, fit2)`: a frame, Markdown or HTML |
 
 Next: estimated marginal means, negative binomial, robust and quantile
 regression, ordinal models, and mixed models.

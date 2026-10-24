@@ -28,6 +28,7 @@ import polars as pl
 
 from stats3._data import Data, Step, expression, step
 from stats3.core import _check_conf_level, _group_label, _sorted_keys, _special, _warn
+from stats3.robust import as_vcov, covariance
 from stats3.formula import (
     Design,
     Formula,
@@ -304,6 +305,9 @@ class _Frame:
     weights: np.ndarray
     offset: np.ndarray
     response_levels: list[Any] | None = None
+    index: np.ndarray | None = None  # the rows' positions in the input
+    all_rows: pl.DataFrame | None = None  # with na_action="exclude": every row of the group
+    all_index: np.ndarray | None = None
 
 
 def _response_parts(response: str) -> list[str]:
@@ -335,8 +339,11 @@ def _source_columns(labels: list[str], columns: list[str]) -> list[str]:
     return list(out)
 
 
+NA_ACTIONS = ("omit", "exclude", "fail")
+
+
 def _model_frames(
-    data: Data, formula: Formula, weights: Any, offset: Any, verb: str
+    data: Data, formula: Formula, weights: Any, offset: Any, verb: str, na_action: str = "omit"
 ) -> list[_Frame]:
     groups = list(data._groups)
     if formula.response is None:
@@ -365,6 +372,7 @@ def _model_frames(
     labels = responses + variables + offsets
     sources = _source_columns(labels, data.columns)
     frame = data._lf.select(
+        pl.int_range(pl.len(), dtype=pl.Int64).alias("__row"),
         *[pl.col(g) for g in groups],
         *[pl.col(c).alias(f"__src_{c}") for c in sources],
         **{k: v for k, v in exprs.items()},
@@ -377,7 +385,12 @@ def _model_frames(
         if dtype.is_float():
             ok = ok & pl.col(name).is_not_nan()
         keep = keep & ok
+    full = frame if na_action == "exclude" else None
+    height = frame.height
     frame = frame.filter(keep)
+    dropped = frame.height < height
+    if na_action == "fail" and dropped:
+        raise ValueError(f"{verb}(): missing values in the model's variables (na_action='fail')")
     for name in exprs:
         if frame.schema[name].is_float() and frame.select(pl.col(name).is_infinite().any()).item():
             raise ValueError(f"{verb}(): infinite values in {name.removeprefix('__')!r}")
@@ -413,8 +426,16 @@ def _model_frames(
             off = off + part[f"__offset{i}"].to_numpy()
         if offset is not None:
             off = off + part["__offset_arg"].to_numpy()
-        rows = part.select(*groups, *[pl.col(f"__src_{c}").alias(c) for c in sources])
-        out.append(_Frame(key, rows, y, encoded, w, off, response_levels))
+        source = [*groups, *[pl.col(f"__src_{c}").alias(c) for c in sources]]
+        rows = part.select(source)
+        all_rows = all_index = None
+        if full is not None:
+            whole = full
+            for g in groups:
+                whole = whole.filter(pl.col(g).is_null() if key[g] is None else pl.col(g) == key[g])
+            all_rows, all_index = whole.select(source), whole["__row"].to_numpy()
+        out.append(_Frame(key, rows, y, encoded, w, off, response_levels, part["__row"].to_numpy(),
+                          all_rows, all_index))
     return out
 
 
@@ -458,13 +479,22 @@ class _Fit:
     def coefficients(self) -> dict[str, float]:
         return dict(zip(self.design.names, self.coef.tolist()))
 
-    def _coef_table(self, conf_int: bool, conf_level: float, exponentiate: bool) -> pl.DataFrame:
+    def _coef_table(self, conf_int: bool, conf_level: float, exponentiate: bool,
+                    vcov: Any = None) -> pl.DataFrame:
+        """The coefficient table; with ``vcov``, tested with that covariance
+        as lmtest's ``coeftest`` and ``coefci`` do (t on the residual df for
+        ``lm``, normal for ``glm``)."""
         names = self.design.names
         est = self.coef.copy()
         se = np.full(len(names), np.nan)
-        se[self.qr.kept] = np.sqrt(np.diag(self.cov_unscaled) * self.scale)
+        spec = as_vcov(vcov)
+        if spec is None:
+            se[self.qr.kept] = np.sqrt(np.diag(self.cov_unscaled) * self.scale)
+        else:
+            se[self.qr.kept] = np.sqrt(np.diag(covariance(self, spec)))
         stat = est / se
-        p = self._p_values(stat)
+        normal = spec is not None and isinstance(self, GeneralizedLinearModel)
+        p = 2 * _special().ndtr(-np.abs(stat)) if normal else self._p_values(stat)
         table: dict[str, Any] = {"term": names, "estimate": est, "std_error": se, "statistic": stat, "p_value": p}
         if conf_int:
             _check_conf_level(conf_level)
@@ -477,6 +507,19 @@ class _Fit:
                 table["conf_low"], table["conf_high"] = np.exp(table["conf_low"]), np.exp(table["conf_high"])
         frame = pl.DataFrame(table)
         return frame.with_columns(pl.col(c).fill_nan(None) for c in frame.columns if c != "term")
+
+    def vcov_table(self, vcov: Any = None) -> pl.DataFrame:
+        spec = as_vcov(vcov)
+        kept = self.qr.kept
+        if spec is None:
+            names = self.design.names
+            full = np.full((len(names), len(names)), np.nan)
+            full[np.ix_(kept, kept)] = self.cov_unscaled * self.scale
+        else:
+            names = [self.design.names[i] for i in kept]
+            full = covariance(self, spec)
+        frame = pl.DataFrame({"term": names, **{n: full[:, i] for i, n in enumerate(names)}})
+        return self._with_key(frame.with_columns(pl.col(n).fill_nan(None) for n in names))
 
     def _x(self, frame: _Frame) -> np.ndarray:
         return build_design(self.formula, frame.variables, len(frame.weights)).matrix
@@ -520,6 +563,20 @@ class _Fit:
         if newdata is None:
             return self.design.matrix, self.frame.offset, self.frame.rows, self._data
         return self._new_design(newdata)
+
+    def _rows(self) -> pl.DataFrame:
+        """The fit's rows; with na_action="exclude", every row, as R's na.exclude."""
+        return self.frame.rows if self.frame.all_rows is None else self.frame.all_rows
+
+    def _padded(self, cols: pl.DataFrame) -> pl.DataFrame:
+        """Per-row results on the fit's rows, with missing values for the rows
+        left out when na_action="exclude" (R's ``naresid``)."""
+        if self.frame.all_rows is None:
+            return cols
+        where = np.searchsorted(self.frame.all_index, self.frame.index)
+        used = cols.with_columns(__stats3_at=pl.Series(where, dtype=pl.Int64))
+        at = pl.DataFrame({"__stats3_at": np.arange(len(self.frame.all_index), dtype=np.int64)})
+        return at.join(used, on="__stats3_at", how="left", maintain_order="left").drop("__stats3_at")
 
     def _write(self, frame: pl.DataFrame, data: Data | None = None) -> Any:
         return (data or self._data).write(frame)
@@ -605,8 +662,8 @@ class LinearModel(_Fit):
 
     # -- broom ----------------------------------------------------------------------
 
-    def tidy(self, conf_int: bool = False, conf_level: float = 0.95) -> pl.DataFrame:
-        return self._with_key(self._coef_table(conf_int, conf_level, False))
+    def tidy(self, conf_int: bool = False, conf_level: float = 0.95, vcov: Any = None) -> pl.DataFrame:
+        return self._with_key(self._coef_table(conf_int, conf_level, False, vcov))
 
     def _r_squared(self) -> tuple[float, float, float, float, float]:
         w, f = self.weights, self.fitted - self.frame.offset
@@ -629,8 +686,10 @@ class LinearModel(_Fit):
         n = len(res)
         return 0.5 * (np.sum(np.log(w)) - n * (math.log(2 * math.pi) + 1 - math.log(n) + math.log(np.sum(w * res**2))))
 
-    def glance(self) -> pl.DataFrame:
+    def glance(self, vcov: Any = None) -> pl.DataFrame:
         r2, adj, fstat, p, num_df = self._r_squared()
+        if vcov is not None and num_df > 0:
+            fstat, p = self._wald_f(covariance(self, as_vcov(vcov)))
         ll = self.log_lik()
         k = self.rank + 1
         frame = pl.DataFrame({
@@ -640,6 +699,15 @@ class LinearModel(_Fit):
             "deviance": [self.rss], "df_residual": [float(self.df_residual)], "nobs": [self.n],
         })
         return self._with_key(frame.with_columns(pl.col(pl.Float64).fill_nan(None)))
+
+    def _wald_f(self, cov: np.ndarray) -> tuple[float, float]:
+        """lmtest's ``waldtest``: all coefficients but the intercept are 0."""
+        kept = self.qr.kept
+        slopes = [i for i, j in enumerate(kept) if not (self.formula.intercept and j == 0)]
+        b = self.coef[kept][slopes]
+        v = cov[np.ix_(slopes, slopes)]
+        f = float(b @ np.linalg.solve(v, b)) / len(slopes)
+        return f, float(_special().fdtrc(len(slopes), self.df_residual, f))
 
     def _influence(self) -> dict[str, np.ndarray]:
         h = self.qr.hat()
@@ -655,7 +723,7 @@ class LinearModel(_Fit):
                 se_fit: bool = False) -> pl.DataFrame:
         if newdata is None:
             cols = self._influence()
-            frame = pl.concat([self.frame.rows, pl.DataFrame(cols)], how="horizontal")
+            frame = pl.concat([self._rows(), self._padded(pl.DataFrame(cols))], how="horizontal")
             return frame.with_columns(pl.col(c).fill_nan(None) for c in cols)
         return self._predict_frame(newdata, interval, conf_level, se_fit, augment=True)
 
@@ -694,6 +762,8 @@ class LinearModel(_Fit):
         if se_fit:
             cols[names[3]] = se
         out = pl.DataFrame(cols)
+        if newdata is None:
+            out, rows = self._padded(out), self._rows()
         if augment:
             out = pl.concat([rows, out], how="horizontal")
         return data.write(out)
@@ -837,14 +907,19 @@ class GeneralizedLinearModel(_Fit):
         return float(_special().ndtri(p))
 
     def tidy(self, conf_int: bool = False, conf_level: float = 0.95, exponentiate: bool = False,
-             conf_method: str = "profile") -> pl.DataFrame:
+             conf_method: str | None = None, vcov: Any = None) -> pl.DataFrame:
         """Coefficients. ``conf_int=True`` adds intervals: by default profile
         likelihood intervals as R's ``confint`` (``profile.glm``'s grid,
         spline and inversion), or ``conf_method="wald"`` for estimate ± z
-        times the standard error, R's ``confint.default``."""
+        times the standard error, R's ``confint.default``. With ``vcov``
+        the intervals are Wald intervals with the robust standard errors."""
+        if conf_method is None:
+            conf_method = "profile" if vcov is None else "wald"
         if conf_method not in ("profile", "wald"):
             raise ValueError("conf_method must be 'profile' or 'wald'")
-        table = self._coef_table(conf_int, conf_level, False)
+        if conf_method == "profile" and vcov is not None:
+            raise ValueError("profile intervals don't use vcov; use conf_method='wald'")
+        table = self._coef_table(conf_int, conf_level, False, vcov)
         if conf_int and conf_method == "profile":
             low, high = self._profile_intervals(conf_level)
             table = table.with_columns(conf_low=pl.Series(low).fill_nan(None), conf_high=pl.Series(high).fill_nan(None))
@@ -948,7 +1023,7 @@ class GeneralizedLinearModel(_Fit):
             std = pearson / np.sqrt(self.scale * (1 - hat))
         fitted = self.eta if type_predict == "link" else self.mu
         cols = {".fitted": fitted, ".resid": dev, ".hat": hat, ".sigma": sigma_i, ".cooksd": cooks, ".std_resid": std}
-        frame = pl.concat([self.frame.rows, pl.DataFrame(cols)], how="horizontal")
+        frame = pl.concat([self._rows(), self._padded(pl.DataFrame(cols))], how="horizontal")
         return frame.with_columns(pl.col(c).fill_nan(None) for c in cols)
 
     def predict(self, newdata: Any = None, *, type: str = "link", se_fit: bool = False) -> Any:  # noqa: A002
@@ -972,6 +1047,8 @@ class GeneralizedLinearModel(_Fit):
         if se_fit:
             cols[names[1]] = se
         out = pl.DataFrame(cols)
+        if newdata is None:
+            out, rows = self._padded(out), self._rows()
         if augment:
             out = pl.concat([rows, out], how="horizontal")
         return data.write(out)
@@ -1322,12 +1399,15 @@ def _contrasts(contrasts: Any, parsed: Formula, verb: str) -> dict[str, str]:
 
 
 def _model(verb: str, build: Callable[[Formula, _Frame, Data], _Fit], formula: str, weights: Any, offset: Any,
-           contrasts: Any = None):
+           contrasts: Any = None, na_action: str = "omit"):
+    if na_action not in NA_ACTIONS:
+        raise ValueError(f"{verb}(): na_action must be one of {list(NA_ACTIONS)}, got {na_action!r}")
+
     def _apply(data: Data) -> Any:
         parsed = parse_formula(formula, verb, data.columns)
         parsed.contrasts = _contrasts(contrasts, parsed, verb)
         parsed.offset_arg = offset
-        frames = _model_frames(data, parsed, weights, offset, verb)
+        frames = _model_frames(data, parsed, weights, offset, verb, na_action)
         fits = [build(parsed, frame, data) for frame in frames]
         return Models(fits, data) if data._groups else fits[0]
 
@@ -1335,7 +1415,8 @@ def _model(verb: str, build: Callable[[Formula, _Frame, Data], _Fit], formula: s
 
 
 @step
-def lm(formula: str, *, weights: Any = None, offset: Any = None, contrasts: Any = None) -> Step:
+def lm(formula: str, *, weights: Any = None, offset: Any = None, contrasts: Any = None,
+       na_action: str = "omit") -> Step:
     """Fit a linear model, as R's ``lm``.
 
     ``lm(penguins, "body_mass_g ~ flipper_length_mm + species")`` or
@@ -1345,13 +1426,18 @@ def lm(formula: str, *, weights: Any = None, offset: Any = None, contrasts: Any 
     ``{"species": "sum"}``) uses R's ``contr.sum``, as type III ANOVA
     wants. Print the fit for a summary; ``tidy``, ``glance``, ``augment``,
     ``anova`` and ``predict`` give tables.
+
+    ``na_action`` is R's: ``"omit"`` (the default) leaves the dropped rows
+    out of ``augment`` and ``predict``; ``"exclude"`` keeps every row, with
+    missing values where a row was not used, so the results line up with
+    the data; ``"fail"`` raises if any row has a missing value.
     """
-    return _model("lm", lambda f, fr, d: LinearModel(f, fr, d), formula, weights, offset, contrasts)
+    return _model("lm", lambda f, fr, d: LinearModel(f, fr, d), formula, weights, offset, contrasts, na_action)
 
 
 @step
 def glm(formula: str, family: Any = "gaussian", *, weights: Any = None, offset: Any = None,
-        contrasts: Any = None, maxit: int = 25, epsilon: float = 1e-8) -> Step:
+        contrasts: Any = None, maxit: int = 25, epsilon: float = 1e-8, na_action: str = "omit") -> Step:
     """Fit a generalized linear model, as R's ``glm``.
 
     ``family`` is ``binomial()``, ``poisson()``, ``Gamma()``,
@@ -1359,10 +1445,11 @@ def glm(formula: str, family: Any = "gaussian", *, weights: Any = None, offset: 
     ``quasipoisson()`` (with ``link=``), or one of their names. Binomial
     responses are 0/1, logical, a factor (first level is failure), or
     ``cbind(successes, failures)``; proportions take ``weights=`` trials.
+    ``na_action`` is as in ``lm``.
     """
     fam = _as_family(family)
     return _model("glm", lambda f, fr, d: GeneralizedLinearModel(f, fr, d, fam, maxit, epsilon),
-                  formula, weights, offset, contrasts)
+                  formula, weights, offset, contrasts, na_action)
 
 
 # broom verbs ------------------------------------------------------------------------------
@@ -1395,6 +1482,11 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
     ``std_error``, ``statistic``, ``p_value`` (``conf_int=True`` adds
     ``conf_low``/``conf_high``). ``fit >> tidy()`` works too.
 
+    ``vcov=`` uses a robust covariance, as lmtest's ``coeftest(fit, vcov)``:
+    a type such as ``"HC3"`` or ``"HC1"``, ``vcov_cl("island")`` for
+    clustered, or ``vcov_nw()`` for Newey-West standard errors. ``lm`` fits
+    keep t tests on the residual degrees of freedom; ``glm`` fits get z tests.
+
     Anything that is not a model goes to tidy3's ``tidy()`` when tidy3 is
     loaded, so ``from stats3 import *`` keeps tidy3's constructor working.
     """
@@ -1402,14 +1494,16 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
         opts = {"conf_int": conf_int, "conf_level": conf_level, **kwargs}
         if exponentiate:
             opts["exponentiate"] = True
-        unknown = set(kwargs) - {"conf_method"}
+        unknown = set(kwargs) - {"conf_method", "vcov"}
         if unknown:
             raise TypeError(f"tidy(): unexpected arguments for a model: {sorted(unknown)}")
         if "conf_method" in opts and not all(isinstance(f, GeneralizedLinearModel) for f in _fits(model)):
             raise TypeError("tidy(): conf_method is for glm fits")
+        if opts.get("vcov") is not None:
+            as_vcov(opts["vcov"])
         return _table(model, "tidy", **opts)
 
-    if x is None and not args and set(kwargs) <= {"conf_method"}:
+    if x is None and not args and set(kwargs) <= {"conf_method", "vcov"}:
         return _ModelVerb(run, "tidy")
     if _is_model(x):
         return run(x)
@@ -1418,13 +1512,35 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
     raise TypeError("tidy(): expected a model from lm() or glm(); for data, use tidy3's tidy()")
 
 
-def glance(x: Any = None) -> Any:
-    """One row of fit statistics per model, as broom's ``glance``."""
+def glance(x: Any = None, *, vcov: Any = None) -> Any:
+    """One row of fit statistics per model, as broom's ``glance``. For an
+    ``lm``, ``vcov=`` (as in ``tidy``) makes ``statistic`` and ``p_value`` the
+    robust Wald F test of all slopes, as lmtest's ``waldtest(fit, vcov=)``."""
+    opts = {} if vcov is None else {"vcov": vcov}
+    if vcov is not None:
+        as_vcov(vcov)
+
+    def run(model):
+        if vcov is not None and not all(isinstance(f, LinearModel) for f in _fits(model)):
+            raise TypeError("glance(): vcov is for lm fits")
+        return _table(model, "glance", **opts)
+
     if x is None:
-        return _ModelVerb(lambda m: _table(m, "glance"), "glance")
+        return _ModelVerb(run, "glance")
     if not _is_model(x):
         raise TypeError("glance(): expected a model from lm() or glm()")
-    return _table(x, "glance")
+    return run(x)
+
+
+def vcov(x: Any, vcov: Any = None) -> Any:  # noqa: A002 - R's name
+    """The coefficients' covariance matrix, as R's ``vcov`` (or with
+    ``vcov=``, the robust one, as sandwich's ``vcovHC``, ``vcovCL`` and
+    ``NeweyWest``): a ``term`` column, then one column per coefficient.
+    Aliased coefficients are missing, as in R; robust matrices leave them
+    out, as sandwich does."""
+    if not _is_model(x):
+        raise TypeError("vcov(): expected a model from lm() or glm()")
+    return _table(x, "vcov_table", vcov=vcov)
 
 
 def augment(x: Any = None, newdata: Any = None, **kwargs: Any) -> Any:

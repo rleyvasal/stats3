@@ -39,6 +39,7 @@ def test_formulas_elsewhere_are_left_alone():
     ("source", "expected"),
     [
         ('binom_test(sex == "male")', "binom_test(__stats3_col__('sex') == 'male')"),
+        ("tidy(fit, vcov=vcov_cl(island))", "tidy(fit, vcov=vcov_cl(__stats3_col__('island')))"),
         ("cor_test(a, b, by=species)",
          "cor_test(__stats3_col__('a'), __stats3_col__('b'), by=__stats3_col__('species'))"),
         ("x = 3\nbinom_test(sex == 'male', p=x)",

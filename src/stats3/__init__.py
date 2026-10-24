@@ -53,9 +53,12 @@ from stats3.models import (
     quasibinomial,
     quasipoisson,
     tidy,
+    vcov,
 )
 from stats3.pairwise import pairwise_prop_test, pairwise_t_test, pairwise_wilcox_test
 from stats3.ranks import cor_test, friedman_test, kruskal_test, wilcox_test
+from stats3.report import modelsummary
+from stats3.robust import vcov_cl, vcov_hc, vcov_nw
 
 # In IPython / Jupyter, turn on unquoted formulas and bare column names in
 # stats3 calls (from the next cell on), as tidy3 does for its verbs.
@@ -92,6 +95,7 @@ __all__ = [
     "lm",
     "mantelhaen_test",
     "mcnemar_test",
+    "modelsummary",
     "oneway_test",
     "p_adjust",
     "pairwise_prop_test",
@@ -111,5 +115,9 @@ __all__ = [
     "tidy",
     "tukey_hsd",
     "var_test",
+    "vcov",
+    "vcov_cl",
+    "vcov_hc",
+    "vcov_nw",
     "wilcox_test",
 ]

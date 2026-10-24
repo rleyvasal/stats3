@@ -4,6 +4,18 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+Robust standard errors, rows that line up with the data, and side-by-side model tables.
+
+### Added
+
+- `tidy(fit, vcov=...)` tests the coefficients with a robust covariance, as lmtest's `coeftest` and `coefci`: `vcov="HC3"` (or `"HC0"`-`"HC5"`, `"const"`; sandwich's `vcovHC`), `vcov=vcov_cl("island")` for clustered standard errors (one or more columns, types HC0-HC3; `vcovCL`), and `vcov=vcov_nw()` for Newey-West (`NeweyWest`, with its lag selection and prewhitening). `lm` fits keep t tests on the residual degrees of freedom; `glm` fits get z tests and Wald intervals.
+- `glance(fit, vcov=...)` for an `lm`: the robust Wald F test of all slopes, as `waldtest(fit, vcov=)`.
+- `vcov(fit)` and `vcov(fit, "HC3")`: the coefficient covariance matrix as a table.
+- `lm(..., na_action="exclude")` and `glm(...)`: as R's `na.exclude`, `augment()` and `predict()` keep every row, with missing values for rows the model didn't use, so results line up with the data. `na_action="fail"` raises on missing values; `"omit"` stays the default.
+- `modelsummary(fit1, fit2)` (or a dict of named fits, or a grouped fit): models side by side with standard errors, intervals or stars and fit statistics, as a frame or as Markdown or HTML text.
+
 ## 0.1.3 — 2026-10-24
 
 More of base R's tests: Welch's ANOVA, pairwise comparisons, Friedman, McNemar, Cochran-Mantel-Haenszel, exact Poisson and Fligner-Killeen tests, and ANOVA power.

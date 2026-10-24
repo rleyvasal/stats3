@@ -654,6 +654,62 @@ result <- switch(
       pa_sig=power_row(power.anova.test(groups=3, n=10, between.var=1, within.var=2, power=0.9, sig.level=NULL))
     ))
   },
+  robust = {
+    suppressPackageStartupMessages({library(sandwich); library(lmtest)})
+    p <- read.csv("tests/data/penguins.csv", na.strings="NA")
+    m <- read.csv("tests/data/mtcars.csv")
+    by <- function(data, groups, f) {
+      data |> group_by(across(all_of(groups))) |>
+        group_modify(function(d, k) f(d)) |> ungroup() |> as.data.frame()
+    }
+    ct <- function(fit, v) {
+      t <- coeftest(fit, vcov.=v); ci <- coefci(fit, vcov.=v)
+      data.frame(term=rownames(t), estimate=t[, 1], std_error=t[, 2], statistic=t[, 3],
+                 p_value=t[, 4], conf_low=ci[, 1], conf_high=ci[, 2], row.names=NULL)
+    }
+    vc <- function(v) data.frame(term=rownames(v), v, check.names=FALSE, row.names=NULL)
+    base <- lm(body_mass_g ~ flipper_length_mm + species, p)
+    weighted <- lm(body_mass_g ~ flipper_length_mm + species, p, weights=bill_depth_mm)
+    d <- p[complete.cases(p[, c("body_mass_g", "flipper_length_mm", "species")]), ]
+    logit <- glm(am ~ wt + hp, binomial, m)
+    gam <- glm(mpg ~ wt + hp, Gamma(link="log"), m)
+    pois <- glm(carb ~ hp + offset(log(gear)), poisson, m)
+    out <- list()
+    for (t in c("const", "HC0", "HC1", "HC2", "HC3", "HC4", "HC4m", "HC5")) {
+      out[[paste0("hc_", t)]] <- ct(base, vcovHC(base, type=t))
+    }
+    out$hc_weighted <- ct(weighted, vcovHC(weighted, type="HC3"))
+    out$hc_weighted_hc1 <- ct(weighted, vcovHC(weighted, type="HC1"))
+    out$cl_island <- ct(base, vcovCL(base, cluster=~island))
+    out$cl_two_way <- ct(base, vcovCL(base, cluster=~island + year))
+    out$cl_year_hc2 <- ct(base, vcovCL(base, cluster=~year, type="HC2"))
+    out$cl_year_hc3 <- ct(base, vcovCL(base, cluster=~year, type="HC3"))
+    out$cl_weighted_hc2 <- ct(weighted, vcovCL(weighted, cluster=~year, type="HC2"))
+    out$cl_no_adjust <- ct(base, vcovCL(base, cluster=~island, type="HC0", cadjust=FALSE))
+    out$nw_default <- ct(base, NeweyWest(base))
+    out$nw_lag <- ct(base, NeweyWest(base, lag=4, prewhite=FALSE, adjust=TRUE))
+    out$nw_order <- ct(base, NeweyWest(base, order.by=~flipper_length_mm, data=d))
+    out$glm_hc3 <- ct(logit, vcovHC(logit, type="HC3"))
+    out$glm_hc0 <- ct(logit, vcovHC(logit, type="HC0"))
+    out$glm_cl <- ct(logit, vcovCL(logit, cluster=~cyl))
+    out$gamma_hc1 <- ct(gam, vcovHC(gam, type="HC1"))
+    out$gamma_nw <- ct(gam, NeweyWest(gam))
+    out$pois_cl <- ct(pois, vcovCL(pois, cluster=~cyl + am))
+    out$by_species <- by(p, "species", function(d) ct(lm(body_mass_g ~ flipper_length_mm + sex, d),
+      vcovCL(lm(body_mass_g ~ flipper_length_mm + sex, d), cluster=~year)))
+    w <- waldtest(base, vcov=vcovHC(base, type="HC1"))
+    out$wald_hc1 <- data.frame(statistic=w$F[2], p_value=w$`Pr(>F)`[2])
+    out$vcov_hc3 <- vc(vcovHC(base, type="HC3"))
+    out$vcov_classical <- vc(vcov(base))
+    ex <- lm(body_mass_g ~ flipper_length_mm + sex, p, na.action=na.exclude)
+    pr <- predict(ex, interval="confidence")
+    out$exclude_lm <- data.frame(fit=pr[, 1], lwr=pr[, 2], upr=pr[, 3])
+    out$exclude_resid <- data.frame(.fitted=unname(fitted(ex)), .resid=unname(residuals(ex)))
+    exg <- glm(factor(sex) ~ body_mass_g + species, binomial, p, na.action=na.exclude)
+    pg <- predict(exg, type="response", se.fit=TRUE)
+    out$exclude_glm <- data.frame(fit=unname(pg$fit), se_fit=unname(pg$se.fit))
+    out
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 
