@@ -163,6 +163,21 @@ Offsets use the same averaging weights as the means. With `weights="cells"`,
 R's emmeans 2.0.4 uses equal weights for offsets; matching stats3 in that
 case requires supplying the cell-weighted offsets explicitly in R.
 
+For overdispersed counts, `glm_nb()` estimates the negative binomial size
+`theta` alongside the coefficients, as MASS's `glm.nb`:
+
+```python
+fit = glm_nb(counts, "events ~ treatment + offset(log(exposure))")
+fit.theta, fit.se_theta              # size estimate and its standard error
+tidy(fit, conf_int=True)             # profile intervals, with theta fixed
+anova(smaller_fit, fit)              # likelihood ratio, theta fitted for each model
+```
+
+`glm(..., family=negative_binomial(2))` fixes theta at 2, as MASS's
+`negative.binomial`. Both forms support log, identity and sqrt links,
+grouped fits, weights, offsets, predictions, robust covariance and marginal
+means. Single-model `anova(fit)` holds theta fixed and warns, as MASS does.
+
 `na_action="exclude"` (R's `na.exclude`) keeps every row in `augment` and
 `predict`, with missing values where a row was not used, so the results line
 up with the data.
@@ -215,8 +230,9 @@ statsmodels' formula interface.
 | sandwich, `lmtest::coeftest` | `tidy(fit, vcov="HC3")`, `vcov_cl(...)`, `vcov_nw()`, `vcov(fit)` |
 | modelsummary | `modelsummary(fit1, fit2)`: a frame, Markdown or HTML |
 | emmeans | `emmeans(fit, "species")`, `pairs(emm)`, `contrast(emm, ...)` |
+| MASS | `glm_nb("y ~ x")`, `glm("y ~ x", family=negative_binomial(theta))` |
 
-The rest of tier 2: negative binomial, robust and quantile regression,
+The rest of tier 2: robust and quantile regression,
 ordinal and multinomial models, and mixed models. After tier 2 comes the
 Bayesian extra.
 

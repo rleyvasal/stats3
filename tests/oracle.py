@@ -2,6 +2,7 @@
 
 The cases need R with dplyr, jsonlite, sandwich and lmtest; without them the comparisons skip.
 Marginal means comparisons additionally need emmeans.
+Negative binomial comparisons need MASS and emmeans.
 Set STATS3_R_ORACLE_MANIFEST to a pixi manifest to run R through pixi.
 """
 

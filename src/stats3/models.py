@@ -113,8 +113,11 @@ class Family:
     aic: Callable[..., float]
     validmu: Callable[[np.ndarray], bool]
     dispersion: float | None  # fixed at 1, or None when estimated
+    theta: float | None = None  # negative binomial size, when applicable
 
     def __repr__(self) -> str:
+        if self.theta is not None:
+            return f"negative_binomial(theta={self.theta:.5g}, link={self.link.name!r})"
         return f"{self.family}(link = {self.link.name!r})"
 
 
@@ -848,6 +851,8 @@ class LinearModel(_Fit):
 class GeneralizedLinearModel(_Fit):
     """A fitted ``glm``."""
 
+    _extra_parameters = 0
+
     def __init__(self, formula: Formula, frame: _Frame, data: Data, family: Family,
                  maxit: int = 25, epsilon: float = 1e-8, verb: str = "glm"):
         design = build_design(formula, frame.variables, len(frame.weights))
@@ -986,12 +991,14 @@ class GeneralizedLinearModel(_Fit):
         return low, high
 
     def log_lik(self) -> float:
-        p = self.rank + (1 if self.family.family in ("gaussian", "Gamma", "inverse.gaussian") else 0)
-        return p - self.aic / 2
+        return self._parameter_count() - self.aic / 2
+
+    def _parameter_count(self) -> int:
+        return self.rank + int(self.family.family in ("gaussian", "Gamma", "inverse.gaussian")) + self._extra_parameters
 
     def glance(self) -> pl.DataFrame:
         ll = self.log_lik()
-        k = self.rank + (1 if self.family.family in ("gaussian", "Gamma", "inverse.gaussian") else 0)
+        k = self._parameter_count()
         nobs = int(np.sum(self.prior_weights != 0))
         frame = pl.DataFrame({
             "null_deviance": [self.null_deviance], "df_null": [float(self.df_null)],
@@ -1120,7 +1127,7 @@ class GeneralizedLinearModel(_Fit):
 
     def __repr__(self) -> str:
         table = self._coef_table(False, 0.95, False).select("term", "estimate", "std_error", "statistic", "p_value")
-        head = f"glm({self.formula.text}, family = {self.family!r})" + _key_text(self.key)
+        head = f"{self.verb}({self.formula.text}, family = {self.family!r})" + _key_text(self.key)
         disp = (f"dispersion {self.scale:.4g} (estimated)" if self.family.dispersion is None
                 else f"dispersion {self.scale:g}")
         foot = (f"null deviance {self.null_deviance:.5g} on {self.df_null} df · residual deviance "
@@ -1221,6 +1228,10 @@ def _glm_fit(x, y, w, offset, family, n_trials, maxit, epsilon, verb, etastart=N
     nobs, nvars = x.shape
     if family.family in ("binomial", "quasibinomial"):
         mustart = (w * y + 0.5) / (w + 1) if np.all(n_trials == 1) else (n_trials * y + 0.5) / (n_trials + 1)
+    elif family.theta is not None:
+        if np.any(y < 0):
+            raise ValueError(f"{verb}(): negative values not allowed for the negative binomial family")
+        mustart = y + (y == 0) / 6
     elif family.family in ("poisson", "quasipoisson"):
         if np.any(y < 0):
             raise ValueError(f"{verb}(): negative values not allowed for the 'Poisson' family")
@@ -1443,7 +1454,9 @@ def glm(formula: str, family: Any = "gaussian", *, weights: Any = None, offset: 
 
     ``family`` is ``binomial()``, ``poisson()``, ``Gamma()``,
     ``inverse_gaussian()``, ``gaussian()``, ``quasibinomial()`` or
-    ``quasipoisson()`` (with ``link=``), or one of their names. Binomial
+    ``quasipoisson()`` (with ``link=``), or one of their names.
+    ``negative_binomial(theta)`` fixes a negative binomial size; ``glm_nb``
+    estimates it. Binomial
     responses are 0/1, logical, a factor (first level is failure), or
     ``cbind(successes, failures)``; proportions take ``weights=`` trials.
     ``na_action`` is as in ``lm``.
@@ -1615,6 +1628,12 @@ def anova(*models: Any, test: Any = None, type: Any = 1) -> Any:  # noqa: A002
         raise ValueError("anova(): models were not all fitted to the same size of dataset")
     if all(isinstance(f, LinearModel) for f in fits):
         return fits[0]._write(_anova_lm(fits))
+    from stats3.negbin import NegativeBinomialModel, _anova_nb
+
+    if any(isinstance(f, NegativeBinomialModel) for f in fits):
+        if not all(isinstance(f, NegativeBinomialModel) for f in fits):
+            raise TypeError("anova(): compare glm_nb fits with glm_nb fits")
+        return fits[0]._write(_anova_nb(fits, test))
     if all(isinstance(f, GeneralizedLinearModel) for f in fits):
         return fits[0]._write(_anova_glm(fits, test))
     raise TypeError("anova(): compare lm fits with lm fits, glm fits with glm fits")
