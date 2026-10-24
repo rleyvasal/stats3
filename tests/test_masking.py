@@ -19,6 +19,8 @@ NS = {"penguins", "df", "mask", "group_by", "mutate", "stats3", "log", "x", "pl"
         ("wilcox_test(log(y)   ~ g, mu=0.3)", "wilcox_test('log(y) ~ g', mu=0.3)"),
         ("stats3.t_test(\n    body_mass_g ~\n      sex,\n)", "stats3.t_test('body_mass_g ~ sex')"),
         ('t_test("y ~ g")', "t_test('y ~ g')"),
+        ("friedman_test(v ~ k | id)", "friedman_test('v ~ k | id')"),
+        ("pairwise_t_test(y ~ g, pool_sd=False)", "pairwise_t_test('y ~ g', pool_sd=False)"),
         ("df.filter(~mask)", "df.filter(~mask)"),
         ("x = ~x", "x = ~x"),
     ],

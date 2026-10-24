@@ -24,6 +24,7 @@ from stats3.core import (
     _finish,
     _group_label,
     _level_rank,
+    _p_normal,
     _present,
     _sorted_keys,
     _special,
@@ -640,4 +641,390 @@ def _binom_row(x: float, n: float, p: float, alternative: str, conf_level: float
     return {
         "estimate": x / n, "statistic": float(x), "trials": float(n),
         "p_value": p_value, "conf_low": low, "conf_high": high,
+    }
+
+
+# mcnemar_test ----------------------------------------------------------------
+
+
+@step
+def mcnemar_test(x: Any, y: Any, *, correct: bool = True) -> Step:
+    """McNemar's test of symmetry for paired counts, as R's ``mcnemar.test(x, y)``.
+
+    ``x`` and ``y`` are two ratings of the same subjects (one row each), with
+    the same number of levels; level i of ``x`` is paired with level i of
+    ``y``. A 2 x 2 table gets the continuity correction unless
+    ``correct=False``. Columns: ``statistic``, ``df``, ``p_value``, ``method``.
+    """
+
+    def _apply(tf: Any) -> Any:
+        special = _special()
+        groups = list(tf._groups or [])
+        names = [_column(tf, x, "x", "mcnemar_test"), _column(tf, y, "y", "mcnemar_test")]
+        keys, tables = _tables(tf, groups, names)
+        statistic, df, method = [], [], []
+        for label, table in zip(_labels(keys, groups), tables):
+            cells = table["counts"]
+            r = cells.shape[0]
+            if r < 2 or cells.shape[1] != r:
+                raise ValueError(
+                    f"mcnemar_test(): 'x' and 'y' must have the same number of levels (minimum 2){label}"
+                )
+            name = "McNemar's Chi-squared test"
+            diff = cells - cells.T
+            if correct and r == 2 and np.any(diff != 0):
+                diff = np.abs(diff) - 1
+                name += " with continuity correction"
+            upper = np.triu_indices(r, 1)
+            statistic.append(float(np.sum(diff[upper] ** 2 / (cells + cells.T)[upper])))
+            df.append(r * (r - 1) / 2)
+            method.append(name)
+        stat_arr, df_arr = np.array(statistic), np.array(df, dtype=float)
+        return _finish(tf, keys, groups, {
+            "statistic": stat_arr,
+            "df": df_arr,
+            "p_value": special.chdtrc(df_arr, stat_arr),
+            "method": pl.Series(method, dtype=pl.String),
+        })
+
+    return Step(_apply, "mcnemar_test")
+
+
+# mantelhaen_test -------------------------------------------------------------
+
+
+@step
+def mantelhaen_test(
+    x: Any,
+    y: Any,
+    z: Any,
+    *,
+    alternative: str = "two.sided",
+    correct: bool = True,
+    exact: bool = False,
+    conf_level: float = 0.95,
+) -> Step:
+    """Cochran-Mantel-Haenszel test, as R's ``mantelhaen.test(x, y, z)``:
+    are ``x`` and ``y`` independent within each stratum of ``z``?
+
+    For 2 x 2 tables, ``estimate`` is the Mantel-Haenszel common odds ratio
+    with its interval, and ``alternative`` and ``correct`` apply as in R;
+    ``exact=True`` gives the exact conditional test, with the conditional
+    maximum likelihood odds ratio and its exact interval. Larger tables get
+    the generalized Cochran-Mantel-Haenszel statistic. Columns:
+    ``estimate``, ``statistic``, ``df``, ``p_value``, ``conf_low``,
+    ``conf_high``, ``method``, ``alternative`` (only the test's columns
+    when no table is 2 x 2).
+    """
+    alternative = _alternative(alternative)
+    _check_conf_level(conf_level)
+
+    def _apply(tf: Any) -> Any:
+        groups = list(tf._groups or [])
+        names = [
+            _column(tf, x, "x", "mantelhaen_test"),
+            _column(tf, y, "y", "mantelhaen_test"),
+            _column(tf, z, "z", "mantelhaen_test"),
+        ]
+        keys, tables = _tables(tf, groups, names)
+        rows = []
+        for label, table in zip(_labels(keys, groups), tables):
+            cells = table["counts"]
+            if min(cells.shape[:2]) < 2:
+                raise ValueError(f"mantelhaen_test(): 'x' and 'y' must have at least 2 levels{label}")
+            if np.any(cells.sum(axis=(0, 1)) < 2):
+                raise ValueError(f"mantelhaen_test(): sample size in each stratum must be > 1{label}")
+            if cells.shape[:2] != (2, 2):
+                rows.append(_cmh_row(cells))
+            elif exact:
+                rows.append(_mh_exact_row(cells.astype(np.int64), alternative, conf_level))
+            else:
+                rows.append(_mh_row(cells, alternative, correct, conf_level))
+        if not any("estimate" in row for row in rows):
+            columns = ("statistic", "df", "p_value")
+            out = {name: pl.Series([row[name] for row in rows], dtype=pl.Float64) for name in columns}
+            out["method"] = pl.Series([row["method"] for row in rows], dtype=pl.String)
+            return _finish(tf, keys, groups, out)
+        columns = ("estimate", "statistic", "df", "p_value", "conf_low", "conf_high")
+        # A stratum-free zero cell makes the interval NaN; R reports it missing.
+        out = {name: pl.Series([row.get(name) for row in rows], dtype=pl.Float64).fill_nan(None) for name in columns}
+        out["method"] = pl.Series([row["method"] for row in rows], dtype=pl.String)
+        out["alternative"] = pl.Series([row.get("alternative") for row in rows], dtype=pl.String)
+        return _finish(tf, keys, groups, out)
+
+    return Step(_apply, "mantelhaen_test")
+
+
+def _mh_row(x: np.ndarray, alternative: str, correct: bool, conf_level: float) -> dict[str, Any]:
+    special = _special()
+    a, b, c, d = x[0, 0], x[0, 1], x[1, 0], x[1, 1]
+    n = x.sum(axis=(0, 1))
+    rows, cols = x.sum(axis=1), x.sum(axis=0)
+    delta = np.sum(a - rows[0] * cols[0] / n)
+    yates = 0.5 if correct and abs(delta) >= 0.5 else 0.0
+    variance = np.sum(rows[0] * rows[1] * cols[0] * cols[1] / (n**2 * (n - 1)))
+    statistic = (abs(delta) - yates) ** 2 / variance
+    if alternative == "two.sided":
+        p_value = special.chdtrc(1, statistic)
+    else:
+        p_value = _p_normal(np.sign(delta) * np.sqrt(statistic), alternative)
+    s_diag, s_offd = np.sum(a * d / n), np.sum(b * c / n)
+    estimate = s_diag / s_offd
+    # Robins, Breslow and Greenland's variance of log(estimate).
+    sd = np.sqrt(
+        np.sum((a + d) * a * d / n**2) / (2 * s_diag**2)
+        + np.sum(((a + d) * b * c + (b + c) * a * d) / n**2) / (2 * s_diag * s_offd)
+        + np.sum((b + c) * b * c / n**2) / (2 * s_offd**2)
+    )
+    if alternative == "less":
+        low, high = 0.0, estimate * np.exp(special.ndtri(conf_level) * sd)
+    elif alternative == "greater":
+        low, high = estimate * np.exp(-special.ndtri(conf_level) * sd), np.inf
+    else:
+        q = special.ndtri((1 - conf_level) / 2)
+        low, high = estimate * np.exp(q * sd), estimate * np.exp(-q * sd)
+    with_ = "with" if yates else "without"
+    return {
+        "estimate": float(estimate), "statistic": float(statistic), "df": 1.0,
+        "p_value": float(p_value), "conf_low": float(low), "conf_high": float(high),
+        "method": f"Mantel-Haenszel chi-squared test {with_} continuity correction",
+        "alternative": alternative,
+    }
+
+
+def _mh_exact_row(x: np.ndarray, alternative: str, conf_level: float) -> dict[str, Any]:
+    """R's exact conditional test: the distribution of the summed top-left
+    cells given every stratum's margins, a convolution of hypergeometrics."""
+    from scipy.optimize import brentq
+    from scipy.stats import hypergeom
+
+    cols = x.sum(axis=0)
+    m, n = cols[0], cols[1]
+    t = x.sum(axis=1)[0]
+    s = int(x[0, 0].sum())
+    lo, hi = int(np.sum(np.maximum(0, t - n))), int(np.sum(np.minimum(m, t)))
+    dc = np.ones(1)
+    for mk, nk, tk in zip(m, n, t):
+        y, z = max(0, tk - nk), min(mk, tk)
+        dc = np.convolve(dc, hypergeom.pmf(np.arange(y, z + 1), mk + nk, mk, tk))
+        dc /= dc.sum()
+    support = np.arange(lo, hi + 1)
+    logdc = np.log(dc)
+
+    def density(ncp: float) -> np.ndarray:
+        if ncp == 1:
+            return dc
+        e = logdc + np.log(ncp) * support
+        e = np.exp(e - e.max())
+        return e / e.sum()
+
+    def mean(ncp: float) -> float:
+        if ncp == 0:
+            return lo
+        if ncp == np.inf:
+            return hi
+        return float(np.sum(support * density(ncp)))
+
+    def tail(q: int, ncp: float, upper: bool = False) -> float:
+        if ncp == 0:
+            return float(q <= lo if upper else q >= lo)
+        if ncp == np.inf:
+            return float(q <= hi if upper else q >= hi)
+        dens = density(ncp)
+        return float(np.sum(dens[support >= q] if upper else dens[support <= q]))
+
+    eps = np.finfo(float).eps
+
+    def root(f, inverse: bool) -> float:
+        if inverse:
+            return 1 / brentq(lambda u: f(1 / u), eps, 1, xtol=1e-14, rtol=4 * eps)
+        return brentq(f, 0, 1, xtol=1e-14, rtol=4 * eps)
+
+    def mle() -> float:
+        if s == lo:
+            return 0.0
+        if s == hi:
+            return np.inf
+        mu = mean(1)
+        if mu == s:
+            return 1.0
+        return root(lambda u: mean(u) - s, inverse=mu < s)
+
+    def ncp_upper(alpha: float) -> float:
+        if s == hi:
+            return np.inf
+        p = tail(s, 1)
+        if p == alpha:
+            return 1.0
+        return root(lambda u: tail(s, u) - alpha, inverse=p > alpha)
+
+    def ncp_lower(alpha: float) -> float:
+        if s == lo:
+            return 0.0
+        p = tail(s, 1, upper=True)
+        if p == alpha:
+            return 1.0
+        return root(lambda u: tail(s, u, upper=True) - alpha, inverse=p < alpha)
+
+    if alternative == "less":
+        p_value = tail(s, 1)
+        low, high = 0.0, ncp_upper(1 - conf_level)
+    elif alternative == "greater":
+        p_value = tail(s, 1, upper=True)
+        low, high = ncp_lower(1 - conf_level), np.inf
+    else:
+        p_value = float(np.sum(dc[dc <= dc[s - lo] * (1 + 1e-7)]))
+        alpha = (1 - conf_level) / 2
+        low, high = ncp_lower(alpha), ncp_upper(alpha)
+    return {
+        "estimate": float(mle()), "statistic": float(s), "df": None,
+        "p_value": p_value, "conf_low": float(low), "conf_high": float(high),
+        "method": "Exact conditional test of independence in 2 x 2 x k tables",
+        "alternative": alternative,
+    }
+
+
+def _cmh_row(x: np.ndarray) -> dict[str, Any]:
+    """The generalized Cochran-Mantel-Haenszel M^2 for I x J x K tables."""
+    special = _special()
+    i, j = x.shape[:2]
+    df = (i - 1) * (j - 1)
+    total, expected = np.zeros(df), np.zeros(df)
+    v = np.zeros((df, df))
+    for k in range(x.shape[2]):
+        f = x[:, :, k]
+        ntot = f.sum()
+        rows, cols = f.sum(axis=1)[:-1], f.sum(axis=0)[:-1]
+        # R's c(): column-major order.
+        total += f[:-1, :-1].ravel(order="F")
+        expected += np.outer(rows, cols).ravel(order="F") / ntot
+        v += np.kron(
+            np.diag(ntot * cols) - np.outer(cols, cols),
+            np.diag(ntot * rows) - np.outer(rows, rows),
+        ) / (ntot**2 * (ntot - 1))
+    diff = total - expected
+    statistic = float(diff @ np.linalg.solve(v, diff))
+    return {
+        "statistic": statistic, "df": float(df), "p_value": float(special.chdtrc(df, statistic)),
+        "method": "Cochran-Mantel-Haenszel test",
+    }
+
+
+# poisson_test ----------------------------------------------------------------
+
+
+@step
+def poisson_test(
+    x: Any,
+    T: Any = 1,
+    *,
+    r: float = 1,
+    alternative: str = "two.sided",
+    conf_level: float = 0.95,
+) -> Step:
+    """Exact Poisson test, as R's ``poisson.test(x, T)``.
+
+    ``x`` is a column of event counts and ``T`` a column of time bases (or a
+    number), one row per sample:
+
+    - one row: is the event rate ``r``? ``estimate`` is ``x / T``, with
+      the exact interval; ``time_base`` is ``T``.
+    - two rows: is the rate ratio (first over second) ``r``? Tested by
+      R's conditional binomial test; ``expected_count1`` is the first
+      count expected under the null.
+
+    Columns: ``estimate``, ``statistic`` (the first count), ``time_base``
+    and ``expected_count1`` (each missing where it does not apply), ``p_value``, ``conf_low``, ``conf_high``,
+    ``method``, ``alternative``.
+    """
+    alternative = _alternative(alternative)
+    _check_conf_level(conf_level)
+    if not np.isscalar(r) or np.isnan(r) or r < 0:
+        raise ValueError(f"poisson_test(): 'r' must be a single positive number, got {r!r}")
+
+    def _apply(tf: Any) -> Any:
+        groups = list(tf._groups or [])
+        xs = _counts_column(tf, x, "x", "poisson_test")
+        ts = pl.lit(float(T)) if isinstance(T, (int, float)) else _counts_column(tf, T, "T", "poisson_test")
+        table, samples = _count_lists(tf, groups, [xs, ts])
+        rows = [_poisson_row(s["c0"], s["c1"], r, alternative, conf_level, s["label"]) for s in samples]
+        columns: dict[str, Any] = {
+            "estimate": pl.Series([row["estimate"] for row in rows], dtype=pl.Float64),
+            "statistic": pl.Series([row["statistic"] for row in rows], dtype=pl.Float64),
+        }
+        for name in ("time_base", "expected_count1"):
+            columns[name] = pl.Series([row.get(name) for row in rows], dtype=pl.Float64)
+        for name in ("p_value", "conf_low", "conf_high"):
+            columns[name] = pl.Series([row[name] for row in rows], dtype=pl.Float64)
+        columns["method"] = pl.Series([row["method"] for row in rows], dtype=pl.String)
+        columns["alternative"] = alternative
+        return _finish(tf, table, groups, columns)
+
+    return Step(_apply, "poisson_test")
+
+
+def _poisson_row(x: np.ndarray, t: np.ndarray, r: float, alternative: str, conf_level: float, label: str) -> dict[str, Any]:
+    from scipy.stats import poisson
+
+    special = _special()
+    xr = np.round(x)
+    if np.any(~np.isfinite(x) | (x < 0)) or np.max(np.abs(x - xr), initial=0) > 1e-7:
+        raise ValueError(f"poisson_test(): 'x' must be finite, nonnegative, and integer{label}")
+    if np.any(np.isnan(t) | (t < 0)):
+        raise ValueError(f"poisson_test(): 'T' must be nonnegative{label}")
+    k = len(xr)
+    if k < 1:
+        raise ValueError(f"poisson_test(): not enough data{label}")
+    if k > 2:
+        raise ValueError(f"poisson_test(): the case k > 2 is unimplemented{label}")
+    if k == 2:
+        p = r * t[0] / (r * t[0] + t[1])
+        row = _binom_row(xr[0], xr.sum(), p, alternative, conf_level, label)
+        low, high = (pp / (1 - pp) * t[1] / t[0] if pp < 1 else np.inf for pp in (row["conf_low"], row["conf_high"]))
+        return {
+            "estimate": (xr[0] / t[0]) / (xr[1] / t[1]), "statistic": float(xr[0]),
+            "expected_count1": xr.sum() * r * t[0] / (t[0] + r * t[1]),
+            "p_value": row["p_value"], "conf_low": float(low), "conf_high": float(high),
+            "method": "Comparison of Poisson rates",
+        }
+    x1, t1 = float(xr[0]), float(t[0])
+    m = r * t1
+    if alternative == "less":
+        p_value = float(poisson.cdf(x1, m))
+    elif alternative == "greater":
+        p_value = float(poisson.sf(x1 - 1, m))
+    elif m == 0:
+        p_value = float(x1 == 0)
+    else:
+        d = poisson.pmf(x1, m)
+        if x1 == m:
+            p_value = 1.0
+        elif x1 < m:
+            big = math.ceil(2 * m - x1)
+            while poisson.pmf(big, m) > d:
+                big *= 2
+            i = np.arange(math.ceil(m), big + 1)
+            yy = int(np.sum(poisson.pmf(i, m) <= d * (1 + 1e-7)))
+            p_value = float(poisson.cdf(x1, m) + poisson.sf(big - yy, m))
+        else:
+            i = np.arange(0, math.floor(m) + 1)
+            yy = int(np.sum(poisson.pmf(i, m) <= d * (1 + 1e-7)))
+            p_value = float(poisson.cdf(yy - 1, m) + poisson.sf(x1 - 1, m))
+
+    def lower(alpha: float) -> float:
+        return 0.0 if x1 == 0 else float(special.gammaincinv(x1, alpha))
+
+    def upper(alpha: float) -> float:
+        return float(special.gammaincinv(x1 + 1, 1 - alpha))
+
+    if alternative == "less":
+        low, high = 0.0, upper(1 - conf_level)
+    elif alternative == "greater":
+        low, high = lower(1 - conf_level), np.inf
+    else:
+        alpha = (1 - conf_level) / 2
+        low, high = lower(alpha), upper(alpha)
+    return {
+        "estimate": x1 / t1, "statistic": x1, "time_base": t1, "p_value": p_value,
+        "conf_low": low / t1, "conf_high": high / t1, "method": "Exact Poisson test",
     }

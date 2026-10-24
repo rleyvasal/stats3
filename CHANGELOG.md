@@ -4,6 +4,21 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+More of base R's tests: Welch's ANOVA, pairwise comparisons, Friedman, McNemar, Cochran-Mantel-Haenszel, exact Poisson and Fligner-Killeen tests, and ANOVA power.
+
+### Added
+
+- `oneway_test("y ~ g")`: R's `oneway.test`, Welch's one-way ANOVA by default, the classic F test with `var_equal=True`.
+- `pairwise_t_test("y ~ g")`, `pairwise_wilcox_test("y ~ g")` and `pairwise_prop_test(x, n)`: R's `pairwise.*.test`, with `p_adjust_method` (Holm by default), pooled or Welch SDs and paired tests. One row per pair (`group1`, `group2`, `p_value`), as broom's `tidy` gives, and each group adjusted on its own.
+- `friedman_test("y ~ g | b")`: R's `friedman.test` for unreplicated complete block designs, with its tie correction.
+- `mcnemar_test(x, y)`: R's `mcnemar.test`, with the continuity correction for 2 x 2 tables.
+- `mantelhaen_test(x, y, z)`: R's `mantelhaen.test`: the Mantel-Haenszel test and common odds ratio for 2 x 2 x K tables (`exact=True` for the exact conditional test), and the generalized Cochran-Mantel-Haenszel test for larger tables.
+- `poisson_test(x, T)`: R's `poisson.test`, the exact test of one rate or of the ratio of two.
+- `fligner_test("y ~ g")`: R's `fligner.test` of equal variances.
+- `power_anova_test(...)`: R's `power.anova.test` for a balanced one-way ANOVA.
+
 ## 0.1.2 — 2026-10-23
 
 `predict()` keeps `offset=` on new rows and gives intervals on the fitted rows.

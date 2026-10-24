@@ -35,16 +35,20 @@ from stats3.core import (
 
 
 def _group_values(
-    tf: Any, groups: list[str], columns: dict[str, pl.Expr], keep: pl.Expr
+    tf: Any, groups: list[str], columns: dict[str, pl.Expr], keep: pl.Expr,
+    lf: pl.LazyFrame | None = None, as_is: tuple[str, ...] = (),
 ) -> tuple[pl.DataFrame, list[dict[str, np.ndarray]]]:
-    """Per group (in dplyr order): each named expression's values as arrays."""
-    lf = tf._lf.filter(keep).select(*groups, **columns)
+    """Per group (in dplyr order): each named expression's values as arrays
+    (numbers as floats unless named in ``as_is``, anything else as it is).
+    ``lf`` replaces the input frame, for columns computed beforehand."""
+    lf = (tf._lf if lf is None else lf).filter(keep).select(*groups, **columns)
     if groups:
         table = _sorted_keys(tf, lf.group_by(groups).agg(pl.all()).collect(), groups)
     else:
         table = lf.select(pl.all().implode()).collect()
+    numeric = {name: table.schema[name].inner.is_numeric() and name not in as_is for name in columns}
     rows = [
-        {name: np.asarray(row[name], dtype=float) for name in columns}
+        {name: np.asarray(row[name], dtype=float if numeric[name] else object) for name in columns}
         | {"__label": _group_label(row, groups)}
         for row in table.iter_rows(named=True)
     ]
@@ -459,3 +463,52 @@ def _two_sample(x: np.ndarray, y: np.ndarray, alternative: str, exact: bool | No
         p = float(_special().kolmogorov(math.sqrt(size) * d)) if alternative == "two.sided" else math.exp(-2 * size * d * d)
     kind = "Exact" if use_exact else "Asymptotic"
     return d, p, f"{kind} two-sample Kolmogorov-Smirnov test"
+
+
+@step
+def fligner_test(formula: str) -> Step:
+    """Fligner-Killeen test of equal variances, as R's ``fligner.test(y ~ g)``.
+
+    Robust to non-normal data: absolute deviations from each level's median
+    are ranked and turned into normal scores. Columns: ``statistic``,
+    ``df``, ``p_value``, ``method``.
+    """
+
+    def _apply(tf: Any) -> Any:
+        from scipy.stats import rankdata
+
+        special = _special()
+        groups = list(tf._groups or [])
+        lf = tf._lf
+        response, by = _parse_formula(tf, formula, "fligner_test", one_sample=False)
+        value = pl.col(response).cast(pl.Float64)
+        kept = lf.filter(_present(lf, response) & _present(lf, by)).with_columns(
+            __stats3_dev=(value - value.median().over([*groups, by])).abs(),
+            __stats3_level=pl.col(by),
+        )
+        table, rows = _group_values(
+            tf, groups, {"dev": pl.col("__stats3_dev"), "level": pl.col("__stats3_level").cast(pl.String)},
+            pl.lit(True), lf=kept,
+        )
+        statistic, df = [], []
+        for row in rows:
+            dev, level = row["dev"], row["level"]
+            n = len(dev)
+            levels = np.unique(level)
+            if len(levels) < 2:
+                raise ValueError(f"fligner_test(): all observations are in the same group{row['__label']}")
+            if n < 2:
+                raise ValueError(f"fligner_test(): not enough observations{row['__label']}")
+            a = special.ndtri((1 + rankdata(dev) / (n + 1)) / 2)
+            a = a - a.mean()
+            v = np.sum(a**2) / (n - 1)
+            stat = sum(np.sum(level == lv) * a[level == lv].mean() ** 2 for lv in levels) / v
+            statistic.append(float(stat))
+            df.append(float(len(levels) - 1))
+        s, d = np.array(statistic), np.array(df)
+        return _finish(tf, table, groups, {
+            "statistic": s, "df": d, "p_value": special.chdtrc(d, s),
+            "method": "Fligner-Killeen test of homogeneity of variances",
+        })
+
+    return Step(_apply, "fligner_test")

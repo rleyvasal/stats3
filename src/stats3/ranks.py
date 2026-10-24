@@ -538,6 +538,72 @@ def kruskal_test(formula: str) -> Step:
     return Step(_apply, "kruskal_test")
 
 
+@step
+def friedman_test(formula: str) -> Step:
+    """Friedman rank sum test, as R's ``friedman.test(y ~ g | b)``.
+
+    ``g`` is the treatment and ``b`` the block: every block must have exactly
+    one value for each treatment (an unreplicated complete block design),
+    after dropping rows with a missing value. Values are ranked within each
+    block, with R's tie correction. Columns: ``statistic``, ``df``,
+    ``p_value``, ``method``.
+    """
+
+    def _apply(tf: Any) -> Any:
+        special = _special()
+        groups = list(tf._groups or [])
+        lf = tf._lf
+        left, bar, right = formula.partition("|")
+        if not bar or not right.strip() or "|" in right:
+            raise ValueError(
+                f"friedman_test(): formula must look like 'y ~ groups | blocks', got {formula!r}"
+            )
+        response, by = _parse_formula(tf, left, "friedman_test", one_sample=False)
+        block = _column(tf, right.strip(), "the formula's block", "friedman_test")
+        if block in groups or block == by:
+            raise ValueError(f"friedman_test(): {block!r} can't be the block and a group")
+        kept = lf.filter(_present(lf, response) & _present(lf, by) & _present(lf, block))
+        value = pl.col(response).cast(pl.Float64)
+        kept = kept.with_columns(__stats3_r=value.rank("average").over([*groups, block]))
+        table = _by_levels(
+            tf, kept, groups, by,
+            [pl.len().alias("n"), pl.col("__stats3_r").sum().alias("r")], "friedman_test",
+        )
+        design = kept.group_by(groups or pl.lit(0)).agg(
+            cells=pl.struct(by, block).n_unique(),
+            rows=pl.len(),
+            blocks=pl.col(block).n_unique(),
+        ).collect()
+        ties = _tie_term(kept, [*groups, block], value)
+        ties = (ties.group_by(groups).agg(pl.col("ties").sum()) if groups else ties.select(pl.col("ties").sum()))
+        table = _join_ties(table, ties, groups)
+        if groups:
+            table = table.join(design, on=groups, how="left", nulls_equal=True, maintain_order="left")
+        else:
+            table = table.with_columns(design.select("cells", "rows", "blocks"))
+        statistic, df = [], []
+        for row in table.iter_rows(named=True):
+            r = np.array(row["r"], dtype=float)
+            k, n = len(r), row["blocks"]
+            if row["rows"] != row["cells"] or row["cells"] != k * n:
+                raise ValueError(
+                    "friedman_test(): not an unreplicated complete block design"
+                    f"{_group_label(row, groups)}"
+                )
+            stat = 12 * np.sum((r - n * (k + 1) / 2) ** 2) / (n * k * (k + 1) - row["ties"] / (k - 1))
+            statistic.append(float(stat))
+            df.append(float(k - 1))
+        statistic_arr, df_arr = np.array(statistic), np.array(df)
+        return _finish(tf, table, groups, {
+            "statistic": statistic_arr,
+            "df": df_arr,
+            "p_value": special.chdtrc(df_arr, statistic_arr),
+            "method": "Friedman rank sum test",
+        })
+
+    return Step(_apply, "friedman_test")
+
+
 # cor_test ----------------------------------------------------------------------
 
 _COR_METHODS = {"pearson", "spearman", "kendall"}

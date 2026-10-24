@@ -163,17 +163,21 @@ statsmodels' formula interface.
 |---|---|
 | `t.test` | `t_test("y ~ g")`, `t_test(x, mu=)`, `t_test(x, y, paired=True)` |
 | `wilcox.test` | `wilcox_test(...)`, same forms; R 4.6's exact tests with ties |
-| `kruskal.test` | `kruskal_test("y ~ g")` |
+| `kruskal.test`, `friedman.test` | `kruskal_test("y ~ g")`, `friedman_test("y ~ g \| block")` |
 | `aov`, `TukeyHSD` | `aov("y ~ g")`, `tukey_hsd("y ~ g")` (one grouping column) |
+| `oneway.test` | `oneway_test("y ~ g")`: Welch's ANOVA, or `var_equal=True` |
+| `pairwise.t.test`, `pairwise.wilcox.test`, `pairwise.prop.test` | `pairwise_t_test("y ~ g")`, `pairwise_wilcox_test("y ~ g")`, `pairwise_prop_test(x, n)`: one row per pair, `p_adjust_method=` |
 | `cor.test` | `cor_test(x, y, method="pearson" / "spearman" / "kendall")` |
 | `chisq.test` | `chisq_test(x, y)`, `chisq_test(x, p=[...])` |
 | `fisher.test` | `fisher_test(x, y)`: odds ratio for 2 x 2, exact p-value for larger tables |
+| `mcnemar.test`, `mantelhaen.test` | `mcnemar_test(x, y)`, `mantelhaen_test(x, y, strata)`, `exact=True` for 2 x 2 x K |
 | `prop.test`, `binom.test` | `prop_test(x, n)`, `binom_test(sex == "male")` |
+| `poisson.test` | `poisson_test(events, time)`: one rate, or the ratio of two |
 | `shapiro.test`, `ks.test` | `shapiro_test(x)`, `ks_test(x, "pnorm", mean=, sd=)`, `ks_test(x, y)` |
-| `bartlett.test`, `var.test`, `car::leveneTest` | `bartlett_test`, `var_test`, `levene_test` |
+| `bartlett.test`, `fligner.test`, `var.test`, `car::leveneTest` | `bartlett_test`, `fligner_test`, `var_test`, `levene_test` |
 | `p.adjust` | `p_adjust(p, "BH")`: on a vector or Series, or a column in `with_columns` / `mutate` |
 | effectsize | `cohens_d`, `hedges_g`, `eta_squared` |
-| `power.t.test`, `power.prop.test` | `power_t_test`, `power_prop_test` |
+| `power.t.test`, `power.prop.test`, `power.anova.test` | `power_t_test`, `power_prop_test`, `power_anova_test` |
 | `lm`, `glm` | `lm`, `glm`, with broom's `tidy`, `glance`, `augment`, and `anova`, `predict` |
 | `car::Anova` | `anova(fit, type=2)`, `anova(fit, type=3)` |
 
@@ -194,7 +198,7 @@ needs only Polars and SciPy.
 column, to 1e-9 relative, on Polars, lazy Polars, pandas and tidy3 input.
 Where R's own numerics are approximate (Tukey's distribution, intervals
 found with `uniroot`, the noncentral t above ncp 37.62, the asymptotic
-Kolmogorov series), stats3 computes to full precision and the test compares
+Kolmogorov series, the exact Mantel-Haenszel odds ratio), stats3 computes to full precision and the test compares
 at R's accuracy, with the reason written next to the tolerance. Without R,
 the SciPy comparisons still run.
 

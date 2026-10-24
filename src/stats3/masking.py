@@ -27,8 +27,10 @@ COL_NAME = "__stats3_col__"
 # Every stats3 function whose arguments name columns.
 FUNCTIONS = frozenset({
     "aov", "bartlett_test", "binom_test", "chisq_test", "cohens_d", "cor_test",
-    "eta_squared", "fisher_test", "glm", "hedges_g", "kruskal_test", "ks_test", "lm",
-    "levene_test", "p_adjust", "prop_test", "shapiro_test", "t_test",
+    "eta_squared", "fisher_test", "fligner_test", "friedman_test", "glm", "hedges_g",
+    "kruskal_test", "ks_test", "levene_test", "lm", "mantelhaen_test", "mcnemar_test",
+    "oneway_test", "p_adjust", "pairwise_prop_test", "pairwise_t_test",
+    "pairwise_wilcox_test", "poisson_test", "prop_test", "shapiro_test", "t_test",
     "tukey_hsd", "var_test", "wilcox_test",
 })
 

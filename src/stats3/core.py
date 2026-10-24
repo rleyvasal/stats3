@@ -528,3 +528,48 @@ def tukey_hsd(formula: str, *, conf_level: float = 0.95) -> Step:
         return _finish(tf, keys, groups, columns)
 
     return Step(_apply, "tukey_hsd")
+
+
+@step
+def oneway_test(formula: str, *, var_equal: bool = False) -> Step:
+    """One-way comparison of means, as R's ``oneway.test(y ~ g)``.
+
+    By default Welch's test, which does not assume equal variances; with
+    ``var_equal=True`` the classic one-way ANOVA F test. Each level needs at
+    least two values. Columns: ``statistic`` (F), ``num_df``, ``den_df``,
+    ``p_value``, ``method``.
+    """
+
+    def _apply(tf: Any) -> Any:
+        special = _special()
+        table, groups, by = _one_way(tf, formula, "oneway_test")
+        statistic, num_df, den_df = [], [], []
+        for row in table.iter_rows(named=True):
+            n = np.array(row["n"], dtype=float)
+            if np.any(n < 2):
+                raise ValueError(f"oneway_test(): not enough observations{_group_label(row, groups)}")
+            m = np.array(row["mean"], dtype=float)
+            v = np.array(row["var"], dtype=float)
+            k = len(n)
+            if var_equal:
+                total = n.sum()
+                grand = np.sum(n * m) / total
+                f = (np.sum(n * (m - grand) ** 2) / (k - 1)) / (np.sum((n - 1) * v) / (total - k))
+                dfs = (k - 1, total - k)
+            else:
+                w = n / v
+                tmp = np.sum((1 - w / w.sum()) ** 2 / (n - 1)) / (k**2 - 1)
+                centre = np.sum(w * m) / w.sum()
+                f = np.sum(w * (m - centre) ** 2) / ((k - 1) * (1 + 2 * (k - 2) * tmp))
+                dfs = (k - 1, 1 / (3 * tmp))
+            statistic.append(float(f))
+            num_df.append(float(dfs[0]))
+            den_df.append(float(dfs[1]))
+        s, d1, d2 = np.array(statistic), np.array(num_df), np.array(den_df)
+        method = "One-way analysis of means" + ("" if var_equal else " (not assuming equal variances)")
+        return _finish(tf, table, groups, {
+            "statistic": s, "num_df": d1, "den_df": d2,
+            "p_value": special.fdtrc(d1, d2, s), "method": method,
+        })
+
+    return Step(_apply, "oneway_test")

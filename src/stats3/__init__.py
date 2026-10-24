@@ -11,14 +11,30 @@ the kind of frame it was given.
 """
 
 from stats3.__version__ import __version__
-from stats3.checks import bartlett_test, ks_test, levene_test, shapiro_test, var_test
-from stats3.core import aov, t_test, tukey_hsd
-from stats3.counts import binom_test, chisq_test, fisher_test, prop_test
+from stats3.checks import (
+    bartlett_test,
+    fligner_test,
+    ks_test,
+    levene_test,
+    shapiro_test,
+    var_test,
+)
+from stats3.core import aov, oneway_test, t_test, tukey_hsd
+from stats3.counts import (
+    binom_test,
+    chisq_test,
+    fisher_test,
+    mantelhaen_test,
+    mcnemar_test,
+    poisson_test,
+    prop_test,
+)
 from stats3.effects import (
     cohens_d,
     eta_squared,
     hedges_g,
     p_adjust,
+    power_anova_test,
     power_prop_test,
     power_t_test,
 )
@@ -38,7 +54,8 @@ from stats3.models import (
     quasipoisson,
     tidy,
 )
-from stats3.ranks import cor_test, kruskal_test, wilcox_test
+from stats3.pairwise import pairwise_prop_test, pairwise_t_test, pairwise_wilcox_test
+from stats3.ranks import cor_test, friedman_test, kruskal_test, wilcox_test
 
 # In IPython / Jupyter, turn on unquoted formulas and bare column names in
 # stats3 calls (from the next cell on), as tidy3 does for its verbs.
@@ -61,6 +78,8 @@ __all__ = [
     "cor_test",
     "eta_squared",
     "fisher_test",
+    "fligner_test",
+    "friedman_test",
     "Gamma",
     "gaussian",
     "glance",
@@ -71,8 +90,16 @@ __all__ = [
     "ks_test",
     "levene_test",
     "lm",
+    "mantelhaen_test",
+    "mcnemar_test",
+    "oneway_test",
     "p_adjust",
+    "pairwise_prop_test",
+    "pairwise_t_test",
+    "pairwise_wilcox_test",
     "poisson",
+    "poisson_test",
+    "power_anova_test",
     "power_prop_test",
     "power_t_test",
     "predict",

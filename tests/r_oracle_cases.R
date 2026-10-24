@@ -551,6 +551,109 @@ result <- switch(
     out$type2_gamma <- anova_type(gamma, 2)
     out
   },
+  stats_tier3 = {
+    p <- read.csv("tests/data/penguins.csv", na.strings="NA")
+    p$dream <- p$island == "Dream"
+    p$first_year <- p$year == 2007
+    p$heavy <- p$body_mass_g > 4000
+    s <- read.csv("tests/data/ranks.csv")
+    m <- read.csv("tests/data/mtcars.csv")
+    by <- function(data, groups, f) {
+      data |> group_by(across(all_of(groups))) |>
+        group_modify(function(d, k) f(d)) |> ungroup() |> as.data.frame()
+    }
+    test <- function(h) {
+      out <- list(statistic=unname(h$statistic))
+      if (length(h$parameter) == 2) { out <- list(statistic=unname(h$statistic),
+        num_df=unname(h$parameter[1]), den_df=unname(h$parameter[2])) }
+      else out$df <- unname(h$parameter)
+      out$p_value <- h$p.value
+      out$method <- trimws(h$method)
+      as.data.frame(out, check.names=FALSE)
+    }
+    mh <- function(h) {
+      if (is.null(h$estimate)) return(test(h))
+      data.frame(estimate=unname(h$estimate), statistic=unname(h$statistic),
+        df=if (is.null(h$parameter)) NA_real_ else unname(h$parameter), p_value=h$p.value,
+        conf_low=h$conf.int[1], conf_high=h$conf.int[2], method=h$method, alternative=h$alternative)
+    }
+    pois <- function(h) {
+      two <- grepl("Comparison", h$method)
+      data.frame(estimate=unname(h$estimate), statistic=unname(h$statistic),
+        time_base=if (two) NA_real_ else unname(h$parameter),
+        expected_count1=if (two) unname(h$parameter) else NA_real_,
+        p_value=h$p.value, conf_low=h$conf.int[1], conf_high=h$conf.int[2],
+        method=h$method, alternative=h$alternative)
+    }
+    pw <- function(h) {
+      x <- h$p.value
+      idx <- which(lower.tri(x, diag=TRUE), arr.ind=TRUE)
+      idx <- idx[order(idx[, 1], idx[, 2]), , drop=FALSE]
+      data.frame(group1=type.convert(rownames(x)[idx[, 1]], as.is=TRUE),
+        group2=type.convert(colnames(x)[idx[, 2]], as.is=TRUE),
+        p_value=x[idx], method=h$method, p_adjust_method=h$p.adjust.method)
+    }
+    power_row <- function(h) data.frame(groups=h$groups, n=h$n, between_var=h$between.var,
+      within_var=h$within.var, sig_level=h$sig.level, power=h$power, method=h$method)
+    long <- data.frame(id=rep(s$id, 3), k=rep(c("a", "b", "e"), each=nrow(s)), v=c(s$a, s$b, s$e),
+                       g=rep(s$g, 3))
+    cars <- data.frame(id=rep(m$model, 3), k=rep(c("cyl", "gear", "carb"), each=nrow(m)),
+                       v=c(m$cyl, m$gear, m$carb))
+    counts <- m |> group_by(gear, am) |> summarise(events=sum(carb), time=n(), .groups="drop") |> as.data.frame()
+    props <- p[!is.na(p$sex), ] |> group_by(year, island) |>
+      summarise(male=sum(sex == "male"), n=n(), .groups="drop") |> as.data.frame()
+    named <- function(d) setNames(d$male, d$island)
+    suppressWarnings(list(
+      o_welch=test(oneway.test(body_mass_g ~ species, p)),
+      o_equal=test(oneway.test(body_mass_g ~ species, p, var.equal=TRUE)),
+      o_by_year=by(p, "year", function(d) test(oneway.test(flipper_length_mm ~ island, d))),
+      fl_species=test(fligner.test(body_mass_g ~ species, p)),
+      fl_by_sex=by(p, "sex", function(d) test(fligner.test(flipper_length_mm ~ island, d))),
+      fr_ranks=test(friedman.test(v ~ k | id, long)),
+      fr_ties=test(friedman.test(v ~ k | id, cars)),
+      fr_by_g=by(long, "g", function(d) test(friedman.test(v ~ k | id, d))),
+      mc_cars=test(mcnemar.test(m$vs, m$am)),
+      mc_three=test(mcnemar.test(m$cyl, m$gear)),
+      mc_logical=test(mcnemar.test(p$dream, p$first_year)),
+      mc_no_correct=test(mcnemar.test(p$dream, p$first_year, correct=FALSE)),
+      mc_by_species=by(p, "species", function(d) test(mcnemar.test(d$heavy, d$first_year))),
+      mh_species=mh(mantelhaen.test(p$sex, p$heavy, p$species)),
+      mh_less=mh(mantelhaen.test(p$sex, p$heavy, p$species, alternative="less", correct=FALSE, conf.level=0.9)),
+      mh_greater=mh(mantelhaen.test(p$sex, p$dream, p$year, alternative="greater")),
+      mh_exact=mh(mantelhaen.test(p$sex, p$heavy, p$species, exact=TRUE)),
+      mh_exact_less=mh(mantelhaen.test(p$sex, p$dream, p$year, exact=TRUE, alternative="less")),
+      mh_general=mh(mantelhaen.test(p$island, p$sex, p$year)),
+      mh_by_species=by(p, "species", function(d) mh(mantelhaen.test(d$sex, d$heavy, d$year))),
+      po_one=pois(poisson.test(137, 24.19893)),
+      po_one_r=pois(poisson.test(137, 24.19893, r=5, alternative="greater")),
+      po_small=pois(poisson.test(2, 1, r=6)),
+      po_zero=pois(poisson.test(0, 2, alternative="less", conf.level=0.9)),
+      po_two=pois(poisson.test(counts$events[counts$gear == 4], counts$time[counts$gear == 4])),
+      po_two_less=pois(poisson.test(counts$events[counts$gear == 4], counts$time[counts$gear == 4],
+                                    r=1.5, alternative="less", conf.level=0.9)),
+      po_by_gear=by(counts, "gear", function(d) pois(poisson.test(d$events, d$time))),
+      pt_pooled=pw(pairwise.t.test(p$body_mass_g, p$species)),
+      pt_welch=pw(pairwise.t.test(p$body_mass_g, p$species, pool.sd=FALSE, p.adjust.method="BH")),
+      pt_less=pw(pairwise.t.test(p$flipper_length_mm, p$island, alternative="less", p.adjust.method="none")),
+      pt_paired=pw(pairwise.t.test(long$v, long$k, paired=TRUE, p.adjust.method="bonferroni")),
+      pt_by_year=by(p, "year", function(d) pw(pairwise.t.test(d$body_mass_g, d$species))),
+      pt_numeric=pw(pairwise.t.test(m$mpg, m$cyl, p.adjust.method="hommel")),
+      pw_species=pw(pairwise.wilcox.test(p$flipper_length_mm, p$species)),
+      pw_exact=pw(pairwise.wilcox.test(s$a, s$h, p.adjust.method="BH")),
+      pw_paired=pw(pairwise.wilcox.test(long$v, long$k, paired=TRUE)),
+      pw_by_year=by(p, "year", function(d) pw(pairwise.wilcox.test(d$body_mass_g, d$species))),
+      pp_islands=pw(pairwise.prop.test(named(props[props$year == 2008, ]), props$n[props$year == 2008])),
+      pp_numbered=pw(pairwise.prop.test(props$male[props$year == 2009], props$n[props$year == 2009],
+                                        p.adjust.method="BY", correct=FALSE)),
+      pp_by_year=by(props, "year", function(d) pw(pairwise.prop.test(named(d), d$n))),
+      pa_power=power_row(power.anova.test(groups=4, n=5, between.var=1, within.var=3)),
+      pa_n=power_row(power.anova.test(groups=4, between.var=1, within.var=3, power=0.8)),
+      pa_groups=power_row(power.anova.test(n=10, between.var=1, within.var=3, power=0.8)),
+      pa_within=power_row(power.anova.test(groups=3, n=10, between.var=1, power=0.9)),
+      pa_between=power_row(power.anova.test(groups=3, n=10, within.var=2, power=0.9)),
+      pa_sig=power_row(power.anova.test(groups=3, n=10, between.var=1, within.var=2, power=0.9, sig.level=NULL))
+    ))
+  },
   stop(sprintf("unknown oracle case: %s", case_name))
 )
 

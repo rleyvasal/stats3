@@ -479,3 +479,72 @@ def power_prop_test(
         "alternative": [alternative],
         "method": ["Two-sample comparison of proportions power calculation"],
     })
+
+
+def power_anova_test(
+    groups: float | None = None,
+    n: float | None = None,
+    between_var: float | None = None,
+    within_var: float | None = None,
+    sig_level: float | None = 0.05,
+    power: float | None = None,
+    *,
+    as_: str = "polars",
+) -> Any:
+    """Power of a balanced one-way ANOVA, as R's ``power.anova.test``.
+
+    Give all but one of ``groups``, ``n`` (per group), ``between_var``,
+    ``within_var``, ``sig_level`` and ``power`` (pass ``sig_level=None`` to
+    solve for it); the missing one is solved for. Returns one row: the six
+    values and ``method``.
+    """
+    values = {"groups": groups, "n": n, "between_var": between_var,
+              "within_var": within_var, "power": power, "sig_level": sig_level}
+    missing = [name for name, value in values.items() if value is None]
+    if len(missing) != 1:
+        raise ValueError(
+            "power_anova_test(): exactly one of 'groups', 'n', 'between_var', "
+            "'within_var', 'power', and 'sig_level' must be None"
+        )
+    if groups is not None and groups < 2:
+        raise ValueError("power_anova_test(): number of groups must be at least 2")
+    if n is not None and n < 2:
+        raise ValueError("power_anova_test(): number of observations in each group must be at least 2")
+    for name in ("sig_level", "power"):
+        if values[name] is not None and not 0 <= values[name] <= 1:
+            raise ValueError(f"power_anova_test(): '{name}' must be numeric in [0, 1]")
+    from scipy.stats import f as f_dist, ncf
+
+    def power_of(v: dict[str, float]) -> float:
+        g, k = v["groups"], v["n"]
+        df1, df2 = g - 1, (k - 1) * g
+        ncp = df1 * k * (v["between_var"] / v["within_var"])
+        return float(ncf.sf(f_dist.isf(v["sig_level"], df1, df2), df1, df2, ncp))
+
+    target = missing[0]
+    if target == "power":
+        values["power"] = power_of(values)
+    else:
+        ranges = {
+            "groups": (2, 100), "n": (2, 1e5),
+            "within_var": (between_var * 1e-7, between_var * 1e7) if between_var else (0, 0),
+            "between_var": (within_var * 1e-7, within_var * 1e7) if within_var else (0, 0),
+            "sig_level": (1e-10, 1 - 1e-10),
+        }
+
+        def f(value: float) -> float:
+            return power_of(values | {target: value}) - power
+
+        from scipy.optimize import brentq
+
+        low, high = ranges[target]
+        if f(low) * f(high) > 0:
+            raise ValueError(
+                f"power_anova_test(): no {target} between {low:g} and {high:g} gives "
+                f"power {power}, as R's uniroot searches"
+            )
+        values[target] = brentq(f, low, high, xtol=1e-12, rtol=1e-14, maxiter=1000)
+    return _one_row(as_, {
+        **{name: [float(values[name])] for name in ("groups", "n", "between_var", "within_var", "sig_level", "power")},
+        "method": ["Balanced one-way analysis of variance power calculation"],
+    })
