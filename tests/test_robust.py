@@ -115,7 +115,8 @@ def test_vcov_matrices():
 def test_classical_vcov_matches_tidy():
     fit = base(penguins())
     v = vcov(fit, "const").drop("term").to_numpy()
-    assert np.sqrt(np.diag(v)) == pytest.approx(tidy(fit)["std_error"].to_numpy(), rel=1e-12)
+    # The same matrix by two routes (sandwich's and the QR's): equal to rounding.
+    assert np.sqrt(np.diag(v)) == pytest.approx(tidy(fit)["std_error"].to_numpy(), rel=1e-9)
 
 
 def test_glm_with_vcov_uses_wald_intervals():
