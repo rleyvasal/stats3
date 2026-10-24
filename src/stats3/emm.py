@@ -169,6 +169,7 @@ def _critical(level: float, df: np.ndarray, adjust: str, n_contrasts: int, famil
     special = _special()
     out = np.empty(len(df))
     for i, d in enumerate(df):
+        d = math.inf if math.isnan(d) else d
         t = (lambda p: float(special.ndtri(p))) if math.isinf(d) else (lambda p, d=d: float(special.stdtrit(d, p)))
         if adjust == "none" or (n_contrasts == 1 and adjust != "scheffe"):
             out[i] = -t((1 - level) / 2)
@@ -218,6 +219,7 @@ def _p_values(stat: np.ndarray, df: np.ndarray, adjust: str, family: float,
     from scipy.stats import f as f_dist, studentized_range
 
     special = _special()
+    df = np.where(np.isnan(df), math.inf, df)
     p = np.array([2 * special.ndtr(-abs(t)) if math.isinf(d) else 2 * special.stdtr(d, -abs(t))
                   for t, d in zip(stat, df)])
     n = int(np.sum(~np.isnan(p)))

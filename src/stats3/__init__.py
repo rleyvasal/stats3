@@ -60,6 +60,7 @@ from stats3.pairwise import pairwise_prop_test, pairwise_t_test, pairwise_wilcox
 from stats3.negbin import glm_nb, negative_binomial
 from stats3.ranks import cor_test, friedman_test, kruskal_test, wilcox_test
 from stats3.report import modelsummary
+from stats3.resistant import rlm, rq
 from stats3.robust import vcov_cl, vcov_hc, vcov_nw
 
 # In IPython / Jupyter, turn on unquoted formulas and bare column names in
@@ -117,6 +118,8 @@ __all__ = [
     "prop_test",
     "quasibinomial",
     "quasipoisson",
+    "rlm",
+    "rq",
     "shapiro_test",
     "t_test",
     "tidy",

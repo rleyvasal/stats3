@@ -1634,6 +1634,12 @@ def anova(*models: Any, test: Any = None, type: Any = 1) -> Any:  # noqa: A002
         if not all(isinstance(f, NegativeBinomialModel) for f in fits):
             raise TypeError("anova(): compare glm_nb fits with glm_nb fits")
         return fits[0]._write(_anova_nb(fits, test))
+    from stats3.resistant import QuantileModel, _anova_rq
+
+    if any(isinstance(f, QuantileModel) for f in fits):
+        if not all(isinstance(f, QuantileModel) for f in fits):
+            raise TypeError("anova(): compare rq fits with rq fits")
+        return fits[0]._write(_anova_rq(fits, test))
     if all(isinstance(f, GeneralizedLinearModel) for f in fits):
         return fits[0]._write(_anova_glm(fits, test))
     raise TypeError("anova(): compare lm fits with lm fits, glm fits with glm fits")

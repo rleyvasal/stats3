@@ -654,6 +654,14 @@ result <- switch(
       pa_sig=power_row(power.anova.test(groups=3, n=10, between.var=1, within.var=2, power=0.9, sig.level=NULL))
     ))
   },
+  rlm = {
+    source("tests/r_resistant_cases.R")
+    resistant_cases("rlm")
+  },
+  rq = {
+    source("tests/r_resistant_cases.R")
+    resistant_cases("rq")
+  },
   negbin = {
     source("tests/r_negbin_cases.R")
     negbin_cases()

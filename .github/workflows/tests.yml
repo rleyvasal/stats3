@@ -70,7 +70,7 @@ jobs:
         with:
           use-public-rspm: true
       - name: Install R packages
-        run: Rscript -e 'install.packages(c("dplyr", "jsonlite", "sandwich", "lmtest", "emmeans", "MASS")); library(emmeans); library(MASS)'
+        run: Rscript -e 'install.packages(c("dplyr", "jsonlite", "sandwich", "lmtest", "emmeans", "MASS", "quantreg")); library(emmeans); library(MASS); library(quantreg)'
       - name: Install stats3
         run: python -m pip install -e ".[dev]"
       - name: Check the oracle runs

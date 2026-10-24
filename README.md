@@ -178,6 +178,34 @@ anova(smaller_fit, fit)              # likelihood ratio, theta fitted for each m
 grouped fits, weights, offsets, predictions, robust covariance and marginal
 means. Single-model `anova(fit)` holds theta fixed and warns, as MASS does.
 
+Robust M-estimation and conditional quantiles use the same formulas and
+frame types:
+
+```python
+robust_fit = rlm(penguins, "body_mass_g ~ flipper_length_mm + species")
+quantile_fit = rq(penguins, "body_mass_g ~ flipper_length_mm + species", tau=0.75)
+tidy(robust_fit, conf_int=True)
+predict(quantile_fit, new_rows, interval="confidence")
+```
+
+`rlm()` follows MASS's default M-estimation with Huber, bisquare or Hampel
+scores, MAD or Huber proposal-2 scale, inverse-variance or case weights,
+and `XtX` or `XtWX` coefficient covariance. It reports R's t statistics
+and normal confidence intervals; p-values remain missing because
+`summary.rlm` supplies none. MM/LTS initialization is not included.
+
+`rq()` minimizes weighted pinball loss with a sparse linear program. It
+fits one `tau` at a time and uses quantreg's `nid` inference by default, or
+`se="iid"`, with t tests and t intervals. This differs from R's small-sample
+default of rank intervals; rank/bootstrap inference is not included.
+`anova(full_fit, reduced_fit)` gives Wald tests for nested models with the
+same tau. Offsets are rejected; fit an explicitly adjusted response instead.
+For nonunique optima, the LP solver may choose different coefficients from R.
+Both models support groups, row alignment, `vcov()`, `modelsummary()` and
+estimated marginal means. Quantile fit statistics follow `logLik.rq`'s
+asymmetric-Laplace convention; R leaves BIC missing. Robust fits report their
+scale and convergence, without Gaussian likelihood statistics.
+
 `na_action="exclude"` (R's `na.exclude`) keeps every row in `augment` and
 `predict`, with missing values where a row was not used, so the results line
 up with the data.
@@ -231,9 +259,11 @@ statsmodels' formula interface.
 | modelsummary | `modelsummary(fit1, fit2)`: a frame, Markdown or HTML |
 | emmeans | `emmeans(fit, "species")`, `pairs(emm)`, `contrast(emm, ...)` |
 | MASS | `glm_nb("y ~ x")`, `glm("y ~ x", family=negative_binomial(theta))` |
+| MASS::rlm | `rlm("y ~ x", psi="huber")` |
+| quantreg::rq | `rq("y ~ x", tau=0.5, se="nid")` |
 
-The rest of tier 2: robust and quantile regression,
-ordinal and multinomial models, and mixed models. After tier 2 comes the
+The rest of tier 2: ordinal and multinomial models, then mixed models.
+After tier 2 comes the
 Bayesian extra.
 
 ## How it works, and how it is checked

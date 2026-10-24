@@ -22,6 +22,8 @@ NS = {"penguins", "df", "mask", "group_by", "mutate", "stats3", "log", "x", "pl"
         ("friedman_test(v ~ k | id)", "friedman_test('v ~ k | id')"),
         ("pairwise_t_test(y ~ g, pool_sd=False)", "pairwise_t_test('y ~ g', pool_sd=False)"),
         ("glm_nb(y ~ x + g)", "glm_nb('y ~ x + g')"),
+        ("rlm(y ~ x + g)", "rlm('y ~ x + g')"),
+        ("rq(y ~ x + g, tau=0.75)", "rq('y ~ x + g', tau=0.75)"),
         ("df.filter(~mask)", "df.filter(~mask)"),
         ("x = ~x", "x = ~x"),
     ],

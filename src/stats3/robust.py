@@ -113,7 +113,10 @@ def _pieces(fit: Any) -> dict[str, Any]:
     the model matrix without aliased columns, the working residuals times
     the working weights (``res``), the estimating functions, the hat values,
     the bread, and the weights used for clustered HC2/HC3."""
-    from stats3.models import GeneralizedLinearModel
+    from stats3.models import GeneralizedLinearModel, LinearModel
+
+    if not isinstance(fit, (GeneralizedLinearModel, LinearModel)):
+        raise TypeError("vcov= covariance adjustments are for lm/glm fits")
 
     kept = fit.qr.kept
     x = fit.design.matrix[:, kept]
