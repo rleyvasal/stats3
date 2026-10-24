@@ -1,6 +1,5 @@
 """Exact Bayesian inference, posterior workflows and backend integration."""
 
-import importlib.util
 import subprocess
 import sys
 
@@ -162,11 +161,17 @@ def test_marginal_offsets_use_the_same_cell_weights():
     f=bayes_lm(d,'y~g+h+offset(off)',seed=1,draws=50,chains=2)
     e=bayes_emmeans(f,'g',weights='cells',at={'off':[0.,3.]})
     assert tidy(e).height == 2
-    # Explicit weighted average of the same reference-grid predictions.
+    # Cell frequencies are (2/3,1/3) for a and (1/3,2/3) for b.
+    beta=f.beta_draws
+    expected=np.stack([beta[:,:,0]+beta[:,:,2]/3+1,
+                       beta[:,:,0]+beta[:,:,1]+2*beta[:,:,2]/3+2],axis=-1)
     for labels, values, _ in e.parts:
-        assert np.isfinite(values).all()
+        np.testing.assert_allclose(values,expected)
     g=bayes_lm(d,'y~g+h',offset='off',seed=1,draws=50,chains=2)
-    assert tidy(bayes_emmeans(g,'g'))['estimate'].is_finite().all()
+    means=tidy(bayes_emmeans(g,'g'))
+    np.testing.assert_allclose(means['estimate'].to_numpy(),
+        [np.mean(g.beta_draws[:,:,0]+g.beta_draws[:,:,2]/2)+1.5,
+         np.mean(g.beta_draws[:,:,0]+g.beta_draws[:,:,1]+g.beta_draws[:,:,2]/2)+1.5])
 
 
 def test_evidence_comparison_and_reject_different_responses():
@@ -247,7 +252,32 @@ def test_response_marginal_means_transform_before_averaging():
         assert expected==pytest.approx(predictions[:,:,mask].mean())
 
 
-@pytest.mark.skipif(importlib.util.find_spec('pymc') is not None,reason='only meaningful without the extra')
-def test_missing_extra_is_actionable():
-    with pytest.raises(ImportError,match=r'stats3\[bayes\]'):
-        bayes_glm(data(),'y~x',draws=5,tune=5)
+@pytest.mark.parametrize('dependency',['pymc','arviz'])
+def test_missing_extra_is_actionable(dependency):
+    # A fresh interpreter exercises the real import path whether or not the
+    # optional dependency is installed in the test runner's environment.
+    script='''
+import importlib.abc
+import sys
+sys.path.insert(0,sys.argv[1])
+dependency=sys.argv[2]
+class MissingDependency(importlib.abc.MetaPathFinder):
+    def find_spec(self,fullname,path=None,target=None):
+        if fullname.partition('.')[0]==dependency:
+            raise ModuleNotFoundError('optional dependency deliberately unavailable',name=dependency)
+sys.meta_path.insert(0,MissingDependency())
+from stats3 import bayes_compare,bayes_glm,bayes_lm
+try:
+    if dependency=='pymc':
+        bayes_glm({'y':[1.,2.,3.]},'y~1',draws=5,tune=5)
+    else:
+        a=bayes_lm({'y':[1.,2.,3.]},'y~1',draws=5,seed=1)
+        b=bayes_lm({'y':[1.,2.,3.]},'y~1',prior_scale=2,draws=5,seed=1)
+        bayes_compare({'a':a,'b':b},method='loo')
+except ImportError as error:
+    assert 'stats3[bayes]' in str(error)
+    assert error.__cause__.name==dependency
+else:
+    raise AssertionError('missing optional dependency did not raise ImportError')
+'''
+    subprocess.run([sys.executable,'-c',script,str(ROOT/'src'),dependency],check=True)

@@ -191,7 +191,10 @@ are IID: R-hat is not assigned, ESS equals the independent sample count and
 coefficient MCSE follows from the exact covariance. Inspect all parameters,
 including auxiliary scales and varying effects, before interpreting MCMC.
 The short-chain workflow tests do not establish convergence for user data;
-separate logistic/Poisson tests check Monte Carlo accuracy against quadrature.
+separate weighted Gaussian, logistic and Poisson tests check Monte Carlo
+accuracy against independent quadrature. All ten likelihood families run
+through all four data backends and are checked against independent SciPy
+pointwise likelihoods, response means and predictive distributions.
 
 LOO and WAIC use ArviZ and return its diagnostics/warnings and stacking
 weights. Both require the extra, including for exact models. Compared fits
