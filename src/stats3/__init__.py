@@ -38,6 +38,7 @@ from stats3.effects import (
     power_prop_test,
     power_t_test,
 )
+from stats3.emm import contrast, emmeans, pairs
 from stats3.models import (
     Gamma,
     anova,
@@ -78,7 +79,9 @@ __all__ = [
     "binomial",
     "chisq_test",
     "cohens_d",
+    "contrast",
     "cor_test",
+    "emmeans",
     "eta_squared",
     "fisher_test",
     "fligner_test",
@@ -101,6 +104,7 @@ __all__ = [
     "pairwise_prop_test",
     "pairwise_t_test",
     "pairwise_wilcox_test",
+    "pairs",
     "poisson",
     "poisson_test",
     "power_anova_test",

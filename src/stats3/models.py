@@ -28,6 +28,7 @@ import polars as pl
 
 from stats3._data import Data, Step, expression, step
 from stats3.core import _check_conf_level, _group_label, _sorted_keys, _special, _warn
+from stats3.emm import Contrasts, EMMeans
 from stats3.robust import as_vcov, covariance
 from stats3.formula import (
     Design,
@@ -1487,10 +1488,16 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
     clustered, or ``vcov_nw()`` for Newey-West standard errors. ``lm`` fits
     keep t tests on the residual degrees of freedom; ``glm`` fits get z tests.
 
-    Anything that is not a model goes to tidy3's ``tidy()`` when tidy3 is
+    Marginal means and contrasts give their tables too, including through
+    ``emm >> tidy()``. Set their intervals and scale when creating them.
+    Anything else goes to tidy3's ``tidy()`` when tidy3 is
     loaded, so ``from stats3 import *`` keeps tidy3's constructor working.
     """
     def run(model):
+        if isinstance(model, (EMMeans, Contrasts)):
+            if conf_int or conf_level != 0.95 or exponentiate:
+                raise TypeError("tidy(): set intervals and scale in emmeans() or contrast()")
+            return model.__tidy__(**kwargs)
         opts = {"conf_int": conf_int, "conf_level": conf_level, **kwargs}
         if exponentiate:
             opts["exponentiate"] = True
@@ -1505,7 +1512,7 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
 
     if x is None and not args and set(kwargs) <= {"conf_method", "vcov"}:
         return _ModelVerb(run, "tidy")
-    if _is_model(x):
+    if _is_model(x) or isinstance(x, (EMMeans, Contrasts)):
         return run(x)
     if "tidy3" in sys.modules:
         return sys.modules["tidy3"].tidy(x, *args, **kwargs)

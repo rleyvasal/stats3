@@ -654,6 +654,10 @@ result <- switch(
       pa_sig=power_row(power.anova.test(groups=3, n=10, between.var=1, within.var=2, power=0.9, sig.level=NULL))
     ))
   },
+  emmeans = {
+    source("tests/r_emm_cases.R")
+    emm_cases()
+  },
   robust = {
     suppressPackageStartupMessages({library(sandwich); library(lmtest)})
     p <- read.csv("tests/data/penguins.csv", na.strings="NA")

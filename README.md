@@ -147,6 +147,22 @@ glance(fit, vcov="HC1")                # robust Wald F test of the slopes
 modelsummary({"Base": fit0, "Species": fit}, stars=True, output="markdown")
 ```
 
+Estimated marginal means and contrasts follow R's emmeans:
+
+```python
+emm = emmeans(fit, "species")
+tidy(emm)                            # adjusted means, standard errors, intervals
+tidy(pairs(emm))                     # pairwise differences, Tukey adjustment
+tidy(contrast(emm, "trt.vs.ctrl"))   # comparisons with the first level
+```
+
+`by=` compares levels within each subgroup, `at=` sets covariate values,
+and `weights=` controls averaging over other factors. `vcov="HC3"` uses
+robust standard errors; `type="response"` back-transforms GLM estimates.
+Offsets use the same averaging weights as the means. With `weights="cells"`,
+R's emmeans 2.0.4 uses equal weights for offsets; matching stats3 in that
+case requires supplying the cell-weighted offsets explicitly in R.
+
 `na_action="exclude"` (R's `na.exclude`) keeps every row in `augment` and
 `predict`, with missing values where a row was not used, so the results line
 up with the data.
@@ -198,9 +214,11 @@ statsmodels' formula interface.
 | `car::Anova` | `anova(fit, type=2)`, `anova(fit, type=3)` |
 | sandwich, `lmtest::coeftest` | `tidy(fit, vcov="HC3")`, `vcov_cl(...)`, `vcov_nw()`, `vcov(fit)` |
 | modelsummary | `modelsummary(fit1, fit2)`: a frame, Markdown or HTML |
+| emmeans | `emmeans(fit, "species")`, `pairs(emm)`, `contrast(emm, ...)` |
 
-Next: estimated marginal means, negative binomial, robust and quantile
-regression, ordinal models, and mixed models.
+The rest of tier 2: negative binomial, robust and quantile regression,
+ordinal and multinomial models, and mixed models. After tier 2 comes the
+Bayesian extra.
 
 ## How it works, and how it is checked
 
@@ -214,7 +232,9 @@ needs only Polars and SciPy.
 
 `tests/r_oracle_cases.R` runs the same tests in R; `pytest` compares every
 column, to 1e-9 relative, on Polars, lazy Polars, pandas and tidy3 input.
-Where R's own numerics are approximate (Tukey's distribution, intervals
+Marginal means and contrasts are also checked against R's emmeans.
+Where R's own numerics are approximate (Tukey's distribution, Dunnett's
+quantile approximation, intervals
 found with `uniroot`, the noncentral t above ncp 37.62, the asymptotic
 Kolmogorov series, the exact Mantel-Haenszel odds ratio), stats3 computes to full precision and the test compares
 at R's accuracy, with the reason written next to the tolerance. Without R,

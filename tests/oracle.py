@@ -1,6 +1,7 @@
 """The R oracle: runs tests/r_oracle_cases.R and compares stats3 with R.
 
 The cases need R with dplyr, jsonlite, sandwich and lmtest; without them the comparisons skip.
+Marginal means comparisons additionally need emmeans.
 Set STATS3_R_ORACLE_MANIFEST to a pixi manifest to run R through pixi.
 """
 
