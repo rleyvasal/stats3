@@ -16,7 +16,7 @@ import polars as pl
 from stats3._data import step
 from stats3.core import _check_conf_level
 from stats3.formula import build_design
-from stats3.models import Models, _Fit, _model, _qr, _table_text
+from stats3.models import NA_ACTIONS, Models, _Fit, _ModelStep, _model, _qr, _table_text
 
 
 @dataclass(frozen=True)
@@ -107,8 +107,10 @@ class BayesianModel(_Fit):
         if exponentiate:
             if self.engine == "exact":
                 raise ValueError("exponentiated Student-t posteriors have no finite mean; transform posterior draws explicitly")
-            # Summarize transformed draws, rather than exponentiating their mean.
-            out = _draw_summary(np.exp(self.beta_draws), self.parameter_names, conf_level)
+            # Summarize transformed draws, rather than exponentiating their mean;
+            # prob_positive stays P(beta > 0), i.e. P(exp(beta) > 1).
+            out = _draw_summary(np.exp(self.beta_draws), self.parameter_names, conf_level).with_columns(
+                out["prob_positive"])
         out = out.with_columns(pl.lit(None, dtype=pl.Float64).alias("statistic"),
                                pl.lit(None, dtype=pl.Float64).alias("p_value"))
         if not conf_int:
@@ -178,6 +180,9 @@ class BayesianModel(_Fit):
         else:
             values, rows, data = self._prediction_draws(newdata, predictive=interval == "prediction", seed=seed,
                 re_formula=re_formula, allow_new_levels=allow_new_levels, trials=trials)
+            if interval == "prediction" and self.family_name == "binomial":
+                # Success counts as proportions, the scale of the fitted probabilities.
+                values = values / self._trials(newdata, trials)
         out = self._prediction_table(values, level, interval != "none")
         if interval == "prediction":
             expected, _, _ = self._prediction_draws(newdata, seed=seed, re_formula=re_formula,
@@ -333,9 +338,17 @@ def bayes_lm(formula, *, prior_mean=0, prior_scale=10, prior_shape=2, prior_rate
     Intervals and moments are exact; stored draws are independent samples.
     ``by=`` fits independent models per group (not partial pooling).
     """
-    sequence = np.random.SeedSequence(seed)
-    return _model("bayes_lm", lambda f, fr, d: ConjugateLinearModel(f, fr, d, prior_mean, prior_scale,
-        prior_shape, prior_rate, draws, chains, sequence.spawn(1)[0]), formula, weights, offset, contrasts, na_action)
+    if na_action not in NA_ACTIONS:
+        raise ValueError(f"bayes_lm(): na_action must be one of {list(NA_ACTIONS)}, got {na_action!r}")
+
+    def apply(data):
+        # A fresh seed sequence per application, so a reused step repeats its draws.
+        sequence = np.random.SeedSequence(seed)
+        return _model("bayes_lm", lambda f, fr, d: ConjugateLinearModel(f, fr, d, prior_mean, prior_scale,
+            prior_shape, prior_rate, draws, chains, sequence.spawn(1)[0]),
+            formula, weights, offset, contrasts, na_action)._fn(data)
+
+    return _ModelStep(apply, "bayes_lm")
 
 
 def _bayesian_fits(model):
@@ -489,7 +502,8 @@ def bayes_diagnostics(model):
                 schema_overrides={"r_hat": pl.Float64})
         else:
             az = _arviz()
-            variables = [n for n in fit.idata.posterior.data_vars if not n.startswith(("coefficient_", "z_"))]
+            variables = [n for n in fit.idata.posterior.data_vars
+                         if not n.startswith(("coefficient_", "z_")) and not n.endswith("_centered")]
             summary = az.summary(fit.idata, var_names=variables, kind="diagnostics", round_to="none")
             stats = fit.idata.sample_stats
             terms = list(summary.index)

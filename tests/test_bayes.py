@@ -111,6 +111,10 @@ def test_reproducibility_draws_and_predictive_checks():
     a = bayes_lm(data(), "y~x", seed=12, draws=50, chains=2)
     b = bayes_lm(data(), "y~x", seed=12, draws=50, chains=2)
     assert posterior_draws(a).equals(posterior_draws(b))
+    # A seeded step piped twice repeats its draws, as a data-first call does.
+    reused = bayes_lm("y~x", seed=12, draws=50, chains=2)
+    assert posterior_draws(data() >> reused).equals(posterior_draws(a))
+    assert posterior_draws(data() >> reused).equals(posterior_draws(a))
     assert posterior_predict(a, seed=4).equals(posterior_predict(a, seed=4))
     assert prior_predict(a, draws=30, seed=4).equals(prior_predict(a, draws=30, seed=4))
     epred = posterior_epred(a)

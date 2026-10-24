@@ -10,6 +10,7 @@ import polars as pl
 
 from stats3._data import step
 from stats3.bayes import BayesianModel, Prior, _sampling_options, prior
+from stats3.core import _warn
 from stats3.formula import parse_formula
 from stats3.models import Models, NA_ACTIONS, _ModelStep, _contrasts, _model_frames
 
@@ -105,27 +106,42 @@ class SampledModel(BayesianModel):
         pm = _pymc()
         import pytensor.tensor as pt
 
+        center, scale = self._response_scale()
+        defaults = self._default_coefficient_priors(center, scale)
+        # Sample on predictors centred at their means, as rstanarm does: the
+        # intercept (or the ordinal cutpoints) is then the linear predictor at
+        # the means, nearly uncorrelated with the slopes. Reported coefficients
+        # are for the uncentred predictors.
+        columns = list(self.design.names) if family == "multinomial" else self.parameter_names
+        intercept = np.array([name == "(Intercept)" for name in columns], dtype=float)
+        centers = self.x.mean(axis=0) if self.n and (intercept.any() or family == "ordinal") else np.zeros(p)
+        centers[intercept > 0] = 0
         coords = {"coefficient": self.parameter_names, "observation": np.arange(self.n)}
         with pm.Model(coords=coords) as self.pymc_model:
             beta_rvs = []
             for j, name in enumerate(self.parameter_names):
-                default = prior("normal", mu=0, sigma=10 if name.endswith("(Intercept)") and family in ("gaussian", "student_t") else 2.5)
-                spec = self._prior(name, self._prior("beta", default))
+                spec = self._prior(name, self._prior("beta", defaults[j]))
                 beta_rvs.append(_rv(pm, f"coefficient_{j}", spec))
-            beta = pm.Deterministic("beta", pt.stack(beta_rvs) if beta_rvs else pt.zeros(0), dims="coefficient")
+            theta = pt.stack(beta_rvs) if beta_rvs else pt.zeros(0)
             if family == "multinomial":
-                eta = self.x @ beta.reshape((len(self.response_levels)-1, p)).T + frame.offset[:, None]
+                theta = theta.reshape((len(self.response_levels)-1, p))
+                eta = (self.x - centers) @ theta.T + frame.offset[:, None]
+                beta = (theta - (theta @ centers)[:, None] * intercept).reshape((-1,))
             else:
-                eta = self.x @ beta + frame.offset
+                eta = (self.x - centers) @ theta + frame.offset
+                beta = theta - (theta @ centers) * intercept
+            pm.Deterministic("beta", beta, dims="coefficient")
             for effect in self.random:
                 name = effect["name"]
-                sd = _rv(pm, f"{name}_sd", self._prior("group_sd", prior("half_normal", sigma=2.5)),
+                spread = effect["x"].std(axis=0, ddof=1) if self.n > 1 else np.zeros(effect["x"].shape[1])
+                spread[~(spread > 0)] = 1  # the intercept column, and constant slopes
+                sd = _rv(pm, f"{name}_sd", self._prior("group_sd", prior("half_normal", sigma=2.5 * scale / spread)),
                          shape=effect["x"].shape[1])
                 z = pm.Normal(f"z_{name}", 0, 1, shape=(len(effect["levels"]), effect["x"].shape[1]))
                 b = pm.Deterministic(name, z * sd)
                 eta = eta + pt.sum(b[effect["codes"]] * effect["x"], axis=1)
             if family in ("gaussian", "student_t", "lognormal"):
-                sigma = _rv(pm, "sigma", self._prior("sigma", prior("half_normal", sigma=5)))
+                sigma = _rv(pm, "sigma", self._prior("sigma", prior("exponential", lam=1 / scale)))
                 sd = sigma / np.sqrt(frame.weights) if family in ("gaussian", "student_t") else sigma
             if family == "gaussian":
                 pm.Normal("observed", mu=eta, sigma=sd, observed=self.y, dims="observation")
@@ -152,10 +168,11 @@ class SampledModel(BayesianModel):
                 cutpoint_prior = self._prior("cutpoints", prior("normal", mu=0, sigma=5))
                 if any(np.ndim(v) != 0 for v in cutpoint_prior.parameters.values()):
                     raise ValueError("cutpoint priors must be iid with scalar parameters")
-                cutpoints = _rv(pm, "cutpoints", cutpoint_prior,
+                centered = _rv(pm, "cutpoints_centered", cutpoint_prior,
                     shape=len(self.response_levels)-1, transform=pm.distributions.transforms.ordered)
+                pm.Deterministic("cutpoints", centered + theta @ centers)
                 distribution = pm.OrderedLogistic if link == "logit" else pm.OrderedProbit
-                distribution("observed", eta=eta, cutpoints=cutpoints, observed=self.y, compute_p=False, dims="observation")
+                distribution("observed", eta=eta, cutpoints=centered, observed=self.y, compute_p=False, dims="observation")
             else:
                 logits = pt.concatenate([pt.zeros((self.n, 1)), eta], axis=1)
                 pm.Categorical("observed", p=pm.math.softmax(logits, axis=1), observed=self.y, dims="observation")
@@ -165,14 +182,34 @@ class SampledModel(BayesianModel):
             self.idata = pm.sample(draws=draws, tune=tune, chains=chains, cores=cores,
                 random_seed=int(self.rng.integers(1, 2**30)), target_accept=target_accept,
                 nuts={"max_treedepth": max_treedepth}, progressbar=progressbar,
-                initvals={"cutpoints": np.linspace(-1, 1, len(self.response_levels)-1)} if family == "ordinal" else None,
+                initvals={"cutpoints_centered": np.linspace(-1, 1, len(self.response_levels)-1)} if family == "ordinal" else None,
                 return_inferencedata=True, idata_kwargs={"log_likelihood": True})
         self.beta_draws = self.idata.posterior["beta"].values
         self.extra_draws = {name: self.idata.posterior[name].values for name in self.idata.posterior.data_vars
-                            if name != "beta" and not name.startswith("coefficient_")}
+                            if name != "beta" and not name.startswith("coefficient_") and not name.endswith("_centered")}
         self.coef = self.beta_draws.mean(axis=(0, 1))
         self.posterior_covariance = np.atleast_2d(np.cov(self.beta_draws.reshape(chains*draws, -1), rowvar=False)) if self.parameter_names else np.empty((0, 0))
         self.qr.kept = list(range(len(self.design.names)))
+
+    def _response_scale(self):
+        """Location and scale of the response on the linear-predictor scale,
+        for families whose coefficients are in the response's units."""
+        if self.family_name not in ("gaussian", "student_t", "lognormal"):
+            return 0.0, 1.0
+        y = (np.log(self.y) if self.family_name == "lognormal" else self.y) - self.frame.offset
+        scale = float(np.std(y, ddof=1)) if self.n > 1 else np.nan
+        return float(np.mean(y)), scale if np.isfinite(scale) and scale > 0 else 1.0
+
+    def _default_coefficient_priors(self, center, scale):
+        """rstanarm-style autoscaled priors: Normal(0, 2.5 s_y / s_x) slopes, and
+        Normal(center, 2.5 s_y) for the intercept at the predictors' means."""
+        names = list(self.design.names) if self.family_name == "multinomial" else self.parameter_names
+        spreads = self.x.std(axis=0, ddof=1) if self.n > 1 else np.zeros(len(names))
+        column = [prior("normal", mu=center, sigma=2.5 * scale) if name == "(Intercept)" else
+                  prior("normal", mu=0, sigma=2.5 * scale / (spreads[j] if spreads[j] > 0 else 1))
+                  for j, name in enumerate(names)]
+        # Multinomial coefficients repeat per non-reference category.
+        return column * (len(self.response_levels) - 1) if self.family_name == "multinomial" else column
 
     def _prior(self, name, default):
         if name in self.priors:
@@ -343,18 +380,27 @@ def bayes_glm(formula, family="gaussian", *, link=None, priors=None, draws=1000,
     ``(1 + x | subject)`` adds independent varying intercepts/slopes.
     ``by=`` instead fits separate, unpooled models. Multinomial random
     effects and correlated varying coefficients are not included.
-    Defaults: beta Normal(0,2.5), Gaussian/Student-t intercept Normal(0,10), sigma
-    HalfNormal(5), group SD HalfNormal(2.5), alpha Exponential(1),
-    nu=2+Exponential(1/30), ordered cutpoints Normal(0,5).
+    Sampling uses predictors centred at their means, as rstanarm does, so
+    intercept and cutpoint priors apply at those means; reported
+    coefficients are for the uncentred predictors.
+    Defaults are autoscaled, as rstanarm's: slopes Normal(0, 2.5 s_y/s_x),
+    the intercept Normal(mean response, 2.5 s_y) (Gaussian-type families),
+    sigma Exponential(1/s_y), group SDs HalfNormal(2.5 s_y/s_x), where s_y
+    is the response SD for gaussian/student_t/lognormal and 1 otherwise;
+    alpha Exponential(1), nu=2+Exponential(1/30), ordered cutpoints Normal(0,5).
     ``priors`` overrides beta, individual coefficient names, sigma,
-    alpha, group_sd, nu_minus_two and cutpoints with ``prior()`` objects.
-    Predictor scaling is the caller's responsibility.
+    alpha, group_sd, nu_minus_two and cutpoints with fixed ``prior()`` objects.
+    ``family=Gamma()`` warns and uses the log link.
     """
     if callable(family):
         family = family()
     if hasattr(family, "family"):
         if getattr(family, "theta", None) is not None:
             raise ValueError("bayes_glm(): negative-binomial dispersion is estimated; use family='negative_binomial'")
+        if link is None and family.family == "Gamma" and family.link.name == "inverse":
+            # R's Gamma() default; the samplers here keep the mean positive with a log link.
+            _warn("bayes_glm(): Gamma()'s inverse link is not available; using the log link")
+            link = "log"
         link = link or family.link.name
         family = family.family
     if not isinstance(family, str):
@@ -375,9 +421,10 @@ def bayes_glm(formula, family="gaussian", *, link=None, priors=None, draws=1000,
     if na_action not in NA_ACTIONS:
         raise ValueError(f"na_action must be one of {NA_ACTIONS}")
     fixed, random = _random_formula(formula)
-    sequence = np.random.SeedSequence(seed)
 
     def apply(data):
+        # A fresh seed sequence per application, so a reused step repeats its draws.
+        sequence = np.random.SeedSequence(seed)
         parsed = parse_formula(fixed, "bayes_glm", data.columns)
         parsed.contrasts, parsed.offset_arg = _contrasts(contrasts, parsed, "bayes_glm"), offset
         frame_formula = copy.deepcopy(parsed)

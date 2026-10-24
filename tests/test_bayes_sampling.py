@@ -10,7 +10,7 @@ from scipy.integrate import quad
 from scipy.special import expit, log_expit, log_softmax, logsumexp
 from scipy import stats
 
-from stats3 import (augment, bayes_compare, bayes_diagnostics, bayes_emmeans, bayes_glm,
+from stats3 import (Gamma, augment, bayes_compare, bayes_diagnostics, bayes_emmeans, bayes_glm,
     bayes_lm, binomial, negative_binomial,
     posterior_draws, posterior_epred, posterior_predict, posterior_summary, pp_check,
     predict, prior, prior_predict, tidy, vcov)
@@ -277,6 +277,14 @@ def test_binomial_counts_predictions_and_validation():
     prediction=posterior_predict(fit,seed=1)
     assert prediction['.prediction'].is_between(0,10).all()
     assert posterior_predict(fit,source.head(1),trials=5,seed=1)['.prediction'].max()<=5
+    # Prediction intervals are proportions, on the scale of the fitted probabilities.
+    interval=predict(fit,interval='prediction',seed=1)
+    assert interval['lwr'].is_between(0,1).all() and interval['upr'].is_between(0,1).all()
+    assert ((interval['lwr']<=interval['fit'])&(interval['fit']<=interval['upr'])).all()
+    assert predict(fit,source.head(1),interval='prediction',trials=5,seed=1)['upr'].max()<=1
+    exponentiated=tidy(fit,exponentiate=True)
+    np.testing.assert_allclose(exponentiated['estimate'],np.exp(fit.beta_draws).mean(axis=(0,1)))
+    np.testing.assert_array_equal(exponentiated['prob_positive'],(fit.beta_draws>0).mean(axis=(0,1)))
     with pytest.raises(ValueError,match='integers'):
         bayes_glm({'y':[1.5]},'y~1',family='poisson',draws=10)
     with pytest.raises(ValueError,match='unused prior'):
@@ -285,6 +293,49 @@ def test_binomial_counts_predictions_and_validation():
         bayes_glm(source,'yes~x',priors={'sigma':prior('normal',mu=1,sigma=1)},draws=10)
     with pytest.raises(ValueError,match='dispersion'):
         bayes_glm(source,'yes~x',family=negative_binomial(2),draws=10)
+
+
+def test_default_priors_follow_the_units_of_the_data():
+    rng=np.random.default_rng(3)
+    x=rng.normal(200,14,40)
+    source=pl.DataFrame({'x':x,'y':-4000+40*x+rng.normal(0,375,40),'g':['a','b']*20})
+    fit=bayes_glm(source,'y~x+(1|g)',draws=20,tune=20,chains=1,seed=1)
+    sy,sx=source['y'].std(),source['x'].std()
+    intercept,slope=fit._default_coefficient_priors(*fit._response_scale())
+    assert slope.parameters=={'mu':0,'sigma':pytest.approx(2.5*sy/sx)}
+    assert intercept.parameters['mu']==pytest.approx(source['y'].mean())
+    assert intercept.parameters['sigma']==pytest.approx(2.5*sy)
+    # Scaling the response scales every default; logit-scale families stay unit-free.
+    model=fit.pymc_model
+    assert model['sigma'].owner.inputs[-1].eval()==pytest.approx(sy)
+    assert model['group_0_sd'].owner.inputs[-1].eval()==pytest.approx([2.5*sy])
+    counts=bayes_glm(source.with_columns(k=(pl.col('x')>200).cast(int)),'k~x',family='binomial',
+                     draws=20,tune=20,chains=1,seed=1)
+    assert counts._response_scale()==(0.0,1.0)
+
+
+def test_sampling_centres_predictors_and_reports_uncentred_coefficients():
+    source=synthetic().with_columns(pl.col('x')+200)
+    fit=bayes_glm(source,'gaussian~x',draws=20,tune=20,chains=1,seed=2)
+    centred=np.stack([fit.idata.posterior[f'coefficient_{j}'].values for j in range(2)],axis=-1)
+    mean=source['x'].mean()
+    np.testing.assert_allclose(fit.beta_draws[...,0],centred[...,0]-centred[...,1]*mean)
+    np.testing.assert_allclose(fit.beta_draws[...,1],centred[...,1])
+    ordinal=bayes_glm(source,'ordinal~x',family='ordinal',draws=20,tune=20,chains=1,seed=2)
+    np.testing.assert_allclose(ordinal.extra_draws['cutpoints'],
+        ordinal.idata.posterior['cutpoints_centered'].values+ordinal.beta_draws*mean)
+    assert 'cutpoints_centered' not in posterior_summary(ordinal)['term'].to_list()
+    uncentred=bayes_glm(source,'gaussian~0+x',draws=20,tune=20,chains=1,seed=2)
+    np.testing.assert_allclose(uncentred.beta_draws[...,0],uncentred.idata.posterior['coefficient_0'].values)
+
+
+def test_family_objects_and_reused_seeded_steps():
+    source=synthetic()
+    with pytest.warns(UserWarning,match='inverse link'):
+        fit=bayes_glm(source,'gamma~x',family=Gamma(),draws=20,tune=20,chains=1,seed=4)
+    assert fit.link_name=='log'
+    step=bayes_glm('gaussian~x',draws=20,tune=20,chains=1,seed=4)
+    np.testing.assert_array_equal((source >> step).beta_draws,(source >> step).beta_draws)
 
 
 def test_boolean_all_successes_keep_the_success_category():

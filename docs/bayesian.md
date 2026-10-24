@@ -77,18 +77,35 @@ accept weights. Offsets enter the linear predictor on both fitted and new rows.
 
 ### Priors
 
-Defaults on the raw predictor scale:
+Defaults are weakly informative and autoscaled, in the manner of rstanarm,
+so they follow the units of the data. With `s_x` the sample SD of a model
+matrix column, and `s_y` the SD of the response minus its offset (of the log
+response for lognormal; `s_y = 1` on the logit and log scales of the other
+families):
 
-- coefficients: `Normal(0, 2.5)`;
-- Gaussian/Student-t intercept: `Normal(0, 10)`;
-- `sigma`: `HalfNormal(5)`;
-- varying-effect SDs: `HalfNormal(2.5)`;
+- coefficients: `Normal(0, 2.5 s_y / s_x)` (`2.5 s_y` for a constant column);
+- intercept: `Normal(m, 2.5 s_y)` at the predictors' means (see below), with
+  `m` the mean response (minus offset) for Gaussian, Student-t and
+  lognormal, and 0 otherwise;
+- `sigma`: `Exponential(1 / s_y)`;
+- varying-effect SDs: `HalfNormal(2.5 s_y)` for intercepts and
+  `HalfNormal(2.5 s_y / s_x)` for slopes;
 - `alpha`: `Exponential(1)`;
 - `nu_minus_two`: `Exponential(1/30)`;
 - ordered cutpoints: iid `Normal(0, 5)` restricted to increasing order.
 
-Choose units/center/scale your predictors before fitting and examine prior
-predictions. Broad log-link priors can imply extremely large counts.
+The defaults depend on the data, so `by=` groups each get their own. A
+`priors` entry replaces a default with a fixed prior; `beta` applies to every
+coefficient, the intercept included. Examine prior predictions.
+
+As in rstanarm, the sampler works with the predictors centred at their
+means, so the intercept is nearly uncorrelated with the slopes and NUTS does
+not need long trajectories for uncentred predictors. Tables, draws and
+predictions report the usual coefficients of the uncentred predictors. The
+intercept prior, default or from `priors`, is therefore a prior on the linear
+predictor at the predictors' means, not on the reported `(Intercept)`; the
+same holds for ordinal cutpoints. Slope priors are unchanged. Models without
+an intercept are not centred. Varying-effect columns are not centred either. Broad log-link priors can imply extremely large counts.
 Sampled Gaussian priors are independent of sigma and differ from the exact
 engine's conjugate conditional prior; the two engines do not fit the same
 default model.

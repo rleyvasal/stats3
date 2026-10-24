@@ -302,7 +302,7 @@ Install `pip install "stats3[bayes]"` for sampled models:
 ```python
 fit = bayes_glm(
     penguins, "body_mass_g ~ flipper_length_mm + species + (1 | island)",
-    priors={"beta": prior("normal", mu=0, sigma=100)},
+    priors={"flipper_length_mm": prior("normal", mu=0, sigma=50)},
     draws=1000, tune=1000, chains=4, seed=42,
 )
 posterior_summary(fit)
