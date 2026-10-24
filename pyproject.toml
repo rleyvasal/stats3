@@ -31,6 +31,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+bayes = ["pymc>=5.28,<6", "arviz>=0.21,<0.23"]
 # pandas frames in and out: Polars converts them through pyarrow (the
 # first releases built for NumPy 2, which scipy 1.18 needs).
 pandas = ["pandas>=2.2.2", "pyarrow>=16"]

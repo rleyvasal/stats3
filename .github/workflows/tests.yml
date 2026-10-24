@@ -55,6 +55,25 @@ jobs:
       - name: Run tests
         run: python -m pytest -q --tb=short
 
+  bayes:
+    name: Bayesian extra (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install Bayesian and test dependencies
+        run: python -m pip install -e ".[dev,bayes]"
+      - name: Run exact and sampled Bayesian checks
+        run: python -m pytest -q tests/test_bayes.py tests/test_bayes_sampling.py tests/test_masking.py --tb=short
+
   # Every R comparison, against R's own results.
   r-oracle:
     name: R oracle

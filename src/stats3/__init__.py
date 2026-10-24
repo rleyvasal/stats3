@@ -11,6 +11,13 @@ the kind of frame it was given.
 """
 
 from stats3.__version__ import __version__
+from stats3.bayes import (
+    bayes_binom_test, bayes_compare, bayes_diagnostics, bayes_lm, bayes_poisson_test,
+    hypothesis, posterior_draws, posterior_epred, posterior_predict, posterior_summary,
+    pp_check, prior, prior_predict,
+)
+from stats3.bayes_sampling import bayes_glm
+from stats3.bayes_marginal import bayes_emmeans
 from stats3.checks import (
     bartlett_test,
     fligner_test,
@@ -73,6 +80,21 @@ except Exception:  # pragma: no cover - never let the shell block an import
     pass
 
 __all__ = [
+    "bayes_compare",
+    "bayes_binom_test",
+    "bayes_poisson_test",
+    "bayes_diagnostics",
+    "bayes_glm",
+    "bayes_emmeans",
+    "bayes_lm",
+    "hypothesis",
+    "posterior_draws",
+    "posterior_epred",
+    "posterior_predict",
+    "posterior_summary",
+    "prior",
+    "prior_predict",
+    "pp_check",
     "anova",
     "aov",
     "augment",

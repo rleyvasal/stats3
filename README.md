@@ -262,9 +262,51 @@ statsmodels' formula interface.
 | MASS::rlm | `rlm("y ~ x", psi="huber")` |
 | quantreg::rq | `rq("y ~ x", tau=0.5, se="nid")` |
 
-The rest of tier 2: ordinal and multinomial models, then mixed models.
-After tier 2 comes the
-Bayesian extra.
+## Bayesian statistics
+
+```python
+fit = bayes_lm(penguins, "body_mass_g ~ flipper_length_mm + species", seed=42)
+tidy(fit, conf_int=True)              # posterior means, SDs and credible intervals
+predict(fit, interval="prediction")  # includes uncertainty in future observations
+hypothesis(fit, {"flipper_length_mm": 1}, rope=(-1, 1))
+tidy(pairs(bayes_emmeans(fit, "species")))
+```
+
+`bayes_lm` uses a proper normal-inverse-gamma prior and exact inference;
+it needs only the base dependencies. `prior_scale` is conditional on the
+residual SD. Defaults and parameterizations are explicit in the
+[Bayesian guide](docs/bayesian.md).
+
+Install `pip install "stats3[bayes]"` for sampled models:
+
+```python
+fit = bayes_glm(
+    penguins, "body_mass_g ~ flipper_length_mm + species + (1 | island)",
+    priors={"beta": prior("normal", mu=0, sigma=100)},
+    draws=1000, tune=1000, chains=4, seed=42,
+)
+posterior_summary(fit)
+bayes_diagnostics(fit)                # R-hat, ESS, MCSE, divergences and BFMI
+posterior_predict(fit, seed=42)
+pp_check(fit, statistic="sd", seed=42)
+```
+
+The sampled engine supports Gaussian, Student-t, binomial, Poisson,
+negative binomial, gamma, lognormal, exponential, ordinal and multinomial
+models, plus independent varying intercepts/slopes. It uses optional PyMC 5
+and ArviZ dependencies. All four data backends, formulas, offsets, grouped
+fits and missing-row alignment carry through. `posterior_draws`,
+`posterior_epred`, `prior_predict`, `bayes_emmeans`, contrasts and ROPE
+probabilities expose posterior uncertainty; `bayes_compare` offers LOO,
+WAIC and exact Gaussian model evidence. `bayes_binom_test` and
+`bayes_poisson_test` give exact conjugate scalar inference and log Bayes factors.
+
+This is a first Bayesian implementation. Correlated varying effects,
+multinomial varying effects, categorical marginal means, custom likelihoods,
+survival/time-series models and general model-evidence estimation remain
+outside its scope. Frequentist ordinal regression remains partly implemented;
+frequentist multinomial and mixed models are still pending. Bayesian work
+now takes priority over those remaining tier 2 items.
 
 ## How it works, and how it is checked
 

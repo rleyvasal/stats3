@@ -1506,8 +1506,10 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
     Anything else goes to tidy3's ``tidy()`` when tidy3 is
     loaded, so ``from stats3 import *`` keeps tidy3's constructor working.
     """
+    from stats3.bayes_marginal import BayesianEstimates
+
     def run(model):
-        if isinstance(model, (EMMeans, Contrasts)):
+        if isinstance(model, (EMMeans, Contrasts, BayesianEstimates)):
             if conf_int or conf_level != 0.95 or exponentiate:
                 raise TypeError("tidy(): set intervals and scale in emmeans() or contrast()")
             return model.__tidy__(**kwargs)
@@ -1525,7 +1527,7 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
 
     if x is None and not args and set(kwargs) <= {"conf_method", "vcov"}:
         return _ModelVerb(run, "tidy")
-    if _is_model(x) or isinstance(x, (EMMeans, Contrasts)):
+    if _is_model(x) or isinstance(x, (EMMeans, Contrasts, BayesianEstimates)):
         return run(x)
     if "tidy3" in sys.modules:
         return sys.modules["tidy3"].tidy(x, *args, **kwargs)

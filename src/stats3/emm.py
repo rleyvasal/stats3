@@ -560,6 +560,9 @@ def emmeans(
     """
     from stats3.models import _fits
 
+    if any(getattr(f, "kind", None) == "bayesian" for f in _fits(model)):
+        raise TypeError("emmeans(): use bayes_emmeans() for posterior marginal means")
+
     specs_ = [specs] if isinstance(specs, str) else list(specs)
     by_ = [] if by is None else ([by] if isinstance(by, str) else list(by))
     if not specs_:
@@ -574,17 +577,25 @@ def emmeans(
     return EMMeans(parts, specs_, fits[0]._data)
 
 
-def pairs(emm: EMMeans, *, adjust: str = "tukey", reverse: bool = False, level: float | None = None) -> Contrasts:
+def pairs(emm: EMMeans, *, adjust: str | None = None, reverse: bool = False, level: float | None = None) -> Contrasts:
     """All pairwise differences of estimated marginal means, as emmeans' ``pairs``."""
+    from stats3.bayes_marginal import BayesianEstimates
+
+    if isinstance(emm, BayesianEstimates):
+        return emm.pairs(adjust=adjust, reverse=reverse, level=level)
     if not isinstance(emm, EMMeans):
         raise TypeError("pairs(): expected the result of emmeans()")
-    return emm.pairs(adjust=adjust, reverse=reverse, level=level)
+    return emm.pairs(adjust="tukey" if adjust is None else adjust, reverse=reverse, level=level)
 
 
 def contrast(emm: EMMeans, method: Any = "pairwise", *, adjust: str | None = None, ref: Any = 1,
              level: float | None = None) -> Contrasts:
     """Contrasts of estimated marginal means, as emmeans' ``contrast``; see
     ``EMMeans.contrast``."""
+    from stats3.bayes_marginal import BayesianEstimates
+
+    if isinstance(emm, BayesianEstimates):
+        return emm.contrast(method, adjust=adjust, ref=ref, level=level)
     if not isinstance(emm, EMMeans):
         raise TypeError("contrast(): expected the result of emmeans()")
     return emm.contrast(method, adjust=adjust, ref=ref, level=level)

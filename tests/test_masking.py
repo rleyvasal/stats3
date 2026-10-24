@@ -24,6 +24,8 @@ NS = {"penguins", "df", "mask", "group_by", "mutate", "stats3", "log", "x", "pl"
         ("glm_nb(y ~ x + g)", "glm_nb('y ~ x + g')"),
         ("rlm(y ~ x + g)", "rlm('y ~ x + g')"),
         ("rq(y ~ x + g, tau=0.75)", "rq('y ~ x + g', tau=0.75)"),
+        ("bayes_lm(y ~ x + g)", "bayes_lm('y ~ x + g')"),
+        ("bayes_glm(y ~ x + (1 | subject))", "bayes_glm('y ~ x + (1 | subject)')"),
         ("df.filter(~mask)", "df.filter(~mask)"),
         ("x = ~x", "x = ~x"),
     ],

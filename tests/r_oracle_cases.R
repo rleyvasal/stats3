@@ -654,6 +654,10 @@ result <- switch(
       pa_sig=power_row(power.anova.test(groups=3, n=10, between.var=1, within.var=2, power=0.9, sig.level=NULL))
     ))
   },
+  bayes = {
+    source("tests/r_bayes_cases.R")
+    bayes_cases()
+  },
   rlm = {
     source("tests/r_resistant_cases.R")
     resistant_cases("rlm")
