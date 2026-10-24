@@ -4,7 +4,7 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.1.3 — 2026-10-24
 
 More of base R's tests: Welch's ANOVA, pairwise comparisons, Friedman, McNemar, Cochran-Mantel-Haenszel, exact Poisson and Fligner-Killeen tests, and ANOVA power.
 
