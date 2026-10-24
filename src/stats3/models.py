@@ -412,7 +412,7 @@ def _model_frames(
             raise ValueError(f"{verb}(): 0 (non-NA) cases{label}")
         ys = [part[f"__y{i}"] for i in range(len(responses))]
         response_levels = None
-        if len(ys) == 1 and is_categorical(ys[0].dtype):
+        if len(ys) == 1 and (is_categorical(ys[0].dtype) or variable_expr(responses[0], verb)[1]):
             y_var = encode(part.rename({"__y0": "y"}), "y", True, _levels_for(data, responses[0]))
             response_levels = y_var.levels
             y = y_var.codes.astype(float)
@@ -1630,6 +1630,12 @@ def anova(*models: Any, test: Any = None, type: Any = 1) -> Any:  # noqa: A002
         raise ValueError("anova(): models were not all fitted to the same size of dataset")
     if all(isinstance(f, LinearModel) for f in fits):
         return fits[0]._write(_anova_lm(fits))
+    from stats3.ordinal import OrdinalModel, _anova_polr
+
+    if any(isinstance(f, OrdinalModel) for f in fits):
+        if not all(isinstance(f, OrdinalModel) for f in fits):
+            raise TypeError("anova(): compare polr fits with polr fits")
+        return fits[0]._write(_anova_polr(fits, test))
     from stats3.negbin import NegativeBinomialModel, _anova_nb
 
     if any(isinstance(f, NegativeBinomialModel) for f in fits):

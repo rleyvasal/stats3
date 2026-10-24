@@ -26,7 +26,7 @@ COL_NAME = "__stats3_col__"
 
 # Every stats3 function whose arguments name columns.
 FUNCTIONS = frozenset({
-    "bayes_lm", "bayes_glm",
+    "bayes_lm", "bayes_glm", "polr",
     "aov", "bartlett_test", "binom_test", "chisq_test", "cohens_d", "cor_test",
     "eta_squared", "fisher_test", "fligner_test", "friedman_test", "glm", "glm_nb", "hedges_g",
     "kruskal_test", "ks_test", "levene_test", "lm", "mantelhaen_test", "mcnemar_test",

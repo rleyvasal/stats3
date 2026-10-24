@@ -206,6 +206,25 @@ estimated marginal means. Quantile fit statistics follow `logLik.rq`'s
 asymmetric-Laplace convention; R leaves BIC missing. Robust fits report their
 scale and convergence, without Gaussian likelihood statistics.
 
+Ordered responses get MASS's proportional-odds model, `polr`:
+
+```python
+housing = housing.with_columns(pl.col("Sat").cast(pl.Enum(["Low", "Medium", "High"])))
+fit = polr(housing, "Sat ~ Infl + Type + Cont", weights="Freq")
+tidy(fit, conf_int=True)             # slopes, then the thresholds Low|Medium and Medium|High
+predict(fit, new_rows, type="probs") # one column per level; "class" (default) or "link"
+anova(smaller_fit, fit)              # likelihood ratio test of nested fits
+```
+
+As in MASS, P(Y <= k) = F(zeta_k - x'beta - offset), with the logistic,
+probit, loglog or cloglog link (`method=`). The response needs three or more
+levels, ordered by a Polars `Enum`, a pandas category or `factor()`. Weights,
+offsets, groups and `na_action` work as for `glm`. Standard errors come from
+the Hessian, as `summary.polr`; p-values stay missing, as R reports none, and
+`conf_int=True` gives Wald intervals rather than `confint.polr`'s profile
+likelihood. The cauchit link, robust covariance and marginal means for
+ordinal fits are not included yet.
+
 `na_action="exclude"` (R's `na.exclude`) keeps every row in `augment` and
 `predict`, with missing values where a row was not used, so the results line
 up with the data.
@@ -259,6 +278,7 @@ statsmodels' formula interface.
 | modelsummary | `modelsummary(fit1, fit2)`: a frame, Markdown or HTML |
 | emmeans | `emmeans(fit, "species")`, `pairs(emm)`, `contrast(emm, ...)` |
 | MASS | `glm_nb("y ~ x")`, `glm("y ~ x", family=negative_binomial(theta))` |
+| MASS::polr | `polr("y ~ x", method="logistic")` |
 | MASS::rlm | `rlm("y ~ x", psi="huber")` |
 | quantreg::rq | `rq("y ~ x", tau=0.5, se="nid")` |
 
@@ -304,9 +324,8 @@ WAIC and exact Gaussian model evidence. `bayes_binom_test` and
 This is a first Bayesian implementation. Correlated varying effects,
 multinomial varying effects, categorical marginal means, custom likelihoods,
 survival/time-series models and general model-evidence estimation remain
-outside its scope. Frequentist ordinal regression remains partly implemented;
-frequentist multinomial and mixed models are still pending. Bayesian work
-now takes priority over those remaining tier 2 items.
+outside its scope. Frequentist multinomial and mixed models are still
+pending; Bayesian work now takes priority over those remaining tier 2 items.
 
 ## How it works, and how it is checked
 

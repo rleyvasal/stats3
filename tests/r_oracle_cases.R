@@ -654,6 +654,10 @@ result <- switch(
       pa_sig=power_row(power.anova.test(groups=3, n=10, between.var=1, within.var=2, power=0.9, sig.level=NULL))
     ))
   },
+  ordinal = {
+    source("tests/r_ordinal_cases.R")
+    ordinal_cases()
+  },
   bayes = {
     source("tests/r_bayes_cases.R")
     bayes_cases()
