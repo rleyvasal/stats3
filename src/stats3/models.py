@@ -1636,6 +1636,12 @@ def anova(*models: Any, test: Any = None, type: Any = 1) -> Any:  # noqa: A002
         if not all(isinstance(f, OrdinalModel) for f in fits):
             raise TypeError("anova(): compare polr fits with polr fits")
         return fits[0]._write(_anova_polr(fits, test))
+    from stats3.multinomial import MultinomialModel, _anova_multinom
+
+    if any(isinstance(f, MultinomialModel) for f in fits):
+        if not all(isinstance(f, MultinomialModel) for f in fits):
+            raise TypeError("anova(): compare multinom fits with multinom fits")
+        return fits[0]._write(_anova_multinom(fits, test))
     from stats3.negbin import NegativeBinomialModel, _anova_nb
 
     if any(isinstance(f, NegativeBinomialModel) for f in fits):

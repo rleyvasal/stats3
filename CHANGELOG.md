@@ -6,6 +6,10 @@ under **Changed**.
 
 ## Unreleased
 
+### Added
+
+- `multinom("y ~ x")`: nnet's baseline-category multinomial logit, with the first response level as reference. The MLE comes from Newton's method on the exact Hessian (nnet uses BFGS to a tolerance), with standard errors from that Hessian, as `summary.multinom`. `tidy` gives one row per (`y_level`, term) with Wald z tests and intervals, as broom (`exponentiate=` for odds ratios); `glance` gives `edf`, `deviance`, `AIC` and `nobs`; `predict()` gives classes or probabilities; `anova(fit1, fit2)` gives `anova.multinom`'s likelihood ratio tests. Includes weights, offsets (one column per level, as `offset(cbind(...))`), sum contrasts, aliased columns (nnet's minimum-norm solution), grouped fits, missing-row alignment, `vcov` and `modelsummary`. Checked against nnet and broom on all four backends. Weight decay, count-matrix responses and marginal means are not included.
+
 ### Changed
 
 - The `bayes` extra now needs PyMC 6 (`pymc>=6.3,<7`, with PyTensor 3) and ArviZ 1 (`arviz>=1.1,<2`). PyTensor 2, which PyMC 5 requires, cannot compile its C extensions with Apple clang 21 (Xcode 27): it passes the `-ld64` linker flag that this clang removed, so every sampled `bayes_glm` fit failed on current macOS toolchains without a local compiler wrapper. PyTensor 3 chooses the flag by the compiler's version instead, and runs the model graph through Numba by default, so the C++ compiler only builds PyTensor's small bootstrap module. `bayes_compare(method="loo")` still uses ArviZ's PSIS-LOO; ArviZ 1 dropped WAIC, so `method="waic"` is now computed by stats3 from the pointwise log likelihoods with the same definition, and both methods return the same table as before (rank, `elpd_*`, `p_*`, `elpd_diff`, stacking `weight`, `se`, `dse`, `warning`). As in ArviZ 1, `se` and `dse` now use the sample variance of the pointwise values (ArviZ 0.x used the population variance, a factor of `sqrt(n/(n-1))` smaller). A sampled fit's `idata` is now an xarray `DataTree`, as PyMC 6 returns.

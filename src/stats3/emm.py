@@ -564,6 +564,8 @@ def emmeans(
         raise TypeError("emmeans(): use bayes_emmeans() for posterior marginal means")
     if any(getattr(f, "kind", None) == "ordinal" for f in _fits(model)):
         raise TypeError("emmeans(): ordinal marginal means are not implemented; use predict(type='probs')")
+    if any(getattr(f, "kind", None) == "multinomial" for f in _fits(model)):
+        raise TypeError("emmeans(): multinomial marginal means are not implemented; use predict(type='probs')")
 
     specs_ = [specs] if isinstance(specs, str) else list(specs)
     by_ = [] if by is None else ([by] if isinstance(by, str) else list(by))

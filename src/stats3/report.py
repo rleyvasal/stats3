@@ -119,11 +119,16 @@ def modelsummary(
     for (_, fit), v in zip(named, vcovs):
         assert isinstance(fit, _Fit)
         opts: dict[str, Any] = {"conf_int": statistic == "conf_int", "conf_level": conf_level, "vcov": v}
+        if fit.kind == "multinomial":
+            opts["exponentiate"] = exponentiate
         if isinstance(fit, GeneralizedLinearModel):
             opts["exponentiate"] = exponentiate
             if statistic == "conf_int" and v is None:
                 opts["conf_method"] = "profile"
-        tables.append(fit.tidy(**opts))
+        table = fit.tidy(**opts)
+        if "y_level" in table.columns:  # multinom: one row per response level and term
+            table = table.with_columns(term=pl.format("{}:{}", "y_level", "term"))
+        tables.append(table)
         glances.append(fit.glance(vcov=v) if v is not None and not isinstance(fit, GeneralizedLinearModel)
                        else fit.glance())
 
