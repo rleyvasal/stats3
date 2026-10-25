@@ -423,6 +423,16 @@ def _one_way(tf: Any, formula: str, verb: str) -> tuple[pl.DataFrame, list[str],
     return table, groups, by
 
 
+def _one_factor(tf: Any, formula: str, which: Any = None) -> bool:
+    """``y ~ g`` with ``g`` a column (and ``which`` that column): the fast
+    one-factor path. Other formulas go to ``factorial`` and the lm engine."""
+    lhs, sep, rhs = formula.partition("~")
+    rhs = rhs.strip()
+    if not sep or "~" in rhs or rhs not in tf.columns:
+        return False
+    return which is None or ([which] if isinstance(which, str) else list(which)) == [rhs]
+
+
 def _within(n: np.ndarray, v: np.ndarray) -> float:
     """Pooled within-level sum of squares; a one-row level adds nothing."""
     return float(np.sum(np.where(n > 1, (n - 1) * np.nan_to_num(v), 0.0)))
@@ -430,16 +440,24 @@ def _within(n: np.ndarray, v: np.ndarray) -> float:
 
 @step
 def aov(formula: str) -> Step:
-    """One-way analysis of variance, as ``tidy(aov(y ~ g))`` in R.
+    """Analysis of variance, as ``summary(aov(...))`` in R.
 
     ``penguins >> aov("body_mass_g ~ species")`` gives the ANOVA table: one row
     for the grouping column and one for ``Residuals``, with ``df``, ``sumsq``,
-    ``meansq``, ``statistic`` (F) and ``p_value``. After ``group_by`` there is
-    a table per group. Rows missing the response or the group are dropped.
-    Models with several terms will come with ``lm()``.
+    ``meansq``, ``statistic`` (F) and ``p_value``. Several terms
+    (``"y ~ a + b"``, ``"y ~ a * b"``, a covariate ``"y ~ x + a"``) give R's
+    sequential (type I) table, each term after the ones before it; character
+    and categorical columns are factors, numeric ones covariates. After
+    ``group_by`` there is a table per group. Rows missing any variable are
+    dropped. ``Error()`` strata are not supported.
     """
+    from stats3.factorial import aov_table, check_strata
+
+    check_strata(formula, "aov")
 
     def _apply(tf: Any) -> Any:
+        if not _one_factor(tf, formula):
+            return aov_table(tf, formula)
         special = _special()
         table, groups, by = _one_way(tf, formula, "aov")
         rows: dict[str, list[Any]] = {
@@ -475,20 +493,32 @@ def aov(formula: str) -> Step:
 
 
 @step
-def tukey_hsd(formula: str, *, conf_level: float = 0.95) -> Step:
-    """Tukey's honest significant differences, as ``tidy(TukeyHSD(aov(y ~ g)))``.
+def tukey_hsd(formula: str, *, which: Any = None, ordered: bool = False, conf_level: float = 0.95) -> Step:
+    """Tukey's honest significant differences, as ``tidy(TukeyHSD(aov(...)))``.
 
     One row per pair of levels, in R's order (``"b-a"``, ``"c-a"``, ``"c-b"``):
     ``term``, ``contrast``, ``estimate`` (difference of means), ``conf_low``,
     ``conf_high`` and ``adj_p_value``. Unequal group sizes use the
     Tukey-Kramer standard error, as R does. R's ``qtukey`` is accurate to
     about four digits, so intervals agree with R to about that.
+
+    With several terms (``"y ~ a * b"``) there is a table per term, stacked;
+    ``which`` picks terms (a name or a list), as R's ``which``. Interaction
+    cells are named ``"a1:b1"``, empty cells give missing comparisons, and a
+    later term's means are adjusted for the terms before it, as R's
+    ``model.tables``. ``ordered=True`` sorts each term's means first, so every
+    difference is positive.
     """
     _check_conf_level(conf_level)
+    from stats3.factorial import check_strata, tukey_table
+
+    check_strata(formula, "tukey_hsd")
 
     def _apply(tf: Any) -> Any:
         from scipy.stats import studentized_range
 
+        if not _one_factor(tf, formula, which):
+            return tukey_table(tf, formula, which, ordered, conf_level)
         table, groups, by = _one_way(tf, formula, "tukey_hsd")
         out: dict[str, list[Any]] = {
             k: [] for k in ("term", "contrast", "estimate", "conf_low", "conf_high", "adj_p_value")
@@ -499,6 +529,9 @@ def tukey_hsd(formula: str, *, conf_level: float = 0.95) -> Step:
             n = np.array(row["n"], dtype=float)
             m = np.array(row["mean"], dtype=float)
             v = np.array([np.nan if x is None else x for x in row["var"]], dtype=float)
+            if ordered:
+                order = np.argsort(m, kind="stable")
+                levels, n, m, v = [levels[j] for j in order], n[order], m[order], v[order]
             k = len(n)
             df = n.sum() - k
             if df <= 0:

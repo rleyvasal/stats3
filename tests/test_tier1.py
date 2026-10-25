@@ -63,6 +63,17 @@ def _counts(x, n):
 
 MALE = pl.col("sex") == "male"
 
+
+def _balanced():
+    """The first 10 penguins of each species and sex: a balanced 3 x 2 design."""
+    sexed = P().drop_nulls("sex")
+    return sexed.filter(pl.int_range(pl.len()).over("species", "sex") < 10)
+
+
+def _no_cell():
+    """No Chinstrap males: an empty interaction cell."""
+    return P().filter(~((pl.col("species") == "Chinstrap") & MALE).fill_null(False))
+
 CASES = {
     "w_two": case(P, lambda: wilcox_test("body_mass_g ~ sex")),
     "w_two_no_correct": case(P, lambda: wilcox_test("body_mass_g ~ sex", correct=False)),
@@ -102,6 +113,25 @@ CASES = {
     "t_species": case(P, lambda: tukey_hsd("body_mass_g ~ species")),
     "t_by_sex": case(P, lambda: tukey_hsd("flipper_length_mm ~ island"), "sex"),
     "t_small_99": case(S, lambda: tukey_hsd("a ~ h", conf_level=0.99)),
+    "a_two_way": case(P, lambda: aov("body_mass_g ~ species + sex")),
+    "a_two_way_reversed": case(P, lambda: aov("body_mass_g ~ sex + species")),
+    "a_interaction": case(P, lambda: aov("body_mass_g ~ species * sex")),
+    "a_balanced": case(_balanced, lambda: aov("body_mass_g ~ species * sex")),
+    "a_covariate": case(P, lambda: aov("body_mass_g ~ flipper_length_mm + species")),
+    "a_covariate_interaction": case(P, lambda: aov("body_mass_g ~ flipper_length_mm * species")),
+    "a_aliased": case(P, lambda: aov("body_mass_g ~ species * island")),
+    "a_empty_cell": case(_no_cell, lambda: aov("body_mass_g ~ species * sex")),
+    "a_three_way": case(P, lambda: aov("bill_length_mm ~ species * sex * factor(year)")),
+    "a_interaction_by_year": case(P, lambda: aov("bill_depth_mm ~ species * sex"), "year"),
+    "t_two_way": case(P, lambda: tukey_hsd("body_mass_g ~ species + sex")),
+    "t_interaction": case(P, lambda: tukey_hsd("body_mass_g ~ species * sex")),
+    "t_balanced_90": case(_balanced, lambda: tukey_hsd("body_mass_g ~ species * sex", conf_level=0.9)),
+    "t_covariate": case(P, lambda: tukey_hsd("body_mass_g ~ flipper_length_mm + species", which="species")),
+    "t_empty_cell": case(_no_cell, lambda: tukey_hsd("body_mass_g ~ species * sex", which="species:sex")),
+    "t_ordered": case(P, lambda: tukey_hsd("body_mass_g ~ sex * species", which=["species", "sex:species"], ordered=True)),
+    "t_one_way_ordered": case(P, lambda: tukey_hsd("flipper_length_mm ~ island", ordered=True)),
+    "t_three_way_year": case(P, lambda: tukey_hsd("bill_length_mm ~ species * sex * factor(year)", which="sex:factor(year)")),
+    "t_interaction_by_year": case(P, lambda: tukey_hsd("bill_depth_mm ~ species * sex"), "year"),
     "x_species_island": case(P, lambda: chisq_test("species", "island")),
     "x_yates": case(P, lambda: chisq_test("sex", "dream")),
     "x_no_yates": case(P, lambda: chisq_test("sex", "dream", correct=False)),
@@ -162,6 +192,8 @@ GROUPED = {
     "kruskal_test": lambda: kruskal_test("body_mass_g ~ island"),
     "cor_test": lambda: cor_test("bill_length_mm", "flipper_length_mm", method="kendall"),
     "aov": lambda: aov("body_mass_g ~ island"),
+    "aov_two_way": lambda: aov("body_mass_g ~ flipper_length_mm + species * sex"),
+    "tukey_hsd_two_way": lambda: tukey_hsd("body_mass_g ~ species * sex"),
     "chisq_test": lambda: chisq_test("sex", "island"),
     "binom_test": lambda: binom_test(MALE),
 }
@@ -279,7 +311,9 @@ def test_exact_rank_correlation_with_ties_warns_as_r_does():
     [
         ({"y": [1.0, 2.0], "g": ["a", "a"]}, lambda: wilcox_test("y ~ g"), "exactly 2 levels"),
         ({"y": [1.0, 2.0], "g": ["a", "a"]}, lambda: kruskal_test("y ~ g"), "same group"),
-        ({"y": [1.0, 2.0], "g": ["a", "b"]}, lambda: aov("y ~ g + h"), "one grouping column"),
+        ({"y": [1.0, 2.0, 3.0], "g": ["a", "b", "b"], "x": [1.0, 2.0, 4.0]},
+         lambda: tukey_hsd("y ~ x + g"), "not a factor term"),
+        ({"y": [1.0, 2.0, 3.0], "g": ["a", "b", "b"]}, lambda: tukey_hsd("y ~ g", which="h"), "not a term"),
         ({"x": [1.0, 2.0], "y": [3.0, 1.0]}, lambda: cor_test("x", "y"), "not enough finite"),
         ({"x": ["a", "a"], "y": ["b", "c"]}, lambda: chisq_test("x", "y"), "at least 2 levels"),
         ({"x": ["a", "b"]}, lambda: chisq_test("x", p=[0.2, 0.2]), "sum to 1"),
@@ -300,6 +334,8 @@ def test_errors_follow_r(frame, call, message):
         (lambda: wilcox_test("y", correct=5), "correct must be"),
         (lambda: cor_test("x", "y", method="tau"), "method must be"),
         (lambda: tukey_hsd("y ~ g", conf_level=2), "conf_level"),
+        (lambda: aov("y ~ a * b + Error(subject)"), "Error\\(\\) strata"),
+        (lambda: tukey_hsd("y ~ a + Error(subject / a)"), "Error\\(\\) strata"),
         (lambda: binom_test("x", p=1.5), "between 0 and 1"),
         (lambda: chisq_test("x", "y", p=[0.5, 0.5]), "p is for one column"),
     ],
