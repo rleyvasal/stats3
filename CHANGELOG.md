@@ -4,6 +4,14 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+Linear mixed models: lme4's `lmer`.
+
+### Added
+
+- `lmer("y ~ x + (x || g)")`: lme4's linear mixed model, fitted by REML (or `reml=False`) over the profiled deviance in the relative covariance factor theta, as lme4 does. Random intercepts, independent random slopes (`(1 | g)`, `(0 + x | g)`, `(x || g)`), crossed factors, `(1 | g1:g2)` and nested `(1 | g1/g2)` terms. `tidy()` gives broom.mixed's table (fixed effects with t statistics and no p-values, as `summary.merMod`; standard deviations as `ran_pars` rows; `effects="ran_vals"` for the conditional modes), `ranef()` the conditional modes with their conditional SDs, `glance()` logLik, AIC, BIC, the REML criterion, deviance and sigma, `augment()` fitted values, residuals, hat values, Cook's distances and population-level fits, `vcov()` the fixed effects' covariance, `predict(re_form=, allow_new_levels=)` lme4's predictions, `anova(fit)` lme4's F table and `anova(fit1, fit2)` the likelihood ratio test after refitting with ML. Weights (positive), offsets, contrasts, grouped fits, `na_action` and `modelsummary` work as for `lm`. The optimizer locates the optimum more precisely than lme4's default stopping rule; groups with thousands of levels use a sparse factorization. Checked against lme4 on all four backends, including weights, offsets, a grouped fit and missing-row alignment. Correlated random effects, `(1 + x | g)`, are not implemented yet and raise.
+
 ## 0.2.0 — 2026-10-24
 
 Models beyond lm and glm: estimated marginal means, robust standard errors, side-by-side model tables, negative binomial, robust and quantile regression, ordinal regression, and a first Bayesian layer with exact and sampled models.

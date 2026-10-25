@@ -64,6 +64,7 @@ from stats3.models import (
     vcov,
 )
 from stats3.pairwise import pairwise_prop_test, pairwise_t_test, pairwise_wilcox_test
+from stats3.mixed import lmer, ranef
 from stats3.negbin import glm_nb, negative_binomial
 from stats3.ordinal import polr
 from stats3.ranks import cor_test, friedman_test, kruskal_test, wilcox_test
@@ -122,6 +123,7 @@ __all__ = [
     "ks_test",
     "levene_test",
     "lm",
+    "lmer",
     "mantelhaen_test",
     "mcnemar_test",
     "modelsummary",
@@ -142,6 +144,7 @@ __all__ = [
     "prop_test",
     "quasibinomial",
     "quasipoisson",
+    "ranef",
     "rlm",
     "rq",
     "shapiro_test",

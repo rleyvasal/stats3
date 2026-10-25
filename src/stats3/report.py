@@ -44,7 +44,7 @@ def _named(models: tuple[Any, ...]) -> list[tuple[str, Any]]:
     out: list[tuple[str, Any]] = []
     for name, model in items:
         if not _is_model(model):
-            raise TypeError(f"modelsummary(): expected models from lm() or glm(), got {type(model).__name__}")
+            raise TypeError(f"modelsummary(): expected models from lm(), glm() or another stats3 fit, got {type(model).__name__}")
         if isinstance(model, Models):
             for fit in model:
                 label = ", ".join(str(v) for v in fit.key.values())
@@ -52,6 +52,18 @@ def _named(models: tuple[Any, ...]) -> list[tuple[str, Any]]:
         else:
             out.append((name, model))
     return [(name or f"({i})", fit) for i, (name, fit) in enumerate(out, start=1)]
+
+
+def _display_terms(table: pl.DataFrame) -> pl.DataFrame:
+    """Mixed-model variance components labelled as R's modelsummary does:
+    ``SD (Intercept Subject)``, ``SD (Observations)``."""
+    if "effect" not in table.columns:
+        return table
+    label = (pl.when(pl.col("effect") != "ran_pars").then(pl.col("term"))
+             .when(pl.col("group") == "Residual").then(pl.lit("SD (Observations)"))
+             .otherwise(pl.concat_str([pl.lit("SD ("), pl.col("term").str.replace("^sd__", ""),
+                                       pl.lit(" "), pl.col("group"), pl.lit(")")])))
+    return table.with_columns(label.alias("term"))
 
 
 def _number(value: Any, digits: int) -> str:
@@ -123,7 +135,7 @@ def modelsummary(
             opts["exponentiate"] = exponentiate
             if statistic == "conf_int" and v is None:
                 opts["conf_method"] = "profile"
-        tables.append(fit.tidy(**opts))
+        tables.append(_display_terms(fit.tidy(**opts)))
         glances.append(fit.glance(vcov=v) if v is not None and not isinstance(fit, GeneralizedLinearModel)
                        else fit.glance())
 
