@@ -281,6 +281,35 @@ statsmodels' formula interface.
 | MASS::polr | `polr("y ~ x", method="logistic")` |
 | MASS::rlm | `rlm("y ~ x", psi="huber")` |
 | quantreg::rq | `rq("y ~ x", tau=0.5, se="nid")` |
+| `acf`, `pacf`, `ccf` | `acf("x", lag_max=, type=)`, `pacf("x")`, `ccf("x", "y")`: one row per lag, with the white-noise bounds |
+| `Box.test` | `box_test("x", lag=10, type="Ljung-Box", fitdf=)`, or `box_test(fit, ...)` on an arima fit's residuals |
+| `arima`, `predict.Arima` | `arima("x", order=(p, d, q), seasonal=(P, D, Q), period=12, xreg=)`, `predict(fit, n_ahead=12)` |
+
+## Time series
+
+A series is a column, in row order or ordered by `order_by=`; `by=` gives
+one series per group, so one call fits every series in a long frame.
+
+```python
+acf(sales, "units", order_by="month", by="store")      # lag, acf, conf_low, conf_high
+box_test(sales, "units", lag=12, type="Ljung-Box", by="store")
+fit = arima(sales, "units", order=(0, 1, 1), seasonal=(0, 1, 1), period=12,
+            order_by="month", by="store")
+tidy(fit)                  # coefficients with R's standard errors
+glance(fit)                # sigma2, logLik, AIC, AICc, BIC, nobs
+predict(fit, n_ahead=12)   # horizon, fit, se_fit, for every store
+box_test(fit, lag=24, type="Ljung-Box", fitdf=2)   # residual check, as tsdiag
+```
+
+`arima` ports R's: the exact likelihood by Kalman filter on the state-space
+form of `makeARIMA`, R's diffuse start for differencing, its CSS start
+(`method="CSS-ML"`), its AR parameter transformation, `fixed=`, `xreg=`,
+and missing values inside the series. R's `optim` stops early (its gradient
+is a finite difference); stats3 finds the optimum to full precision, so its
+log likelihood is never below R's, and estimates agree with R's to about
+1e-4. Lags count observations (R's lag times the frequency), and missing
+values follow `na_action` as in R: `"fail"` by default, or `"pass"`,
+`"omit"` or `"contiguous"`.
 
 ## Bayesian statistics
 

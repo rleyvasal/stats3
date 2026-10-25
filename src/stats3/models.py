@@ -1588,6 +1588,8 @@ def predict(model: Any, newdata: Any = None, **kwargs: Any) -> Any:
     ``interval=`` for ``lm``; ``type="response"`` and ``se_fit=`` for
     ``glm``), in the new data's frame type."""
     if isinstance(model, Models):
+        if hasattr(model.fits[0], "predict_table"):  # forecasts stack by group
+            return model._stack([f.predict_table(newdata, **kwargs) for f in model.fits])
         raise ValueError("predict(): predict with one group's model, e.g. models[0]")
     if not isinstance(model, _Fit):
         raise TypeError("predict(): expected a model from lm() or glm()")

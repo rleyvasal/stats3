@@ -674,6 +674,10 @@ result <- switch(
     source("tests/r_negbin_cases.R")
     negbin_cases()
   },
+  timeseries = {
+    source("tests/r_timeseries_cases.R")
+    timeseries_cases()
+  },
   emmeans = {
     source("tests/r_emm_cases.R")
     emm_cases()
