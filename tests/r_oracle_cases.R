@@ -670,6 +670,10 @@ result <- switch(
     source("tests/r_resistant_cases.R")
     resistant_cases("rq")
   },
+  smoothing = {
+    source("tests/r_smoothing_cases.R")
+    smoothing_cases()
+  },
   negbin = {
     source("tests/r_negbin_cases.R")
     negbin_cases()

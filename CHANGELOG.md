@@ -6,6 +6,10 @@ under **Changed**.
 
 ## Unreleased
 
+### Added
+
+- Scatterplot smoothers from base R, checked against R on all four backends: `loess("y ~ x1 + x2")` ports netlib dloess (R's k-d tree, vertex fits and blended Hermite interpolation for the default `surface="interpolate"`, or `surface="direct"`; gaussian or symmetric families; `normalize`; approximate or exact statistics, with the equivalent number of parameters, residual standard error and trace of the hat matrix in `glance`), with `predict(se=True)`, `augment` and `anova(fit1, fit2)` as `anova.loess`. `lowess(x, y)` is `clowess`; `smooth_spline(x, y)` is `smooth.spline`, with its knots, GCV/CV/df criteria, `spar`/`lambda_` and `predict(deriv=)`; `ksmooth(x, y)` gives box or normal kernel smooths. All take `by=`. Fits where `smooth.spline` searches for `spar` match R to about 1e-9 (Brent's steps amplify last-bit differences in the criterion); at R's final lambda they match to full precision. Conditionally parametric loess terms and `drop.square` are not included.
+
 ### Changed
 
 - The `bayes` extra now needs PyMC 6 (`pymc>=6.3,<7`, with PyTensor 3) and ArviZ 1 (`arviz>=1.1,<2`). PyTensor 2, which PyMC 5 requires, cannot compile its C extensions with Apple clang 21 (Xcode 27): it passes the `-ld64` linker flag that this clang removed, so every sampled `bayes_glm` fit failed on current macOS toolchains without a local compiler wrapper. PyTensor 3 chooses the flag by the compiler's version instead, and runs the model graph through Numba by default, so the C++ compiler only builds PyTensor's small bootstrap module. `bayes_compare(method="loo")` still uses ArviZ's PSIS-LOO; ArviZ 1 dropped WAIC, so `method="waic"` is now computed by stats3 from the pointwise log likelihoods with the same definition, and both methods return the same table as before (rank, `elpd_*`, `p_*`, `elpd_diff`, stacking `weight`, `se`, `dse`, `warning`). As in ArviZ 1, `se` and `dse` now use the sample variance of the pointwise values (ArviZ 0.x used the population variance, a factor of `sqrt(n/(n-1))` smaller). A sampled fit's `idata` is now an xarray `DataTree`, as PyMC 6 returns.
