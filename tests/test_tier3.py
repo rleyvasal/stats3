@@ -1,6 +1,7 @@
 """Base-R tests against R: oneway_test, fligner_test, friedman_test,
-mcnemar_test, mantelhaen_test, poisson_test, pairwise_t_test,
-pairwise_wilcox_test, pairwise_prop_test and power_anova_test."""
+quade_test, ansari_test, mood_test, mcnemar_test, mantelhaen_test,
+poisson_test, prop_trend_test, pairwise_t_test, pairwise_wilcox_test,
+pairwise_prop_test and power_anova_test."""
 
 from __future__ import annotations
 
@@ -13,16 +14,20 @@ import pytest
 import scipy.stats as scipy_stats
 
 from stats3 import (
+    ansari_test,
     fligner_test,
     friedman_test,
     mantelhaen_test,
     mcnemar_test,
+    mood_test,
     oneway_test,
     pairwise_prop_test,
     pairwise_t_test,
     pairwise_wilcox_test,
     poisson_test,
     power_anova_test,
+    prop_trend_test,
+    quade_test,
 )
 from oracle import BACKENDS, _oracle, assert_matches_r, case, penguins, ranks, run_case
 
@@ -80,6 +85,29 @@ def props_year(year: int):
     return lambda: props().filter(pl.col("year") == year)
 
 
+def scale_missing() -> pl.DataFrame:
+    """Missing, NaN and infinite values: ansari_test keeps the infinite ones,
+    mood_test drops them, as R does."""
+    return pl.DataFrame({
+        "x": [1.5, -2.1, float("inf"), None, 0.4, 3.3, -0.7, 2.2],
+        "y": [0.2, None, -1.1, 2.5, float("-inf"), 0.9, 1.7, float("nan")],
+    })
+
+
+def perfect() -> pl.DataFrame:
+    """Every block ranks the treatments alike, with equal ranges."""
+    return pl.DataFrame({
+        "id": [b for b in range(1, 5) for _ in range(3)],
+        "k": ["a", "b", "c"] * 4,
+        "v": [float(i + 10 * b) for b in range(4) for i in range(1, 4)],
+    })
+
+
+def smokers() -> pl.DataFrame:
+    """R's prop.trend.test example."""
+    return pl.DataFrame({"x": [83, 90, 129, 70], "n": [86, 93, 136, 82], "dose": [0.0, 1.0, 2.0, 4.0]})
+
+
 P, S, M, H, L = penguins, ranks, mtcars, heavy, long
 
 CASES = {
@@ -91,6 +119,42 @@ CASES = {
     "fr_ranks": case(L, lambda: friedman_test("v ~ k | id")),
     "fr_ties": case(cars, lambda: friedman_test("v ~ k | id")),
     "fr_by_g": case(L, lambda: friedman_test("v ~ k | id"), "g"),
+    "qu_ranks": case(L, lambda: quade_test("v ~ k | id")),
+    "qu_ties": case(cars, lambda: quade_test("v ~ k | id")),
+    "qu_by_g": case(L, lambda: quade_test("v ~ k | id"), "g"),
+    "qu_perfect": case(perfect, lambda: quade_test("v ~ k | id")),
+    "an_exact": case(S, lambda: ansari_test("a", "b")),
+    "an_less": case(S, lambda: ansari_test("a", "b", alternative="less")),
+    "an_greater": case(S, lambda: ansari_test("e", "b", alternative="greater")),
+    "an_ci": case(S, lambda: ansari_test("a", "b", conf_int=True)),
+    "an_ci_less": case(S, lambda: ansari_test("a", "e", conf_int=True, alternative="less", conf_level=0.9)),
+    "an_ci_greater": case(S, lambda: ansari_test("e", "b", conf_int=True, alternative="greater")),
+    "an_formula": case(S, lambda: ansari_test("a ~ g")),
+    "an_by_h": case(S, lambda: ansari_test("a", "b", conf_int=True), "h"),
+    "an_ties": case(S, lambda: ansari_test("c ~ g")),
+    "an_approx": case(S, lambda: ansari_test("a", "b", exact=False, conf_int=True)),
+    "an_approx_less": case(S, lambda: ansari_test(
+        "a", "e", exact=False, conf_int=True, alternative="less")),
+    "an_approx_greater": case(S, lambda: ansari_test(
+        "e", "b", exact=False, conf_int=True, alternative="greater")),
+    "an_approx_ties": case(S, lambda: ansari_test("c", "b", exact=False, conf_int=True)),
+    "an_penguins": case(P, lambda: ansari_test("body_mass_g ~ sex")),
+    "an_by_species": case(P, lambda: ansari_test("bill_depth_mm ~ sex", exact=False, conf_int=True), "species"),
+    "an_missing": case(scale_missing, lambda: ansari_test("x", "y")),
+    "mo_ranks": case(S, lambda: mood_test("a", "b")),
+    "mo_less": case(S, lambda: mood_test("a", "e", alternative="less")),
+    "mo_greater": case(S, lambda: mood_test("e", "b", alternative="greater")),
+    "mo_formula": case(S, lambda: mood_test("a ~ g")),
+    "mo_ties": case(S, lambda: mood_test("c ~ g")),
+    "mo_penguins": case(P, lambda: mood_test("body_mass_g ~ sex")),
+    "mo_by_species": case(P, lambda: mood_test("flipper_length_mm ~ sex"), "species"),
+    "mo_missing": case(scale_missing, lambda: mood_test("x", "y")),
+    "ptr_smokers": case(smokers, lambda: prop_trend_test("x", "n")),
+    "ptr_score": case(smokers, lambda: prop_trend_test("x", "n", score=[0, 0, 0, 1])),
+    "ptr_score_column": case(smokers, lambda: prop_trend_test("x", "n", score="dose")),
+    "ptr_two": case(lambda: smokers().head(2), lambda: prop_trend_test("x", "n")),
+    "ptr_by_year": case(props, lambda: prop_trend_test("male", "n"), "year"),
+    "ptr_by_island": case(props, lambda: prop_trend_test("male", "n", score="year"), "island"),
     "mc_cars": case(M, lambda: mcnemar_test("vs", "am")),
     "mc_three": case(M, lambda: mcnemar_test("cyl", "gear")),
     "mc_logical": case(P, lambda: mcnemar_test("dream", "first_year")),
@@ -148,6 +212,9 @@ POWER = {
 # - noncentral F: R's pf with ncp is good to about 1e-9 relative;
 # - R 4.6's exact Wilcoxon p-values with ties lose about 1e-14 absolute to
 #   cancellation (some come out negative); stats3's stay positive.
+# - uniroot at tol = 1e-4: ansari_test's asymptotic estimate and interval.
+#   AB is a step function of the ratio of scales, so each root is a jump,
+#   which R brackets to within 1e-4 (absolute) and stats3 locates to 1e-12.
 # The exact Mantel-Haenszel odds ratio and its bounds above 1 are found as
 # 1 / uniroot(..., c(eps, 1)), so R is accurate to about 1.2e-4 on 1 / value
 # (2% on an upper bound near 3,400): RECIPROCAL compares those on that scale.
@@ -155,7 +222,10 @@ POWER = {
 RECIPROCAL = {"mh_exact": ("estimate", "conf_low", "conf_high"),
               "mh_exact_less": ("estimate", "conf_low", "conf_high")}
 _UNIROOT = (0.0, 1.3e-4)
+_ANSARI_ROOTS = dict.fromkeys(("estimate", "conf_low", "conf_high"), (0.0, 1e-4))
 LOOSE = {
+    **{name: _ANSARI_ROOTS for name in ("an_approx", "an_approx_less", "an_approx_greater",
+                                        "an_approx_ties", "an_by_species")},
     **{name: dict.fromkeys(columns, _UNIROOT) for name, columns in RECIPROCAL.items()},
     "pw_by_year": {"p_value": (1e-9, 2e-14)},
     "pa_n": {"n": 2e-4},
@@ -278,6 +348,21 @@ def test_poisson_groups_fill_the_parameter_that_applies():
     [
         (lambda: friedman_test(long().head(89), "v ~ k | id"), "unreplicated complete block"),
         (lambda: friedman_test(long(), "v ~ k"), "y ~ groups | blocks"),
+        (lambda: quade_test(long().head(89), "v ~ k | id"), "unreplicated complete block"),
+        (lambda: quade_test(long(), "v ~ k"), "y ~ groups | blocks"),
+        (lambda: quade_test(long(), "v ~ id | id"), "can't be the block"),
+        (lambda: ansari_test(ranks(), "c", "b", conf_int=True), "exact confidence interval with ties"),
+        (lambda: ansari_test(ranks(), "a ~ h"), "exactly 2 levels"),
+        (lambda: ansari_test(ranks(), "a"), "two columns"),
+        (lambda: ansari_test(ranks(), "a ~ g", "b"), "not both"),
+        (lambda: ansari_test(ranks(), "a", "b", conf_int=True, conf_level=1.5), "conf_level"),
+        (lambda: ansari_test(scale_missing().with_columns(x=None), "x", "y"), "not enough 'x'"),
+        (lambda: mood_test(pl.DataFrame({"x": [1.0, float("inf")], "y": [2.0, None]}), "x", "y"), "not enough"),
+        (lambda: mood_test(ranks(), "a", "b", alternative="bigger"), "alternative"),
+        (lambda: prop_trend_test(pl.DataFrame({"x": [1, None, 3], "n": [5, 5, 5]}), "x", "n"), "missing"),
+        (lambda: prop_trend_test(smokers(), "x", "n", score=[1, 2]), "same length"),
+        (lambda: prop_trend_test(pl.DataFrame({"x": [0, 0], "n": [5, 5]}), "x", "n"), "pooled proportion"),
+        (lambda: prop_trend_test(pl.DataFrame({"x": [1, 0], "n": [5, 0]}), "x", "n"), "positive"),
         (lambda: mcnemar_test(mtcars(), "vs", "cyl"), "same number of levels"),
         (lambda: mantelhaen_test(heavy(), "sex", "heavy", "body_mass_g"), "each stratum must be > 1"),
         (lambda: poisson_test(pl.DataFrame({"x": [1.5]}), "x"), "integer"),
@@ -295,6 +380,36 @@ def test_poisson_groups_fill_the_parameter_that_applies():
 def test_errors(call, message):
     with pytest.raises(ValueError, match=message):
         call()
+
+
+@pytest.mark.parametrize(
+    ("call", "message"),
+    [
+        (lambda: ansari_test(ranks(), "c ~ g"), "cannot compute exact p-value with ties"),
+        (lambda: ansari_test(penguins(), "bill_depth_mm ~ sex", exact=False, conf_int=True, by="species"),
+         "samples differ in location"),
+        (lambda: prop_trend_test(smokers().head(2), "x", "n"), "essentially perfect fit"),
+    ],
+)
+def test_warnings(call, message):
+    with pytest.warns(UserWarning, match=message):
+        call()
+
+
+def test_scale_tests_without_ties_agree_with_scipy():
+    r = ranks()
+    ab = scipy_stats.ansari(r["a"].to_numpy(), r["b"].to_numpy())
+    assert ansari_test(r, "a", "b")["statistic"][0] == ab.statistic
+    # SciPy's exact distribution differs from R's (and stats3's) by about 4e-8.
+    assert ansari_test(r, "a", "b")["p_value"][0] == pytest.approx(ab.pvalue, rel=1e-6)
+    mood = scipy_stats.mood(r["a"].to_numpy(), r["b"].to_numpy())
+    assert mood_test(r, "a", "b")["statistic"][0] == pytest.approx(mood.statistic, rel=1e-12)
+
+
+def test_quade_without_ties_is_unchanged_by_block_order():
+    shuffled = long().sample(fraction=1.0, shuffle=True, seed=3)
+    assert quade_test(shuffled, "v ~ k | id")["statistic"][0] == pytest.approx(
+        quade_test(long(), "v ~ k | id")["statistic"][0], rel=1e-13)
 
 
 def test_power_anova_output_type():

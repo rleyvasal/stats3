@@ -1,11 +1,13 @@
-"""Rank tests and correlation tests: R's ``wilcox.test``, ``kruskal.test``
-and ``cor.test``.
+"""Rank tests and correlation tests: R's ``wilcox.test``, ``kruskal.test``,
+``friedman.test``, ``quade.test``, ``ansari.test``, ``mood.test`` and
+``cor.test``.
 
 Ranks, rank sums, tie counts and correlations come from one grouped Polars
 query. Exact p-values (small samples without ties, as R decides) depend only
 on the statistic and the sample sizes, so they come from exact null
 distributions computed here and cached by size. Kendall's tau needs every
-pair of rows, so it runs per group on the collected values.
+pair of rows, and the Ansari-Bradley interval every ratio x_i / y_j, so they
+run per group on the collected values.
 """
 
 from __future__ import annotations
@@ -538,6 +540,38 @@ def kruskal_test(formula: str) -> Step:
     return Step(_apply, "kruskal_test")
 
 
+def _block_formula(tf: Any, formula: str, verb: str) -> tuple[str, str, str]:
+    """``"y ~ g | b"`` gives (y, g, b)."""
+    left, bar, right = formula.partition("|")
+    if not bar or not right.strip() or "|" in right:
+        raise ValueError(f"{verb}(): formula must look like 'y ~ groups | blocks', got {formula!r}")
+    response, by = _parse_formula(tf, left, verb, one_sample=False)
+    block = _column(tf, right.strip(), "the formula's block", verb)
+    if block in (tf._groups or []) or block == by:
+        raise ValueError(f"{verb}(): {block!r} can't be the block and a group")
+    return response, by, block
+
+
+def _join_design(
+    table: pl.DataFrame, kept: pl.LazyFrame, groups: list[str], by: str, block: str, *extra: pl.Expr
+) -> pl.DataFrame:
+    """Add each group's design counts (``cells``, ``rows``, ``blocks``) and ``extra``."""
+    design = kept.group_by(groups or pl.lit(0)).agg(
+        cells=pl.struct(by, block).n_unique(),
+        rows=pl.len(),
+        blocks=pl.col(block).n_unique(),
+        *extra,
+    ).collect()
+    if groups:
+        return table.join(design, on=groups, how="left", nulls_equal=True, maintain_order="left")
+    return table.with_columns(design.drop("literal"))
+
+
+def _check_design(row: dict[str, Any], groups: list[str], k: int, verb: str) -> None:
+    if row["rows"] != row["cells"] or row["cells"] != k * row["blocks"]:
+        raise ValueError(f"{verb}(): not an unreplicated complete block design{_group_label(row, groups)}")
+
+
 @step
 def friedman_test(formula: str) -> Step:
     """Friedman rank sum test, as R's ``friedman.test(y ~ g | b)``.
@@ -553,15 +587,7 @@ def friedman_test(formula: str) -> Step:
         special = _special()
         groups = list(tf._groups or [])
         lf = tf._lf
-        left, bar, right = formula.partition("|")
-        if not bar or not right.strip() or "|" in right:
-            raise ValueError(
-                f"friedman_test(): formula must look like 'y ~ groups | blocks', got {formula!r}"
-            )
-        response, by = _parse_formula(tf, left, "friedman_test", one_sample=False)
-        block = _column(tf, right.strip(), "the formula's block", "friedman_test")
-        if block in groups or block == by:
-            raise ValueError(f"friedman_test(): {block!r} can't be the block and a group")
+        response, by, block = _block_formula(tf, formula, "friedman_test")
         kept = lf.filter(_present(lf, response) & _present(lf, by) & _present(lf, block))
         value = pl.col(response).cast(pl.Float64)
         kept = kept.with_columns(__stats3_r=value.rank("average").over([*groups, block]))
@@ -569,27 +595,14 @@ def friedman_test(formula: str) -> Step:
             tf, kept, groups, by,
             [pl.len().alias("n"), pl.col("__stats3_r").sum().alias("r")], "friedman_test",
         )
-        design = kept.group_by(groups or pl.lit(0)).agg(
-            cells=pl.struct(by, block).n_unique(),
-            rows=pl.len(),
-            blocks=pl.col(block).n_unique(),
-        ).collect()
         ties = _tie_term(kept, [*groups, block], value)
         ties = (ties.group_by(groups).agg(pl.col("ties").sum()) if groups else ties.select(pl.col("ties").sum()))
-        table = _join_ties(table, ties, groups)
-        if groups:
-            table = table.join(design, on=groups, how="left", nulls_equal=True, maintain_order="left")
-        else:
-            table = table.with_columns(design.select("cells", "rows", "blocks"))
+        table = _join_design(_join_ties(table, ties, groups), kept, groups, by, block)
         statistic, df = [], []
         for row in table.iter_rows(named=True):
             r = np.array(row["r"], dtype=float)
             k, n = len(r), row["blocks"]
-            if row["rows"] != row["cells"] or row["cells"] != k * n:
-                raise ValueError(
-                    "friedman_test(): not an unreplicated complete block design"
-                    f"{_group_label(row, groups)}"
-                )
+            _check_design(row, groups, k, "friedman_test")
             stat = 12 * np.sum((r - n * (k + 1) / 2) ** 2) / (n * k * (k + 1) - row["ties"] / (k - 1))
             statistic.append(float(stat))
             df.append(float(k - 1))
@@ -602,6 +615,511 @@ def friedman_test(formula: str) -> Step:
         })
 
     return Step(_apply, "friedman_test")
+
+
+@step
+def quade_test(formula: str) -> Step:
+    """Quade test, as R's ``quade.test(y ~ g | b)``.
+
+    The design and missing values are as in ``friedman_test``. Values are
+    ranked within each block, and each block is weighted by the rank of its
+    range. Columns: ``statistic`` (Quade's F), ``num_df``, ``den_df``,
+    ``p_value``, ``method``. As in R, when the treatment rank sums account
+    for all the variation (every block ranks the treatments alike, with
+    equal ranges), F and its degrees of freedom are missing and the p-value
+    is ``k!^(1 - b)`` for ``k`` treatments in ``b`` blocks.
+    """
+
+    def _apply(tf: Any) -> Any:
+        special = _special()
+        groups = list(tf._groups or [])
+        lf = tf._lf
+        response, by, block = _block_formula(tf, formula, "quade_test")
+        kept = lf.filter(_present(lf, response) & _present(lf, by) & _present(lf, block))
+        value = pl.col(response).cast(pl.Float64)
+        in_block = [*groups, block]
+        treatments = pl.col(by).n_unique()
+        kept = kept.with_columns(
+            __stats3_r=value.rank("average").over(in_block),
+            __stats3_k=(treatments.over(groups) if groups else treatments).cast(pl.Float64),
+        )
+        # Blocks ranked by their range (max - min), within each group.
+        spread = kept.group_by(in_block).agg(__stats3_q=value.max() - value.min())
+        q = pl.col("__stats3_q").rank("average")
+        spread = spread.with_columns(__stats3_q=q.over(groups) if groups else q)
+        kept = kept.join(spread, on=in_block, how="left", nulls_equal=True).with_columns(
+            __stats3_s=pl.col("__stats3_q") * (pl.col("__stats3_r") - (pl.col("__stats3_k") + 1) / 2)
+        )
+        table = _by_levels(
+            tf, kept, groups, by, [pl.len().alias("n"), pl.col("__stats3_s").sum().alias("s")], "quade_test",
+        )
+        table = _join_design(table, kept, groups, by, block, (pl.col("__stats3_s") ** 2).sum().alias("a"))
+        out: dict[str, list[Any]] = {"statistic": [], "num_df": [], "den_df": [], "p_value": []}
+        for row in table.iter_rows(named=True):
+            s = np.array(row["s"], dtype=float)
+            k, b = len(s), row["blocks"]
+            _check_design(row, groups, k, "quade_test")
+            a, between = row["a"], float(np.sum(s**2)) / b
+            if a == between:
+                values = (None, None, None, math.gamma(k + 1) ** (1 - b))
+            else:
+                stat = (b - 1) * between / (a - between)
+                d1, d2 = float(k - 1), float((b - 1) * (k - 1))
+                values = (stat, d1, d2, float(special.fdtrc(d1, d2, stat)))
+            for name, v in zip(out, values):
+                out[name].append(v)
+        return _finish(tf, table, groups, {
+            **{name: pl.Series(v, dtype=pl.Float64) for name, v in out.items()},
+            "method": "Quade test",
+        })
+
+    return Step(_apply, "quade_test")
+
+
+# ansari_test and mood_test -----------------------------------------------------
+
+
+def _finite(lf: pl.LazyFrame, name: str) -> pl.Expr:
+    """Present and finite, as R's ``is.finite``."""
+    if lf.collect_schema()[name].is_float():
+        return pl.col(name).is_finite()
+    return pl.col(name).is_not_null()
+
+
+def _two_samples(tf: Any, groups: list[str], x: Any, y: Any, verb: str, keep: Any) -> pl.LazyFrame:
+    """The two samples stacked: ``__stats3_v`` the values, ``__stats3_first``
+    true for x (or the formula's first level). ``keep(lf, name)`` selects the
+    values each test uses."""
+    lf = tf._lf.with_row_index("__stats3_i")
+    if _is_formula(x):
+        if y is not None:
+            raise ValueError(f"{verb}(): pass a formula or x and y, not both")
+        response, by = _parse_formula(tf, x, verb, one_sample=False)
+        kept = lf.filter(keep(lf, response) & _present(lf, by))
+        levels = _by_levels(tf, kept, groups, by, [pl.len().alias("n")], verb, exactly=2)
+        first = levels.select(*groups, pl.col(by).list.first().alias("__stats3_first"))
+        if groups:
+            kept = kept.join(first.lazy(), on=groups, how="left", nulls_equal=True)
+        else:
+            kept = kept.with_columns(__stats3_first=pl.lit(first["__stats3_first"][0]))
+        return kept.select(
+            *groups,
+            "__stats3_i",
+            __stats3_v=pl.col(response).cast(pl.Float64),
+            __stats3_first=pl.col(by) == pl.col("__stats3_first"),
+        )
+    if y is None:
+        raise ValueError(f"{verb}(): pass a formula, or two columns x and y")
+    names = ((_column(tf, x, "x", verb), True), (_column(tf, y, "y", verb), False))
+    return pl.concat([
+        lf.filter(keep(lf, name)).select(
+            *groups, "__stats3_i", __stats3_v=pl.col(name).cast(pl.Float64), __stats3_first=pl.lit(first)
+        )
+        for name, first in names
+    ])
+
+
+def _sample_sizes(table: pl.DataFrame, groups: list[str], verb: str) -> None:
+    for row in table.iter_rows(named=True):
+        if not row["m"]:
+            raise ValueError(f"{verb}(): not enough 'x' observations{_group_label(row, groups)}")
+        if not row["n"]:
+            raise ValueError(f"{verb}(): not enough 'y' observations{_group_label(row, groups)}")
+
+
+@lru_cache(maxsize=None)
+def _ansari_counts(m: int, n: int) -> np.ndarray:
+    """Ways to reach each Ansari-Bradley statistic 0..u (R's ``cansari``),
+    zero outside R's support [(m+1)^2 %/% 4, that + m*n %/% 2]."""
+
+    def support(i: int, j: int) -> tuple[int, int]:
+        low = (i + 1) * (i + 1) // 4
+        return low, low + i * j // 2
+
+    # row[j] holds the counts for (i, j); built up from i = 0.
+    row = [np.ones(1) for _ in range(n + 1)]
+    for i in range(1, m + 1):
+        new: list[np.ndarray] = []
+        for j in range(n + 1):
+            low, up = support(i, j)
+            out = np.zeros(up + 1)
+            if j == 0:
+                out[low] = 1.0
+            else:
+                left, below, shift = new[j - 1], row[j], (i + j + 1) // 2
+                ks = np.arange(low, up + 1)
+                a = np.where(ks < len(left), left[np.minimum(ks, len(left) - 1)], 0.0)
+                back = ks - shift
+                ok = (back >= 0) & (back < len(below))
+                b = np.where(ok, below[np.clip(back, 0, len(below) - 1)], 0.0)
+                out[low:] = a + b
+            new.append(out)
+        row = new
+    return row[n]
+
+
+def _pansari(q: float, m: int, n: int) -> float:
+    """P(AB <= q), as R's ``pansari``."""
+    counts = _ansari_counts(m, n)
+    low = (m + 1) * (m + 1) // 4
+    up = low + m * n // 2
+    x = math.floor(q + 1e-7)
+    if x < low:
+        return 0.0
+    if x > up:
+        return 1.0
+    return float(np.cumsum(counts[low:x + 1])[-1] / math.comb(m + n, m))
+
+
+def _qansari(p: float, m: int, n: int) -> int:
+    """The smallest q with P(AB <= q) >= p, as R's ``qansari``."""
+    counts = _ansari_counts(m, n)
+    low = (m + 1) * (m + 1) // 4
+    up = low + m * n // 2
+    if p == 0:
+        return low
+    if p == 1:
+        return up
+    reached = np.flatnonzero(np.cumsum(counts / math.comb(m + n, m)) >= p)
+    return int(reached[0]) if len(reached) else up
+
+
+def _ansari_scores(values: np.ndarray, m: int) -> tuple[float, bool, np.ndarray]:
+    """AB (the x scores' sum), whether there are ties, and every score."""
+    from scipy.stats import rankdata
+
+    # R's rank(na.last = TRUE): NaN (from x / -0) ranks last, in order.
+    nan = np.isnan(values)
+    r = np.empty(len(values))
+    r[~nan] = rankdata(values[~nan])
+    r[nan] = np.arange((~nan).sum() + 1, len(values) + 1)
+    a = np.minimum(r, len(r) - r + 1)
+    return float(a[:m].sum()), len(np.unique(r)) < len(r), a
+
+
+def _r_mean(a: np.ndarray) -> float:
+    """R's ``mean``: a sequential sum, then one correction pass. Where the
+    tie-corrected AB z is exactly 0 in exact arithmetic, its sign (which R's
+    interval code tests) follows this rounding."""
+    s = np.cumsum(a)[-1] / len(a)
+    return float(s + np.cumsum(a - s)[-1] / len(a))
+
+
+def _zeroin(f: Any, a: float, b: float, fa: float, fb: float, tol: float = 1e-4, maxit: int = 1000):
+    """R's ``uniroot`` (``R_zeroin2``): the final b and c, which bracket the root."""
+    eps = np.finfo(float).eps
+    c, fc = a, fa
+    if fa == 0:
+        return a, a, 0.0, 0.0
+    if fb == 0:
+        return b, b, 0.0, 0.0
+    for _ in range(maxit + 1):
+        prev_step = b - a
+        if abs(fc) < abs(fb):
+            a, b, c = b, c, b
+            fa, fb, fc = fb, fc, fb
+        tol_act = 2 * eps * abs(b) + tol / 2
+        new_step = (c - b) / 2
+        if abs(new_step) <= tol_act or fb == 0:
+            return b, c, fb, fc
+        if abs(prev_step) >= tol_act and abs(fa) > abs(fb):
+            cb = c - b
+            if a == c:
+                t1 = fb / fa
+                p, q = cb * t1, 1.0 - t1
+            else:
+                q, t1, t2 = fa / fc, fb / fc, fb / fa
+                p = t2 * (cb * q * (q - t1) - (b - a) * (t1 - 1.0))
+                q = (q - 1.0) * (t1 - 1.0) * (t2 - 1.0)
+            if p > 0:
+                q = -q
+            else:
+                p = -p
+            if p < 0.75 * cb * q - abs(tol_act * q) / 2 and p < abs(prev_step * q / 2):
+                new_step = p / q
+        if abs(new_step) < tol_act:
+            new_step = tol_act if new_step > 0 else -tol_act
+        a, fa = b, fb
+        b += new_step
+        fb = f(b)
+        if (fb > 0 and fc > 0) or (fb < 0 and fc < 0):
+            c, fc = a, fa
+    return b, c, fb, fc
+
+
+def _ansari_z(s: float, m: int, n: int, ties: bool, mean_a: float, var_a: float) -> float:
+    big = m + n
+    if ties:
+        return (s - m * mean_a) / math.sqrt(m * n * var_a / big)
+    if big % 2 == 0:
+        return (s - m * (big + 2) / 4) / math.sqrt(m * n * (big + 2) * (big - 2) / (48 * (big - 1)))
+    return (s - m * (big + 1) ** 2 / (4 * big)) / math.sqrt(m * n * (big + 1) * (3 + big**2) / (48 * big**2))
+
+
+def _ansari_exact_interval(
+    x: np.ndarray, y: np.ndarray, alternative: str, conf_level: float
+) -> tuple[float, float, float]:
+    """R's exact estimate and interval: AB just past each ratio x_i / y_j."""
+    m, n = len(x), len(y)
+    x, y = np.sort(x), np.sort(y)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.divide.outer(x, y)
+    sigma = np.sort(ratio[ratio >= 0])
+    if len(sigma) < 1:
+        _warn("cannot compute confidence set, returning NA")
+        raise ValueError("ansari_test(): no nonnegative ratios x / y to estimate the ratio of scales from")
+    points = sigma + np.r_[np.diff(sigma) / 2, sigma[-1] * 1.01]
+    absigma = np.array([_ansari_scores(np.r_[x / s, y], m)[0] for s in points])
+
+    def nearest(d: np.ndarray, strict: bool, pick: Any) -> float:
+        keep = d > 0 if strict else d >= 0
+        if not keep.any():
+            return math.inf if pick is min else -math.inf
+        return float(pick(sigma[keep & (d == d[keep].min())]))
+
+    def cci(alpha: float) -> tuple[float, float]:
+        u = absigma - _qansari(alpha / 2, m, n)
+        l = absigma - _qansari(1 - alpha / 2, m, n)
+        if not (u >= 0).any() or not (l > 0).any():
+            _warn("samples differ in location: cannot compute confidence set, returning NA")
+            return math.nan, math.nan
+        uci, lci = nearest(u, False, min), nearest(l, True, max)
+        if uci > lci:
+            uci, lci = nearest(l, False, min), nearest(u, True, max)
+        return uci, lci
+
+    alpha = 1 - conf_level
+    if alternative == "two.sided":
+        low, high = cci(alpha)
+    elif alternative == "greater":
+        low, high = cci(alpha * 2)[0], math.inf
+    else:
+        low, high = 0.0, cci(alpha * 2)[1]
+    u = absigma - _qansari(0.5, m, n)
+    below, above = sigma[u <= 0], sigma[u > 0]
+    estimate = (below.max() + above.min()) / 2 if len(below) and len(above) else math.nan
+    return float(estimate), low, high
+
+
+def _ansari_asymptotic_interval(
+    x: np.ndarray, y: np.ndarray, alternative: str, conf_level: float
+) -> tuple[float, float, float]:
+    """R's asymptotic estimate and interval: where the normalized AB of
+    x / sigma against y crosses each normal quantile.
+
+    R finds these with ``uniroot(tol = 1e-4)``; AB is a step function of
+    sigma, so stats3 finds each crossing to full precision (1e-12) instead.
+    """
+    from scipy.optimize import brentq
+
+    special = _special()
+    m, n = len(x), len(y)
+
+    def ab2(sig: float, zq: float) -> float:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            s, ties, a = _ansari_scores(np.r_[x / sig, y], m)
+        return _ansari_z(s, m, n, ties, _r_mean(a), float(a.var(ddof=1))) - zq
+
+    ranges = []
+    if (x > 0).any() and (y > 0).any():
+        ranges += [x[x > 0].min() / y[y > 0].max(), x[x > 0].max() / y[y > 0].min()]
+    if (x <= 0).any() and (y < 0).any():
+        ranges += [x[x <= 0].min() / y[y < 0].max(), x[x <= 0].max() / y[y < 0].min()]
+    if not ranges or not np.all(np.isfinite(ranges)):
+        _warn("cannot compute asymptotic confidence set or estimator")
+        return math.nan, math.nan, math.nan
+    lo, hi = float(min(ranges)), float(max(ranges))
+
+    def root(zq: float) -> float:
+        # R's uniroot picks the root (AB can equal its mean on a whole
+        # interval); a sign change in its final bracket is then refined.
+        b, c, fb, _ = _zeroin(lambda s: ab2(s, zq), lo, hi, ab2(lo, zq), ab2(hi, zq))
+        if fb == 0 or b == c:
+            return float(b)
+        return float(brentq(ab2, min(b, c), max(b, c), args=(zq,), xtol=1e-12, maxiter=1000))
+
+    def ccia(alpha: float) -> tuple[float, float]:
+        z_low, z_high = float(special.ndtri(alpha / 2)), float(-special.ndtri(alpha / 2))
+        if ab2(lo, z_low) > 0 or ab2(hi, z_high) < 0:
+            _warn("samples differ in location: cannot compute confidence set, returning NA")
+            return math.nan, math.nan
+        u, l = root(z_low), root(z_high)
+        return min(u, l), max(u, l)
+
+    alpha = 1 - conf_level
+    if alternative == "two.sided":
+        low, high = ccia(alpha)
+    elif alternative == "greater":
+        low, high = ccia(alpha * 2)[0], math.inf
+    else:
+        low, high = 0.0, ccia(alpha * 2)[1]
+    if ab2(lo, 0.0) > 0 or ab2(hi, 0.0) < 0:
+        _warn("cannot compute estimate, returning NA")
+        estimate = math.nan
+    else:
+        estimate = root(0.0)
+    return estimate, low, high
+
+
+def _sample_values(
+    tf: Any, table: pl.DataFrame, groups: list[str], stacked: pl.LazyFrame
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Each group's x and y values, in data order (R's sums run in that order)."""
+    frame = stacked.select(*groups, "__stats3_i", "__stats3_v", "__stats3_first").collect().sort("__stats3_i")
+    parts = frame.partition_by(groups, as_dict=True, maintain_order=True) if groups else {(): frame}
+    out = []
+    for row in table.iter_rows(named=True):
+        part = parts[tuple(row[g] for g in groups)]
+        first = part["__stats3_first"].to_numpy()
+        v = part["__stats3_v"].to_numpy()
+        out.append((v[first], v[~first]))
+    return out
+
+
+@step
+def ansari_test(
+    x: Any,
+    y: Any = None,
+    *,
+    alternative: str = "two.sided",
+    exact: bool | None = None,
+    conf_int: bool = False,
+    conf_level: float = 0.95,
+) -> Step:
+    """Ansari-Bradley test of equal scale, as R's ``ansari.test``.
+
+    ``ansari_test("y ~ g")`` or ``ansari_test(x, y)``. As in R, the p-value is
+    exact when both samples have fewer than 50 values and there are no ties
+    (``exact`` overrides the size rule), else from the normal approximation,
+    with R's tie correction; R warns that it cannot compute an exact
+    p-value with ties. ``conf_int=True`` adds R's estimate and interval for
+    the ratio of scales of x to y: exact from the permutation distribution,
+    or asymptotic when the p-value is (with ties, as in R, only with
+    ``exact=False`` or large samples). Columns: ``estimate``, ``statistic``
+    (AB), ``p_value``, ``conf_low``, ``conf_high`` (the interval columns only
+    with ``conf_int=True``), ``method``, ``alternative``.
+    """
+    alternative = _alternative(alternative)
+    if conf_int:
+        _check_conf_level(conf_level)
+
+    def _apply(tf: Any) -> Any:
+        special = _special()
+        groups = list(tf._groups or [])
+        stacked = _two_samples(tf, groups, x, y, "ansari_test", _present)
+        v, first = pl.col("__stats3_v"), pl.col("__stats3_first")
+        r, big = v.rank("average"), pl.len()
+        if groups:
+            r, big = r.over(groups), big.over(groups)
+        stacked = stacked.with_columns(__stats3_a=pl.min_horizontal(r, big - r + 1))
+        a = pl.col("__stats3_a")
+        table = _sorted_keys(tf, _summarise(stacked, groups, [
+            first.sum().alias("m"),
+            (~first).sum().alias("n"),
+            a.filter(first).sum().alias("ab"),
+            (v.n_unique() < pl.len()).alias("ties"),
+            a.mean().alias("mean_a"),
+            a.var().alias("var_a"),
+        ]), groups)
+        _sample_sizes(table, groups, "ansari_test")
+        values = _sample_values(tf, table, groups, stacked) if conf_int else [None] * table.height
+        out: dict[str, list[Any]] = {"estimate": [], "statistic": [], "p_value": [], "conf_low": [], "conf_high": []}
+        for row, samples in zip(table.iter_rows(named=True), values):
+            m, n, stat, ties = row["m"], row["n"], float(row["ab"]), row["ties"]
+            use_exact = (m < 50 and n < 50) if exact is None else exact
+            interval = (math.nan, math.nan, math.nan)
+            if use_exact and not ties:
+                if alternative == "two.sided":
+                    if stat > (m + 1) ** 2 // 4 + (m * n // 2) / 2:
+                        p = 1 - _pansari(stat - 1, m, n)
+                    else:
+                        p = _pansari(stat, m, n)
+                    p = min(2 * p, 1.0)
+                elif alternative == "less":
+                    p = 1 - _pansari(stat - 1, m, n)
+                else:
+                    p = _pansari(stat, m, n)
+                if conf_int:
+                    interval = _ansari_exact_interval(*samples, alternative, conf_level)
+            else:
+                z = _ansari_z(stat, m, n, ties, row["mean_a"], row["var_a"] or 0.0)
+                lower = float(special.ndtr(z))
+                p = {"two.sided": 2 * min(lower, 1 - lower), "less": 1 - lower, "greater": lower}[alternative]
+                if conf_int and not use_exact:
+                    interval = _ansari_asymptotic_interval(*samples, alternative, conf_level)
+                if use_exact:
+                    _warn("cannot compute exact p-value with ties")
+                    if conf_int:
+                        _warn("cannot compute exact confidence interval with ties")
+                        raise ValueError(
+                            "ansari_test(): cannot compute an exact confidence interval with ties"
+                            f"{_group_label(row, groups)}; pass exact=False for the asymptotic one"
+                        )
+            for name, value in zip(("estimate", "statistic", "p_value", "conf_low", "conf_high"),
+                                   (interval[0], stat, p, interval[1], interval[2])):
+                out[name].append(value)
+        columns = {name: pl.Series(values_, dtype=pl.Float64).fill_nan(None) for name, values_ in out.items()}
+        if not conf_int:
+            columns = {name: columns[name] for name in ("statistic", "p_value")}
+        else:
+            columns = {name: columns[name] for name in ("estimate", "statistic", "p_value", "conf_low", "conf_high")}
+        return _finish(tf, table, groups, {**columns, "method": "Ansari-Bradley test", "alternative": alternative})
+
+    return Step(_apply, "ansari_test")
+
+
+@step
+def mood_test(x: Any, y: Any = None, *, alternative: str = "two.sided") -> Step:
+    """Mood's two-sample test of scale, as R's ``mood.test``.
+
+    ``mood_test("y ~ g")`` or ``mood_test(x, y)``, on the finite values (R
+    drops infinite values too). Ties are handled as in R 4.x: each tied
+    value scores the mean of the squared deviations its tied ranks share,
+    and the variance is corrected. Columns: ``statistic`` (Z), ``p_value``,
+    ``method``, ``alternative``.
+    """
+    alternative = _alternative(alternative)
+
+    def _apply(tf: Any) -> Any:
+        special = _special()
+        groups = list(tf._groups or [])
+        stacked = _two_samples(tf, groups, x, y, "mood_test", _finite)
+        v, first = pl.col("__stats3_v"), pl.col("__stats3_first")
+        r, big, t = v.rank("average"), pl.len(), pl.len().over([*groups, "__stats3_v"])
+        if groups:
+            r, big = r.over(groups), big.over(groups)
+        big, t = big.cast(pl.Float64), t.cast(pl.Float64)
+        # A tied value's mean squared deviation over its ranks lo..hi:
+        # (mean rank - (N + 1) / 2)^2 + (t^2 - 1) / 12.
+        stacked = stacked.with_columns(
+            __stats3_score=(r - (big + 1) / 2) ** 2 + (t * t - 1) / 12,
+            __stats3_ties=(t * t - 1) * (t * t - 4 + 15 * (big + 1 - 2 * r) ** 2),
+        )
+        table = _sorted_keys(tf, _summarise(stacked, groups, [
+            first.sum().alias("m"),
+            (~first).sum().alias("n"),
+            pl.col("__stats3_score").filter(first).sum().alias("t"),
+            pl.col("__stats3_ties").sum().alias("ties"),
+        ]), groups)
+        statistic = []
+        for row in table.iter_rows(named=True):
+            m, n = row["m"], row["n"]
+            total = m + n
+            if total < 3:
+                raise ValueError(f"mood_test(): not enough observations{_group_label(row, groups)}")
+            expected = m * (total**2 - 1) / 12
+            var = m * n * (total + 1) * (total + 2) * (total - 2) / 180
+            var -= m * n / (180 * total * (total - 1)) * row["ties"]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                statistic.append((row["t"] - expected) / np.sqrt(var))
+        z = np.array(statistic, dtype=float)
+        lower = special.ndtr(z)
+        p = {"less": lower, "greater": 1 - lower, "two.sided": 2 * np.minimum(lower, 1 - lower)}[alternative]
+        return _finish(tf, table, groups, {
+            "statistic": z, "p_value": p, "method": "Mood two-sample test of scale", "alternative": alternative,
+        })
+
+    return Step(_apply, "mood_test")
 
 
 # cor_test ----------------------------------------------------------------------
