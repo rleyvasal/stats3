@@ -70,6 +70,7 @@ from stats3.ranks import cor_test, friedman_test, kruskal_test, wilcox_test
 from stats3.report import modelsummary
 from stats3.resistant import rlm, rq
 from stats3.robust import vcov_cl, vcov_hc, vcov_nw
+from stats3.survival import cox_zph, coxph, survdiff, survfit, survreg
 
 # In IPython / Jupyter, turn on unquoted formulas and bare column names in
 # stats3 calls (from the next cell on), as tidy3 does for its verbs.
@@ -105,6 +106,8 @@ __all__ = [
     "chisq_test",
     "cohens_d",
     "contrast",
+    "cox_zph",
+    "coxph",
     "cor_test",
     "emmeans",
     "eta_squared",
@@ -145,6 +148,9 @@ __all__ = [
     "rlm",
     "rq",
     "shapiro_test",
+    "survdiff",
+    "survfit",
+    "survreg",
     "t_test",
     "tidy",
     "tukey_hsd",
