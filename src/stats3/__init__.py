@@ -85,6 +85,7 @@ from stats3.ranks import (
 from stats3.report import modelsummary
 from stats3.resistant import rlm, rq
 from stats3.robust import vcov_cl, vcov_hc, vcov_nw
+from stats3.smoothing import ksmooth, loess, lowess, smooth_spline
 
 # In IPython / Jupyter, turn on unquoted formulas and bare column names in
 # stats3 calls (from the next cell on), as tidy3 does for its verbs.
@@ -136,9 +137,12 @@ __all__ = [
     "hedges_g",
     "inverse_gaussian",
     "kruskal_test",
+    "ksmooth",
     "ks_test",
     "levene_test",
     "lm",
+    "loess",
+    "lowess",
     "manova",
     "mantelhaen_test",
     "mauchly_test",
@@ -169,6 +173,7 @@ __all__ = [
     "rlm",
     "rq",
     "shapiro_test",
+    "smooth_spline",
     "t_test",
     "tidy",
     "tukey_hsd",

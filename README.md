@@ -322,6 +322,36 @@ fourth significant digit. `weights`, `na_action`, `by=`, `glance`,
 `augment`, `predict` and `vcov` work as for `lm`. Indexed parameters
 (`a[group]`), `subset` and `trace` are not included.
 
+Scatterplot smoothers are base R's, number for number:
+
+```python
+fit = loess(cars, "dist ~ speed")                  # span=0.75, degree=2, family="gaussian"
+glance(fit)                                        # enp, sigma, trace_hat, one_delta, two_delta
+predict(fit, new_rows, se=True)                    # fit, se_fit, residual_scale, df
+anova(loess(cars, "dist ~ speed", span=0.4), fit)  # anova.loess's F test
+lowess(cars, "speed", "dist", f=2/3)               # sorted x and the smooth y
+spline = smooth_spline(cars, "speed", "dist")      # GCV; cv=True, df=, spar= or lambda_=
+predict(spline, [10, 20], deriv=1)                 # the spline or its derivatives
+ksmooth(cars, "speed", "dist", kernel="normal", bandwidth=2)
+```
+
+`loess` ports the netlib dloess code R uses. The default
+`surface="interpolate"` builds R's k-d tree, fits at its vertices and blends
+cubic Hermite interpolants between them, so fitted values, the equivalent
+number of parameters, the residual standard error and the trace of the hat
+matrix are R's, not those of an exact local fit at every point
+(`surface="direct"` gives that). `family="symmetric"` adds R's bisquare
+robustness iterations, `normalize`, `statistics="exact"`, `trace_hat`,
+`cell` and `iterations` are `loess.control`'s, and one to four numeric
+predictors are allowed. Conditionally parametric terms and `drop.square` are
+not included. `smooth_spline` follows `smooth.spline`: `.nknots.smspl`
+knots, x values merged within `tol`, GCV, leave-one-out CV or df matching,
+the `spar`-to-lambda scale, and linear extrapolation in `predict`. Where it
+searches for `spar` it agrees with R to about 1e-9, as Brent's parabolic
+steps amplify last-bit differences in the criterion; the fit at a given
+`spar`, `lambda_` or `df` matches to full precision. Each smoother takes
+`by=`, and drops rows missing x or y.
+
 `na_action="exclude"` (R's `na.exclude`) keeps every row in `augment` and
 `predict`, with missing values where a row was not used, so the results line
 up with the data.
@@ -411,6 +441,7 @@ dsyevr for `cmdscale`); they match R's here, but another LAPACK may flip a
 component, scores and loadings together. `princomp` and `factanal` fix
 their signs as R does.
 | `nls`, `confint.nls` | `nls("y ~ a * exp(-b * x)", start=...)`, `SSlogis` and other self-starting models, `algorithm="plinear"` / `"port"` |
+| `loess`, `lowess`, `smooth.spline`, `ksmooth` | `loess("y ~ x1 + x2", span=0.75)`, `lowess(x, y)`, `smooth_spline(x, y, df=)`, `ksmooth(x, y, "normal")` |
 
 ## Bayesian statistics
 

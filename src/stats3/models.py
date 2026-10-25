@@ -1669,6 +1669,12 @@ def anova(*models: Any, test: Any = None, type: Any = 1, **kwargs: Any) -> Any: 
         if not all(isinstance(f, NonlinearModel) for f in fits):
             raise TypeError("anova(): compare nls fits with nls fits")
         return fits[0]._write(_anova_nls(fits, test))
+    from stats3.smoothing import LoessModel, _anova_loess
+
+    if any(isinstance(f, LoessModel) for f in fits):
+        if not all(isinstance(f, LoessModel) for f in fits):
+            raise TypeError("anova(): compare loess fits with loess fits")
+        return fits[0]._write(_anova_loess(fits))
     from stats3.resistant import QuantileModel, _anova_rq
 
     if any(isinstance(f, QuantileModel) for f in fits):
