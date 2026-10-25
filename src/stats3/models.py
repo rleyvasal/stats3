@@ -1526,17 +1526,19 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
         opts = {"conf_int": conf_int, "conf_level": conf_level, **kwargs}
         if exponentiate:
             opts["exponentiate"] = True
-        unknown = set(kwargs) - {"conf_method", "vcov", "return_zeros"}
+        unknown = set(kwargs) - {"conf_method", "vcov", "return_zeros", "effects"}
         if unknown:
             raise TypeError(f"tidy(): unexpected arguments for a model: {sorted(unknown)}")
         if "conf_method" in opts and not all(isinstance(f, GeneralizedLinearModel) or getattr(f, "kind", None) == "ordinal"
                                              for f in _fits(model)):
             raise TypeError("tidy(): conf_method is for glm and polr fits")
+        if "effects" in opts and not all(getattr(f, "kind", None) == "mixed" for f in _fits(model)):
+            raise TypeError("tidy(): effects= is for lmer fits")
         if opts.get("vcov") is not None:
             as_vcov(opts["vcov"])
         return _table(model, "tidy", **opts)
 
-    if x is None and not args and set(kwargs) <= {"conf_method", "vcov", "matrix", "return_zeros"}:
+    if x is None and not args and set(kwargs) <= {"conf_method", "vcov", "matrix", "return_zeros", "effects"}:
         return _ModelVerb(run, "tidy")
     if _is_model(x) or isinstance(x, (EMMeans, Contrasts, BayesianEstimates)):
         return run(x)
@@ -1597,7 +1599,8 @@ def augment(x: Any = None, newdata: Any = None, **kwargs: Any) -> Any:
 def predict(model: Any, newdata: Any = None, **kwargs: Any) -> Any:
     """Predictions, as R's ``predict``: ``fit`` (``lwr``/``upr`` with
     ``interval=`` for ``lm``; ``type="response"`` and ``se_fit=`` for
-    ``glm``), in the new data's frame type."""
+    ``glm``; ``re_form=`` and ``allow_new_levels=`` for ``lmer``), in the
+    new data's frame type."""
     if isinstance(model, Models):
         if hasattr(model.fits[0], "predict_table"):  # forecasts stack by group
             return model._stack([f.predict_table(newdata, **kwargs) for f in model.fits])
@@ -1616,6 +1619,8 @@ def anova(*models: Any, test: Any = None, type: Any = 1, **kwargs: Any) -> Any: 
     models fitted to the same rows: one row per model, with the F test (lm),
     or the chi-squared test for binomial and Poisson glms and the F test for
     the others (R's defaults; ``test="Chisq"`` / ``"F"`` / ``False``).
+    ``lmer`` fits give lme4's tables: F statistics without p-values for one
+    model, a likelihood ratio test after refitting with ML for several.
     ``fit >> anova()`` works too. Multivariate fits get R's ``anova.mlm``
     (``stats3.mlm``), with its ``X=``, ``M=``, ``idata=``, ``T=``, ``Sigma=``.
     """
@@ -1652,6 +1657,12 @@ def anova(*models: Any, test: Any = None, type: Any = 1, **kwargs: Any) -> Any: 
         if any(f.__class__ is not fits[0].__class__ for f in fits):
             raise TypeError(f"anova(): compare {fits[0].verb} fits with {fits[0].verb} fits")
         return fits[0]._write(compare(fits, test))
+    from stats3.mixed import LinearMixedModel, _anova_lmer
+
+    if any(isinstance(f, LinearMixedModel) for f in fits):
+        if not all(isinstance(f, LinearMixedModel) for f in fits):
+            raise TypeError("anova(): compare lmer fits with lmer fits")
+        return fits[0]._write(_anova_lmer(fits, test))
     from stats3.ordinal import OrdinalModel, _anova_polr
 
     if any(isinstance(f, OrdinalModel) for f in fits):

@@ -6,6 +6,7 @@ Negative binomial comparisons need MASS and emmeans.
 Robust and quantile regression comparisons need MASS/quantreg and emmeans.
 Survival comparisons need survival (shipped with R) and broom.
 Penalized regression comparisons need glmnet (5.1) and survival.
+Mixed model comparisons need lme4.
 Set STATS3_R_ORACLE_MANIFEST to a pixi manifest to run R through pixi.
 """
 

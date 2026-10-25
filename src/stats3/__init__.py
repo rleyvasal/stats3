@@ -67,6 +67,7 @@ from stats3.models import (
 from stats3.mlm import manova, mauchly_test
 from stats3.pairwise import pairwise_prop_test, pairwise_t_test, pairwise_wilcox_test
 from stats3.multinomial import multinom
+from stats3.mixed import lmer, ranef
 from stats3.negbin import glm_nb, negative_binomial
 from stats3.multivariate import (
     cmdscale, cutree, dist, factanal, hclust, kmeans, prcomp, princomp, promax, varimax,
@@ -153,6 +154,7 @@ __all__ = [
     "ks_test",
     "levene_test",
     "lm",
+    "lmer",
     "loess",
     "lowess",
     "manova",
@@ -183,6 +185,7 @@ __all__ = [
     "quade_test",
     "quasibinomial",
     "quasipoisson",
+    "ranef",
     "rlm",
     "rq",
     "shapiro_test",

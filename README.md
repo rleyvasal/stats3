@@ -383,6 +383,35 @@ multinomial (`type.multinomial="grouped"`), `mgaussian`, start-stop and
 stratified Cox responses, relaxed fits and `exact=TRUE` predictions are not
 included.
 
+Linear mixed models follow lme4's `lmer`, fitted by REML (or `reml=False`
+for maximum likelihood) over the profiled deviance, as lme4 does:
+
+```python
+sleep = pl.read_csv("tests/data/sleepstudy.csv")
+fit = lmer(sleep, "Reaction ~ Days + (Days || Subject)")
+tidy(fit)                            # fixed effects, then sd__ rows per variance component
+ranef(fit)                           # conditional modes with their conditional SDs
+predict(fit, new_rows)               # with the random effects; re_form="population" without
+predict(fit, new_rows, allow_new_levels=True)
+anova(lmer(sleep, "Reaction ~ Days + (1 | Subject)"), fit)   # likelihood ratio, refitted with ML
+```
+
+Random effects are `(1 | g)`, `(0 + x | g)`, `(x || g)` for an independent
+intercept and slope, crossed `(1 | g1) + (1 | g2)`, `(1 | g1:g2)` and nested
+`(1 | g1/g2)`. Correlated random effects, `(1 + x | g)`, are not implemented
+yet and raise with that message. `tidy(fit)` is broom.mixed's table: fixed
+terms (`effect="fixed"`, t statistics without p-values or degrees of freedom,
+as `summary.merMod`) and the standard deviations as `effect="ran_pars"` rows;
+`effects="ran_vals"` gives the conditional modes. `glance` has `logLik`,
+`AIC`, `BIC`, `REMLcrit`, `deviance` and `sigma`; `augment` adds `.fitted`,
+`.resid`, `.hat`, `.cooksd` and `.fixed`; `vcov` is the fixed effects'
+covariance, and `anova(fit)` lme4's F table without p-values. Weights,
+offsets, grouped fits, `na_action` and `modelsummary` work as for `lm`.
+The optimizer finds the optimum of lme4's criterion more precisely than
+lme4's default stopping rule does (see the tests for the tolerances), and
+the q x q system is factored densely up to 1,500 random-effect columns and
+by sparse LU above that, so a few thousand group levels fit in under a second.
+
 `na_action="exclude"` (R's `na.exclude`) keeps every row in `augment` and
 `predict`, with missing values where a row was not used, so the results line
 up with the data.
@@ -479,6 +508,7 @@ non-integer weights (R's robust variance). Times are compared exactly
 | MASS | `glm_nb("y ~ x")`, `glm("y ~ x", family=negative_binomial(theta))` |
 | MASS::polr | `polr("y ~ x", method="logistic")` |
 | nnet::multinom | `multinom("y ~ x")` |
+| lme4::lmer | `lmer("y ~ x + (x \|\| g)")`, `ranef(fit)`, `predict(fit, re_form=...)` |
 | MASS::rlm | `rlm("y ~ x", psi="huber")` |
 | quantreg::rq | `rq("y ~ x", tau=0.5, se="rank")` |
 | `prcomp`, `princomp`, `factanal` | `prcomp("~ a + b", scale_=True)`, `princomp(cols, cor=True)`, `factanal(cols, 2, rotation="promax")`; `varimax`, `promax` |
@@ -591,8 +621,8 @@ WAIC and exact Gaussian model evidence. `bayes_binom_test` and
 
 This is a first Bayesian implementation. Custom likelihoods,
 survival/time-series models and general model-evidence estimation remain
-outside its scope. Frequentist multinomial and mixed models are still
-pending; Bayesian work now takes priority over those remaining tier 2 items.
+outside its scope. Of the tier 2 models, correlated random effects in
+`lmer` are still pending.
 
 ## How it works, and how it is checked
 
@@ -607,7 +637,10 @@ needs only Polars and SciPy.
 
 `tests/r_oracle_cases.R` runs the same tests in R; `pytest` compares every
 column, to 1e-9 relative, on Polars, lazy Polars, pandas and tidy3 input.
-Marginal means and contrasts are also checked against R's emmeans.
+Marginal means and contrasts are also checked against R's emmeans, and mixed
+models against lme4 (to 1e-7 against lme4's own deviance function minimized
+to 1e-9 in theta, and to the accuracy of lme4's default optimizer, about
+5e-4 on weakly identified variance components, against `lmer()` as called).
 Where R's own numerics are approximate (Tukey's distribution, Dunnett's
 quantile approximation, intervals
 found with `uniroot`, the noncentral t above ncp 37.62, the asymptotic

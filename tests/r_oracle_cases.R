@@ -792,6 +792,10 @@ result <- switch(
     source("tests/r_timeseries_cases.R")
     timeseries_cases()
   },
+  lmer = {
+    source("tests/r_lmer_cases.R")
+    lmer_cases()
+  },
   emmeans = {
     source("tests/r_emm_cases.R")
     emm_cases()
