@@ -18,6 +18,7 @@ under **Changed**.
 - `quade_test("y ~ g | b")`: R's `quade.test` for unreplicated complete blocks, with the design checks and missing values of `friedman_test`, and R's degenerate p-value `k!^(1-b)` when F is undefined.
 - `prop_trend_test(x, n, score=)`: R's `prop.trend.test` chi-squared test for trend in proportions; `score` is a column or numbers, 1, 2, 3, ... by default.
 - All four run once per `by=` group on Polars, lazy Polars, pandas and tidy3 data, and take bare names in notebooks. Checked against R 4.6.1 on all four backends.
+- `polr()` gaps closed: `tidy(fit, conf_int=True)` now gives MASS's profile likelihood intervals (`confint.polr`, slopes only), with `conf_method="wald"` for the previous Wald intervals; `method="cauchit"` (with MASS's ±100 clamp of the latent bounds, which moves the cauchit optimum); `tidy(fit, vcov=vcov_cl(...))` and `vcov(fit, vcov_cl(...))` reproduce sandwich's `vcovCL` (HC0/HC1, multi-way, `cadjust`), tested as `coeftest`, while `vcovHC`, `NeweyWest`, clustered HC2/HC3 and loglog fits raise R's errors; `emmeans(fit, "x", mode=...)` gives emmeans' `"latent"`, `"prob"` and `"mean.class"` scales, with `pairs` and `contrast`, cell weights from the prior weights, offsets and robust covariance. Checked against MASS, sandwich and emmeans on all four backends; loglog probabilities are validated through the equivalent cloglog fit of the reversed response, since emmeans 2.0.4 mishandles loglog.
 
 ### Changed
 

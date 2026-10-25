@@ -5,7 +5,7 @@ emm_cases <- function() {
   m <- read.csv("tests/data/mtcars.csv")
   row <- function(emm, keys, comparisons=FALSE) {
     s <- as.data.frame(summary(emm, infer=c(TRUE, comparisons)))
-    estimate <- intersect(c("emmean", "estimate", "prob", "rate", "response", "ratio", "odds.ratio"), names(s))[1]
+    estimate <- intersect(c("emmean", "estimate", "prob", "mean.class", "rate", "response", "ratio", "odds.ratio"), names(s))[1]
     lower <- intersect(c("lower.CL", "asymp.LCL"), names(s))[1]
     upper <- intersect(c("upper.CL", "asymp.UCL"), names(s))[1]
     out <- s[keys]
@@ -81,5 +81,61 @@ emm_cases <- function() {
   out$offset_pairs <- row(pairs(emmeans(pois, "gear", at=list(gear=c(3, 5)))), "contrast", TRUE)
   out$gamma <- row(emmeans(glm(mpg ~ wt + factor(cyl), Gamma(link="log"), m), "cyl", type="response"), "cyl")
   out$gaussian <- row(emmeans(glm(mpg ~ wt + factor(cyl), gaussian(link="log"), m), "cyl", type="response"), "cyl")
+  c(out, polr_emm_cases(row))
+}
+
+polr_emm_cases <- function(row) {
+  suppressPackageStartupMessages(library(MASS))
+  h <- housing
+  h$off <- seq(-.3, .3, length.out=nrow(h))
+  h$Rev <- factor(h$Sat, levels=rev(levels(h$Sat)))
+  fit <- function(formula, method="logistic", data=h, ...) {
+    # do.call embeds the data in the call, so emmeans can recover it.
+    do.call(polr, list(formula, data=data, weights=data$Freq, Hess=TRUE, method=method,
+                       control=list(reltol=1e-13, maxit=1000), ...))
+  }
+  f <- fit(Sat ~ Infl + Type + Cont)
+  out <- list()
+  latent <- emmeans(f, "Infl")
+  out$polr_latent <- row(latent, "Infl")
+  out$polr_latent_pairs <- row(pairs(latent), "contrast", TRUE)
+  out$polr_latent_effects <- row(contrast(latent, "eff"), "contrast", TRUE)
+  prob <- emmeans(f, ~ Infl | Sat, mode="prob")
+  out$polr_prob <- row(prob, c("Sat", "Infl"))
+  out$polr_prob_pairs <- row(pairs(prob), c("Sat", "contrast"), TRUE)
+  out$polr_prob_two <- row(emmeans(f, c("Infl", "Sat"), mode="prob"), c("Infl", "Sat"))
+  mean_class <- emmeans(f, "Infl", mode="mean.class")
+  out$polr_mean_class <- row(mean_class, "Infl")
+  out$polr_mean_class_pairs <- row(pairs(mean_class), "contrast", TRUE)
+  out$polr_by <- row(emmeans(f, "Infl", by="Cont"), c("Cont", "Infl"))
+  out$polr_proportional <- row(emmeans(f, "Infl", weights="proportional"), "Infl")
+  out$polr_cells <- row(emmeans(f, "Infl", weights="cells"), "Infl")
+  out$polr_prob_cells <- row(emmeans(f, ~ Infl | Sat, mode="prob", weights="cells"), c("Sat", "Infl"))
+  offset <- fit(Sat ~ Infl + Type + offset(off))
+  out$polr_offset <- row(emmeans(offset, "Infl"), "Infl")
+  out$polr_offset_prob <- row(emmeans(offset, ~ Infl | Sat, mode="prob"), c("Sat", "Infl"))
+  out$polr_probit_prob <- row(emmeans(fit(Sat ~ Infl + Type + Cont, "probit"), ~ Infl | Sat, mode="prob"), c("Sat", "Infl"))
+  out$polr_cloglog_mean_class <- row(emmeans(fit(Sat ~ Infl + Type + Cont, "cloglog"), "Infl", mode="mean.class"), "Infl")
+  # MASS's default start fails for cauchit here; start from the logistic fit.
+  cauchit <- fit(Sat ~ Infl + Type + Cont, "cauchit", start=c(coef(f), f$zeta))
+  out$polr_cauchit_prob <- row(emmeans(cauchit, ~ Infl | Sat, mode="prob"), c("Sat", "Infl"))
+  # emmeans 2.0.4 back-transforms MASS's loglog with the wrong tail (it gives
+  # negative probabilities). A loglog fit is a cloglog fit of the reversed
+  # response, so validate loglog through that fit, mapped back.
+  reversed <- fit(Rev ~ Infl + Type + Cont, "cloglog")
+  loglog_prob <- row(emmeans(reversed, ~ Infl | Rev, mode="prob"), c("Rev", "Infl"))
+  names(loglog_prob)[1] <- "Sat"
+  loglog_prob$Sat <- factor(as.character(loglog_prob$Sat), levels=levels(h$Sat))
+  out$polr_loglog_prob <- loglog_prob[order(loglog_prob$Sat, loglog_prob$Infl), ]
+  rownames(out$polr_loglog_prob) <- NULL
+  loglog_mean <- row(emmeans(reversed, "Infl", mode="mean.class"), "Infl")
+  classes <- nlevels(h$Sat) + 1
+  loglog_mean[c("estimate", "conf_low", "conf_high")] <- classes - loglog_mean[c("estimate", "conf_high", "conf_low")]
+  out$polr_loglog_mean_class <- loglog_mean
+  out$polr_robust <- row(emmeans(f, "Infl", vcov.=sandwich::vcovCL(f, cluster=~Type)), "Infl")
+  out$polr_robust_prob <- row(emmeans(f, ~ Infl | Sat, mode="prob", vcov.=sandwich::vcovCL(f, cluster=~Type, type="HC1")), c("Sat", "Infl"))
+  out$polr_grouped <- h |> group_by(Cont) |>
+    group_modify(function(d, k) row(emmeans(fit(Sat ~ Infl + Type, data=d), "Infl"), "Infl")) |>
+    ungroup() |> as.data.frame()
   out
 }

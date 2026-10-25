@@ -226,16 +226,26 @@ fit = polr(housing, "Sat ~ Infl + Type + Cont", weights="Freq")
 tidy(fit, conf_int=True)             # slopes, then the thresholds Low|Medium and Medium|High
 predict(fit, new_rows, type="probs") # one column per level; "class" (default) or "link"
 anova(smaller_fit, fit)              # likelihood ratio test of nested fits
+tidy(fit, vcov=vcov_cl("Type"))      # clustered standard errors, as sandwich's vcovCL
+emmeans(fit, "Infl", by="Sat", mode="prob")  # class probabilities; "latent" (default), "mean.class"
 ```
 
 As in MASS, P(Y <= k) = F(zeta_k - x'beta - offset), with the logistic,
-probit, loglog or cloglog link (`method=`). The response needs three or more
+probit, loglog, cloglog or cauchit link (`method=`). The response needs three or more
 levels, ordered by a Polars `Enum`, a pandas category or `factor()`. Weights,
 offsets, groups and `na_action` work as for `glm`. Standard errors come from
-the Hessian, as `summary.polr`; p-values stay missing, as R reports none, and
-`conf_int=True` gives Wald intervals rather than `confint.polr`'s profile
-likelihood. The cauchit link, robust covariance and marginal means for
-ordinal fits are not included yet.
+the Hessian, as `summary.polr`; p-values stay missing, as R reports none.
+`conf_int=True` gives `confint.polr`'s profile likelihood intervals for the
+slopes (MASS profiles no thresholds); `conf_method="wald"` gives Wald
+intervals for every row. Robust covariance is sandwich's `vcovCL` (HC0 or
+HC1), tested as `coeftest` with t on the residual df; as in R, its bread
+scales by the total weight, so frequency-weighted fits get inflated robust
+errors, and `vcov_hc`, `vcov_nw`, clustered HC2/HC3 and loglog fits raise
+R's errors. `emmeans` follows emmeans' polr modes: `"latent"` (the linear
+predictor minus the mean threshold), `"prob"` (the response becomes a grid
+factor to put in specs or `by=`) and `"mean.class"`, with `pairs` and
+`contrast`. For loglog fits, stats3 gives the correct class probabilities,
+where emmeans 2.0.4 back-transforms with the wrong tail.
 
 `na_action="exclude"` (R's `na.exclude`) keeps every row in `augment` and
 `predict`, with missing values where a row was not used, so the results line
