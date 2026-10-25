@@ -768,6 +768,10 @@ result <- switch(
     source("tests/r_multinom_cases.R")
     multinom_cases()
   },
+  multivariate = {
+    source("tests/r_multivariate_cases.R")
+    multivariate_cases()
+  },
   emmeans = {
     source("tests/r_emm_cases.R")
     emm_cases()

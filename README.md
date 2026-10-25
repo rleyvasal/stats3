@@ -349,6 +349,35 @@ statsmodels' formula interface.
 | nnet::multinom | `multinom("y ~ x")` |
 | MASS::rlm | `rlm("y ~ x", psi="huber")` |
 | quantreg::rq | `rq("y ~ x", tau=0.5, se="rank")` |
+| `prcomp`, `princomp`, `factanal` | `prcomp("~ a + b", scale_=True)`, `princomp(cols, cor=True)`, `factanal(cols, 2, rotation="promax")`; `varimax`, `promax` |
+| `dist`, `hclust`, `cutree`, `cmdscale`, `kmeans` | `dist(cols) >> hclust("average")`, `cutree(fit, k=3)`, `dist(cols) >> cmdscale(2)`, `kmeans(cols, centers)` |
+
+## Multivariate exploration
+
+```python
+cols = ["Murder", "Assault", "UrbanPop", "Rape"]
+pca = prcomp(usarrests, "~ Murder + Assault + UrbanPop + Rape", scale_=True, labels="state")
+tidy(pca, matrix="pcs")         # broom: "x" scores, "rotation" loadings, "pcs" variance explained
+fa = factanal(mtcars, ["mpg", "disp", "hp", "drat", "wt", "qsec"], 2, rotation="varimax")
+glance(fa)                      # the chi-squared test that two factors suffice
+tree = usarrests >> dist(cols, labels="state") >> hclust("average")
+cutree(tree, k=4)               # item, cluster
+km = kmeans(usarrests, cols, usarrests.head(4))  # given centres; tidy, glance, augment as broom
+```
+
+Base R's `prcomp`, `princomp`, `factanal` (with `varimax` and `promax`),
+`dist`, `hclust` with `cutree`, `cmdscale` and `kmeans`, each with `by=`.
+`dist` returns broom's distance table (`item1`, `item2`, `distance`), which
+`hclust` and `cmdscale` take, grouping columns and all. The algorithms are
+ports of R's own code (hclust.f, kmns.f, kmeans.c, distance.c), so the merge
+matrix, heights and leaf order of `hclust`, ties included, and k-means from
+given centres are R's exactly. Random k-means starts use NumPy's generator,
+so with `centers=k` only the objective is comparable with R. `factanal` is
+R's maximum-likelihood fit over the uniquenesses, run to full precision.
+Component signs come from the LAPACK routines R calls (dgesdd for `prcomp`,
+dsyevr for `cmdscale`); they match R's here, but another LAPACK may flip a
+component, scores and loadings together. `princomp` and `factanal` fix
+their signs as R does.
 
 ## Bayesian statistics
 

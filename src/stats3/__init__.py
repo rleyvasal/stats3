@@ -68,6 +68,9 @@ from stats3.mlm import manova, mauchly_test
 from stats3.pairwise import pairwise_prop_test, pairwise_t_test, pairwise_wilcox_test
 from stats3.multinomial import multinom
 from stats3.negbin import glm_nb, negative_binomial
+from stats3.multivariate import (
+    cmdscale, cutree, dist, factanal, hclust, kmeans, prcomp, princomp, promax, varimax,
+)
 from stats3.ordinal import polr
 from stats3.ranks import (
     ansari_test,
@@ -173,4 +176,15 @@ __all__ = [
     "vcov_hc",
     "vcov_nw",
     "wilcox_test",
+    # multivariate
+    "cmdscale",
+    "cutree",
+    "dist",
+    "factanal",
+    "hclust",
+    "kmeans",
+    "prcomp",
+    "princomp",
+    "promax",
+    "varimax",
 ]

@@ -1519,6 +1519,10 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
             if conf_int or conf_level != 0.95 or exponentiate:
                 raise TypeError("tidy(): set intervals and scale in emmeans() or contrast()")
             return model.__tidy__(**kwargs)
+        if all(getattr(f, "own_tidy", False) for f in _fits(model)):
+            if conf_int or conf_level != 0.95 or exponentiate:
+                raise TypeError("tidy(): this fit has no coefficient intervals")
+            return _table(model, "tidy", **kwargs)
         opts = {"conf_int": conf_int, "conf_level": conf_level, **kwargs}
         if exponentiate:
             opts["exponentiate"] = True
@@ -1532,7 +1536,7 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
             as_vcov(opts["vcov"])
         return _table(model, "tidy", **opts)
 
-    if x is None and not args and set(kwargs) <= {"conf_method", "vcov"}:
+    if x is None and not args and set(kwargs) <= {"conf_method", "vcov", "matrix"}:
         return _ModelVerb(run, "tidy")
     if _is_model(x) or isinstance(x, (EMMeans, Contrasts, BayesianEstimates)):
         return run(x)
