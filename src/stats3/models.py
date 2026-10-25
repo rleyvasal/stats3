@@ -1443,7 +1443,13 @@ def lm(formula: str, *, weights: Any = None, offset: Any = None, contrasts: Any 
     out of ``augment`` and ``predict``; ``"exclude"`` keeps every row, with
     missing values where a row was not used, so the results line up with
     the data; ``"fail"`` raises if any row has a missing value.
+
+    A ``cbind(y1, y2, ...)`` response fits R's multivariate ``mlm``
+    (``stats3.mlm``).
     """
+    if isinstance(formula, str) and formula.partition("~")[0].strip().startswith("cbind("):
+        from stats3.mlm import _mlm
+        return _mlm(formula, weights, offset, contrasts, na_action)
     return _model("lm", lambda f, fr, d: LinearModel(f, fr, d), formula, weights, offset, contrasts, na_action)
 
 
@@ -1595,7 +1601,7 @@ def predict(model: Any, newdata: Any = None, **kwargs: Any) -> Any:
     return model.predict(newdata, **kwargs)
 
 
-def anova(*models: Any, test: Any = None, type: Any = 1) -> Any:  # noqa: A002
+def anova(*models: Any, test: Any = None, type: Any = 1, **kwargs: Any) -> Any:  # noqa: A002
     """Analysis of variance or deviance, as R's ``anova`` and car's ``Anova``.
 
     One model: ``type=1`` (default) is R's sequential table by term;
@@ -1604,9 +1610,13 @@ def anova(*models: Any, test: Any = None, type: Any = 1) -> Any:  # noqa: A002
     models fitted to the same rows: one row per model, with the F test (lm),
     or the chi-squared test for binomial and Poisson glms and the F test for
     the others (R's defaults; ``test="Chisq"`` / ``"F"`` / ``False``).
-    ``fit >> anova()`` works too.
+    ``fit >> anova()`` works too. Multivariate fits get R's ``anova.mlm``
+    (``stats3.mlm``), with its ``X=``, ``M=``, ``idata=``, ``T=``, ``Sigma=``.
     """
     kind = _check_type(type)
+    from stats3.mlm import _anova_hook
+    if (multivariate := _anova_hook(models, test, kind, kwargs)) is not None:
+        return multivariate
     if not models:
         return _ModelVerb(lambda m: anova(m, test=test, type=type), "anova")
     if len(models) == 1:
