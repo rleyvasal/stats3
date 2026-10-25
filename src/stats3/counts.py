@@ -1,5 +1,5 @@
-"""Tests on counts: R's ``chisq.test``, ``fisher.test``, ``prop.test`` and
-``binom.test``.
+"""Tests on counts: R's ``chisq.test``, ``fisher.test``, ``prop.test``,
+``prop.trend.test`` and ``binom.test``.
 
 Contingency tables are counted in one grouped Polars query; each group's
 small table is then finished with ``scipy.special`` (and, for Fisher's exact
@@ -528,6 +528,78 @@ def _prop_row(x, n, p, alternative, conf_level, correct, label, special) -> dict
         "method": method,
         "alternative": alternative,
     }
+
+
+# prop_trend_test -------------------------------------------------------------
+
+
+@step
+def prop_trend_test(x: Any, n: Any, *, score: Any = None) -> Step:
+    """Chi-squared test for trend in proportions, as R's ``prop.trend.test(x, n)``.
+
+    ``x`` and ``n`` are columns of successes and trials, one row per sample
+    in the order of the trend (one test per group after ``group_by``).
+    ``score`` gives the samples' scores: a column, or numbers for every
+    group; by default 1, 2, 3, ... in row order, as in R. The statistic is
+    the slope's sum of squares in R's weighted regression of ``x / n`` on
+    the score. Missing values are an error, as in R. Columns:
+    ``statistic``, ``df``, ``p_value``, ``method``.
+    """
+    fixed = None
+    if isinstance(score, (Sequence, np.ndarray)) and not isinstance(score, str):
+        fixed = np.asarray(score, dtype=float)
+
+    def _apply(tf: Any) -> Any:
+        special = _special()
+        groups = list(tf._groups or [])
+        columns = [_counts_column(tf, x, "x", "prop_trend_test"), _counts_column(tf, n, "n", "prop_trend_test")]
+        if score is not None and fixed is None:
+            columns.append(_counts_column(tf, score, "score", "prop_trend_test"))
+        table, samples = _count_lists(tf, groups, columns)
+        statistic = []
+        for sample in samples:
+            xs, ns, label = sample["c0"], sample["c1"], sample["label"]
+            scores = sample.get("c2", np.arange(1.0, len(xs) + 1) if fixed is None else fixed)
+            statistic.append(_trend_statistic(xs, ns, scores, label))
+        s = pl.Series(statistic, dtype=pl.Float64).fill_nan(None)
+        return _finish(tf, table, groups, {
+            "statistic": s,
+            "df": np.ones(table.height),
+            "p_value": pl.Series(special.chdtrc(1, s.fill_null(np.nan).to_numpy()), dtype=pl.Float64).fill_nan(None),
+            "method": "Chi-squared Test for Trend in Proportions",
+        })
+
+    return Step(_apply, "prop_trend_test")
+
+
+def _trend_statistic(x: np.ndarray, n: np.ndarray, score: np.ndarray, label: str) -> float:
+    if len(score) != len(x):
+        raise ValueError(f"prop_trend_test(): 'score' must have the same length as 'x' and 'n'{label}")
+    if len(x) < 1:
+        raise ValueError(f"prop_trend_test(): not enough data{label}")
+    if np.isnan(x).any() or np.isnan(n).any() or np.isnan(score).any():
+        raise ValueError(f"prop_trend_test(): 'x', 'n' and 'score' can't have missing values{label}")
+    if np.any(n <= 0):
+        raise ValueError(f"prop_trend_test(): elements of 'n' must be positive{label}")
+    p = x.sum() / n.sum()
+    if not 0 < p < 1:
+        raise ValueError(
+            f"prop_trend_test(): the pooled proportion must be between 0 and 1, got {p:g}{label}"
+        )
+    # The weighted least squares fit of x / n on the score, weights n / (p (1 - p)).
+    w = n / p / (1 - p)
+    freq = x / n
+    centre = np.sum(w * score) / w.sum()
+    level = np.sum(w * freq) / w.sum()
+    sxx = np.sum(w * (score - centre) ** 2)
+    if len(x) < 2 or np.ptp(score) == 0:
+        fitted, stat = np.full(len(x), level), math.nan
+    else:
+        slope = np.sum(w * (score - centre) * (freq - level)) / sxx
+        fitted, stat = level + slope * (score - centre), slope**2 * sxx
+    if np.sum(w * (freq - fitted) ** 2) < 1e-10 * np.sum(w * fitted**2):
+        _warn("ANOVA F-tests on an essentially perfect fit are unreliable")
+    return float(stat)
 
 
 # binom_test ------------------------------------------------------------------

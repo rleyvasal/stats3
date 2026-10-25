@@ -257,7 +257,8 @@ statsmodels' formula interface.
 |---|---|
 | `t.test` | `t_test("y ~ g")`, `t_test(x, mu=)`, `t_test(x, y, paired=True)` |
 | `wilcox.test` | `wilcox_test(...)`, same forms; R 4.6's exact tests with ties |
-| `kruskal.test`, `friedman.test` | `kruskal_test("y ~ g")`, `friedman_test("y ~ g \| block")` |
+| `kruskal.test`, `friedman.test`, `quade.test` | `kruskal_test("y ~ g")`, `friedman_test("y ~ g \| block")`, `quade_test("y ~ g \| block")` |
+| `ansari.test`, `mood.test` | `ansari_test("y ~ g")`, `ansari_test(x, y, conf_int=True)`: exact or normal, with the ratio of scales; `mood_test("y ~ g")`, with ties as in R 4.x |
 | `aov`, `TukeyHSD` | `aov("y ~ g")`, `tukey_hsd("y ~ g")` (one grouping column) |
 | `oneway.test` | `oneway_test("y ~ g")`: Welch's ANOVA, or `var_equal=True` |
 | `pairwise.t.test`, `pairwise.wilcox.test`, `pairwise.prop.test` | `pairwise_t_test("y ~ g")`, `pairwise_wilcox_test("y ~ g")`, `pairwise_prop_test(x, n)`: one row per pair, `p_adjust_method=` |
@@ -265,7 +266,7 @@ statsmodels' formula interface.
 | `chisq.test` | `chisq_test(x, y)`, `chisq_test(x, p=[...])` |
 | `fisher.test` | `fisher_test(x, y)`: odds ratio for 2 x 2, exact p-value for larger tables |
 | `mcnemar.test`, `mantelhaen.test` | `mcnemar_test(x, y)`, `mantelhaen_test(x, y, strata)`, `exact=True` for 2 x 2 x K |
-| `prop.test`, `binom.test` | `prop_test(x, n)`, `binom_test(sex == "male")` |
+| `prop.test`, `prop.trend.test`, `binom.test` | `prop_test(x, n)`, `prop_trend_test(x, n, score=)`, `binom_test(sex == "male")` |
 | `poisson.test` | `poisson_test(events, time)`: one rate, or the ratio of two |
 | `shapiro.test`, `ks.test` | `shapiro_test(x)`, `ks_test(x, "pnorm", mean=, sd=)`, `ks_test(x, y)` |
 | `bartlett.test`, `fligner.test`, `var.test`, `car::leveneTest` | `bartlett_test`, `fligner_test`, `var_test`, `levene_test` |
@@ -334,7 +335,8 @@ rank sums, cross-tabulated counts. Polars computes them for every group in
 one lazy query, and SciPy's distribution functions (Polars has none) turn
 them into p-values for all groups at once. Over 1,000 groups of 1,000 rows
 most tests run 4-30 times faster than calling SciPy once per group. Tests
-that need every value (Shapiro-Wilk, Kendall's tau) run per group. stats3
+that need every value (Shapiro-Wilk, Kendall's tau, the Ansari-Bradley
+interval) run per group. stats3
 needs only Polars and SciPy.
 
 `tests/r_oracle_cases.R` runs the same tests in R; `pytest` compares every

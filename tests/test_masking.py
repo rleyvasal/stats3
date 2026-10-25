@@ -20,6 +20,8 @@ NS = {"penguins", "df", "mask", "group_by", "mutate", "stats3", "log", "x", "pl"
         ("stats3.t_test(\n    body_mass_g ~\n      sex,\n)", "stats3.t_test('body_mass_g ~ sex')"),
         ('t_test("y ~ g")', "t_test('y ~ g')"),
         ("friedman_test(v ~ k | id)", "friedman_test('v ~ k | id')"),
+        ("quade_test(v ~ k | id)", "quade_test('v ~ k | id')"),
+        ("ansari_test(y ~ g, conf_int=True)", "ansari_test('y ~ g', conf_int=True)"),
         ("pairwise_t_test(y ~ g, pool_sd=False)", "pairwise_t_test('y ~ g', pool_sd=False)"),
         ("glm_nb(y ~ x + g)", "glm_nb('y ~ x + g')"),
         ("polr(y ~ x + g)", "polr('y ~ x + g')"),

@@ -35,6 +35,7 @@ from stats3.counts import (
     mcnemar_test,
     poisson_test,
     prop_test,
+    prop_trend_test,
 )
 from stats3.effects import (
     cohens_d,
@@ -66,7 +67,15 @@ from stats3.models import (
 from stats3.pairwise import pairwise_prop_test, pairwise_t_test, pairwise_wilcox_test
 from stats3.negbin import glm_nb, negative_binomial
 from stats3.ordinal import polr
-from stats3.ranks import cor_test, friedman_test, kruskal_test, wilcox_test
+from stats3.ranks import (
+    ansari_test,
+    cor_test,
+    friedman_test,
+    kruskal_test,
+    mood_test,
+    quade_test,
+    wilcox_test,
+)
 from stats3.report import modelsummary
 from stats3.resistant import rlm, rq
 from stats3.robust import vcov_cl, vcov_hc, vcov_nw
@@ -97,6 +106,7 @@ __all__ = [
     "prior_predict",
     "pp_check",
     "anova",
+    "ansari_test",
     "aov",
     "augment",
     "bartlett_test",
@@ -125,6 +135,7 @@ __all__ = [
     "mantelhaen_test",
     "mcnemar_test",
     "modelsummary",
+    "mood_test",
     "negative_binomial",
     "oneway_test",
     "p_adjust",
@@ -140,6 +151,8 @@ __all__ = [
     "power_t_test",
     "predict",
     "prop_test",
+    "prop_trend_test",
+    "quade_test",
     "quasibinomial",
     "quasipoisson",
     "rlm",

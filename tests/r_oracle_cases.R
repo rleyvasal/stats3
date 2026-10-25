@@ -603,7 +603,60 @@ result <- switch(
     props <- p[!is.na(p$sex), ] |> group_by(year, island) |>
       summarise(male=sum(sex == "male"), n=n(), .groups="drop") |> as.data.frame()
     named <- function(d) setNames(d$male, d$island)
+    scale_row <- function(h) {
+      out <- list()
+      if (!is.null(h$estimate)) out$estimate <- unname(h$estimate)
+      out$statistic <- unname(h$statistic)
+      out$p_value <- h$p.value
+      if (!is.null(h$conf.int)) {
+        out$conf_low <- h$conf.int[1]
+        out$conf_high <- h$conf.int[2]
+      }
+      out$method <- h$method
+      out$alternative <- h$alternative
+      as.data.frame(out)
+    }
+    na <- data.frame(x=c(1.5, -2.1, Inf, NA, 0.4, 3.3, -0.7, 2.2),
+                     y=c(0.2, NA, -1.1, 2.5, -Inf, 0.9, 1.7, NaN))
+    perfect <- data.frame(id=rep(1:4, each=3), k=rep(c("a", "b", "c"), 4),
+                          v=rep(1:3, 4) + rep(c(0, 10, 20, 30), each=3))
+    smokers <- data.frame(x=c(83, 90, 129, 70), n=c(86, 93, 136, 82), dose=c(0, 1, 2, 4))
     suppressWarnings(list(
+      an_exact=scale_row(ansari.test(s$a, s$b)),
+      an_less=scale_row(ansari.test(s$a, s$b, alternative="less")),
+      an_greater=scale_row(ansari.test(s$e, s$b, alternative="greater")),
+      an_ci=scale_row(ansari.test(s$a, s$b, conf.int=TRUE)),
+      an_ci_less=scale_row(ansari.test(s$a, s$e, conf.int=TRUE, alternative="less", conf.level=0.9)),
+      an_ci_greater=scale_row(ansari.test(s$e, s$b, conf.int=TRUE, alternative="greater")),
+      an_formula=scale_row(ansari.test(a ~ g, s)),
+      an_by_h=by(s, "h", function(d) scale_row(ansari.test(d$a, d$b, conf.int=TRUE))),
+      an_ties=scale_row(ansari.test(c ~ g, s)),
+      an_approx=scale_row(ansari.test(s$a, s$b, exact=FALSE, conf.int=TRUE)),
+      an_approx_less=scale_row(ansari.test(s$a, s$e, exact=FALSE, conf.int=TRUE, alternative="less")),
+      an_approx_greater=scale_row(ansari.test(s$e, s$b, exact=FALSE, conf.int=TRUE, alternative="greater")),
+      an_approx_ties=scale_row(ansari.test(s$c, s$b, exact=FALSE, conf.int=TRUE)),
+      an_penguins=scale_row(ansari.test(body_mass_g ~ sex, p)),
+      an_by_species=by(p, "species", function(d) scale_row(
+        ansari.test(bill_depth_mm ~ sex, d, exact=FALSE, conf.int=TRUE))),
+      an_missing=scale_row(ansari.test(na$x, na$y)),
+      mo_ranks=scale_row(mood.test(s$a, s$b)),
+      mo_less=scale_row(mood.test(s$a, s$e, alternative="less")),
+      mo_greater=scale_row(mood.test(s$e, s$b, alternative="greater")),
+      mo_formula=scale_row(mood.test(a ~ g, s)),
+      mo_ties=scale_row(mood.test(c ~ g, s)),
+      mo_penguins=scale_row(mood.test(body_mass_g ~ sex, p)),
+      mo_by_species=by(p, "species", function(d) scale_row(mood.test(flipper_length_mm ~ sex, d))),
+      mo_missing=scale_row(mood.test(na$x, na$y)),
+      qu_ranks=test(quade.test(v ~ k | id, long)),
+      qu_ties=test(quade.test(v ~ k | id, cars)),
+      qu_by_g=by(long, "g", function(d) test(quade.test(v ~ k | id, d))),
+      qu_perfect=test(quade.test(v ~ k | id, perfect)),
+      ptr_smokers=test(prop.trend.test(smokers$x, smokers$n)),
+      ptr_score=test(prop.trend.test(smokers$x, smokers$n, c(0, 0, 0, 1))),
+      ptr_score_column=test(prop.trend.test(smokers$x, smokers$n, smokers$dose)),
+      ptr_two=test(prop.trend.test(smokers$x[1:2], smokers$n[1:2])),
+      ptr_by_year=by(props, "year", function(d) test(prop.trend.test(d$male, d$n))),
+      ptr_by_island=by(props, "island", function(d) test(prop.trend.test(d$male, d$n, d$year))),
       o_welch=test(oneway.test(body_mass_g ~ species, p)),
       o_equal=test(oneway.test(body_mass_g ~ species, p, var.equal=TRUE)),
       o_by_year=by(p, "year", function(d) test(oneway.test(flipper_length_mm ~ island, d))),

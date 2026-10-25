@@ -6,6 +6,14 @@ under **Changed**.
 
 ## Unreleased
 
+### Added
+
+- `ansari_test("y ~ g")` and `ansari_test(x, y)`: R's `ansari.test` of equal scale, with its exact distribution for samples under 50 without ties (or `exact=`), the normal approximation with R's tie correction otherwise, and `conf_int=True` for R's estimate and interval of the ratio of scales, exact or asymptotic. As in R, ties with small samples give the normal p-value with a warning, and an exact interval with ties is an error (`exact=False` gives the asymptotic one). The asymptotic estimate and bounds pick the root R's `uniroot` picks, then locate that jump of the step function to 1e-12 rather than R's 1e-4.
+- `mood_test("y ~ g")` and `mood_test(x, y)`: R's `mood.test` of scale on the finite values, with R 4.x's tie handling.
+- `quade_test("y ~ g | b")`: R's `quade.test` for unreplicated complete blocks, with the design checks and missing values of `friedman_test`, and R's degenerate p-value `k!^(1-b)` when F is undefined.
+- `prop_trend_test(x, n, score=)`: R's `prop.trend.test` chi-squared test for trend in proportions; `score` is a column or numbers, 1, 2, 3, ... by default.
+- All four run once per `by=` group on Polars, lazy Polars, pandas and tidy3 data, and take bare names in notebooks. Checked against R 4.6.1 on all four backends.
+
 ### Changed
 
 - The `bayes` extra now needs PyMC 6 (`pymc>=6.3,<7`, with PyTensor 3) and ArviZ 1 (`arviz>=1.1,<2`). PyTensor 2, which PyMC 5 requires, cannot compile its C extensions with Apple clang 21 (Xcode 27): it passes the `-ld64` linker flag that this clang removed, so every sampled `bayes_glm` fit failed on current macOS toolchains without a local compiler wrapper. PyTensor 3 chooses the flag by the compiler's version instead, and runs the model graph through Numba by default, so the C++ compiler only builds PyTensor's small bootstrap module. `bayes_compare(method="loo")` still uses ArviZ's PSIS-LOO; ArviZ 1 dropped WAIC, so `method="waic"` is now computed by stats3 from the pointwise log likelihoods with the same definition, and both methods return the same table as before (rank, `elpd_*`, `p_*`, `elpd_diff`, stacking `weight`, `se`, `dse`, `warning`). As in ArviZ 1, `se` and `dse` now use the sample variance of the pointwise values (ArviZ 0.x used the population variance, a factor of `sqrt(n/(n-1))` smaller). A sampled fit's `idata` is now an xarray `DataTree`, as PyMC 6 returns.
