@@ -313,8 +313,8 @@ pp_check(fit, statistic="sd", seed=42)
 
 The sampled engine supports Gaussian, Student-t, binomial, Poisson,
 negative binomial, gamma, lognormal, exponential, ordinal and multinomial
-models, plus independent varying intercepts/slopes. It uses optional PyMC 5
-and ArviZ dependencies. All four data backends, formulas, offsets, grouped
+models, plus independent varying intercepts/slopes. It uses optional PyMC 6
+and ArviZ 1 dependencies. All four data backends, formulas, offsets, grouped
 fits and missing-row alignment carry through. `posterior_draws`,
 `posterior_epred`, `prior_predict`, `bayes_emmeans`, contrasts and ROPE
 probabilities expose posterior uncertainty; `bayes_compare` offers LOO,

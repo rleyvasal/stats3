@@ -14,7 +14,7 @@ import numpy as np
 import polars as pl
 
 from stats3._data import step
-from stats3.core import _check_conf_level
+from stats3.core import _check_conf_level, _warn
 from stats3.formula import build_design
 from stats3.models import NA_ACTIONS, Models, _Fit, _ModelStep, _model, _qr, _table_text
 
@@ -484,7 +484,85 @@ def _inference_data(fit):
     samples = fit._posterior_samples()
     eta = fit._eta(samples, fit.x, fit.frame.offset, fit.frame.rows)
     loglik = norm.logpdf(fit.y, eta, samples["sigma"][..., None] / np.sqrt(fit.frame.weights))
-    return _arviz().from_dict(posterior=samples, log_likelihood={"observed": loglik}, observed_data={"observed": fit.y})
+    return _arviz().from_dict({"posterior": samples, "log_likelihood": {"observed": loglik},
+                               "observed_data": {"observed": fit.y}})
+
+
+def _pointwise_elpd(fit, method):
+    """Pointwise expected log predictive density of one fit: ArviZ's PSIS-LOO,
+    or WAIC (which ArviZ 1 no longer provides) from the pointwise log likelihood.
+    Returns the pointwise values with the total, its standard error, the
+    effective number of parameters and whether a reliability warning applies."""
+    idata = _inference_data(fit)
+    if method == "loo":
+        loo = _arviz().loo(idata, pointwise=True)
+        return np.asarray(loo.elpd_i), float(loo.elpd), float(loo.se), float(loo.p), bool(loo.warning)
+    loglik = np.asarray(idata.log_likelihood["observed"])
+    loglik = loglik.reshape(-1, loglik.shape[-1])  # (draws, observations)
+    from scipy.special import logsumexp
+
+    lppd = logsumexp(loglik, axis=0) - np.log(loglik.shape[0])
+    p_waic = loglik.var(axis=0)
+    if np.any(p_waic > .4):
+        _warn("bayes_compare(): the posterior variance of the log predictive density exceeds "
+              "0.4 for some observations; WAIC may be unreliable (Vehtari, Gelman and Gabry, 2017)")
+    elpd_i = lppd - p_waic
+    return elpd_i, float(elpd_i.sum()), _elpd_se(elpd_i), float(p_waic.sum()), bool(np.any(p_waic > .4))
+
+
+def _elpd_se(pointwise):
+    """Standard error of a summed pointwise ELPD, with ArviZ 1's sample variance."""
+    return float(np.sqrt(pointwise.size * pointwise.var(ddof=1))) if pointwise.size > 1 else 0.0
+
+
+def _stacking_weights(elpd):
+    """Bayesian stacking of predictive distributions (Yao, Vehtari, Simpson and
+    Gelman, 2018), as ArviZ computed it: the weights that maximize the summed
+    log pointwise predictive density of the mixture. ``elpd`` is observations
+    by models."""
+    from scipy.optimize import minimize
+
+    exp_elpd = np.exp(elpd - elpd.max(axis=1, keepdims=True))
+    k = exp_elpd.shape[1]
+
+    def full(w):
+        return np.concatenate([w, [max(1 - w.sum(), 0)]])
+
+    def score(w):
+        return -np.sum(np.log(exp_elpd @ full(w)))
+
+    def gradient(w):
+        mixture = exp_elpd @ full(w)
+        return -np.sum((exp_elpd[:, :-1] - exp_elpd[:, -1:]) / mixture[:, None], axis=0)
+
+    result = minimize(score, np.full(k - 1, 1 / k), jac=gradient, bounds=[(0, 1)] * (k - 1),
+        constraints=[{"type": "ineq", "fun": lambda w: 1 - w.sum()}, {"type": "ineq", "fun": np.sum}])
+    weights = full(result.x)
+    return weights / weights.sum()
+
+
+def _predictive_comparison(models, method):
+    """ArviZ 0.x's comparison table: models ranked by LOO or WAIC, with the
+    difference from the best model and its standard error, and stacking weights."""
+    results = {name: _pointwise_elpd(fit, method) for name, fit in models.items()}
+    if len({r[0].shape for r in results.values()}) != 1:
+        raise ValueError("bayes_compare(): models must have the same number of observations")
+    pointwise = np.column_stack([r[0] for r in results.values()])
+    weights = _stacking_weights(pointwise)
+    order = np.argsort([-r[1] for r in results.values()], kind="stable")
+    best = pointwise[:, order[0]]
+    names = list(results)
+    rows = {"model": [], "rank": [], f"elpd_{method}": [], f"p_{method}": [], "elpd_diff": [], "weight": [],
+            "se": [], "dse": [], "warning": [], "scale": []}
+    for rank, j in enumerate(order):
+        elpd_i, total, se, p, warning = results[names[j]]
+        diff = best - elpd_i
+        rows["model"].append(names[j]); rows["rank"].append(rank)
+        rows[f"elpd_{method}"].append(total); rows[f"p_{method}"].append(p)
+        rows["elpd_diff"].append(float(diff.sum())); rows["weight"].append(float(weights[j]))
+        rows["se"].append(se); rows["dse"].append(_elpd_se(diff))
+        rows["warning"].append(warning); rows["scale"].append("log")
+    return pl.DataFrame(rows)
 
 
 def bayes_diagnostics(model):
@@ -515,7 +593,7 @@ def bayes_diagnostics(model):
                 **{name: summary[name].to_numpy() for name in ("r_hat", "ess_bulk", "ess_tail", "mcse_mean")},
                 "divergences": [int(stats.diverging.sum())]*count,
                 "max_treedepth_hits": [int((stats.tree_depth >= fit.max_treedepth).sum())]*count,
-                "min_bfmi": [float(np.min(az.bfmi(fit.idata)))]*count,
+                "min_bfmi": [float(np.min(np.asarray(az.bfmi(fit.idata)["energy"])))]*count,
                 "engine": ["pymc"]*count})
         frames.append(fit._with_key(out))
     return model._stack(frames) if isinstance(model, Models) else model._write(frames[0])
@@ -523,8 +601,9 @@ def bayes_diagnostics(model):
 
 def bayes_compare(models, *, method="loo"):
     """Compare named models fitted to identical responses and row identities.
-    LOO/WAIC use ArviZ stacking weights. ``method='evidence'`` gives exact
-    Gaussian log Bayes factors and weights under equal prior model odds.
+    ``method='loo'`` ranks the models by ArviZ's PSIS-LOO and ``'waic'`` by
+    WAIC, both with Bayesian stacking weights. ``method='evidence'`` gives
+    exact Gaussian log Bayes factors and weights under equal prior model odds.
     """
     if not isinstance(models, Mapping) or len(models) < 2:
         raise ValueError("bayes_compare(): supply at least two named models")
@@ -549,8 +628,7 @@ def bayes_compare(models, *, method="loo"):
         table = pl.DataFrame({"model": list(models), "log_marginal_likelihood": evidence,
                               "log_bayes_factor": evidence-evidence[0], "weight": softmax(evidence)})
     elif method in ("loo", "waic"):
-        comparison = _arviz().compare({n: _inference_data(f) for n, f in models.items()}, ic=method)
-        table = pl.DataFrame(comparison.rename_axis("model").reset_index().to_dict("list"))
+        table = _predictive_comparison(models, method)
     else:
         raise ValueError("bayes_compare(): method must be 'loo', 'waic' or 'evidence'")
     return first._write(table)

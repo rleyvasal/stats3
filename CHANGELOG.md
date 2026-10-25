@@ -4,6 +4,12 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- The `bayes` extra now needs PyMC 6 (`pymc>=6.3,<7`, with PyTensor 3) and ArviZ 1 (`arviz>=1.1,<2`). PyTensor 2, which PyMC 5 requires, cannot compile its C extensions with Apple clang 21 (Xcode 27): it passes the `-ld64` linker flag that this clang removed, so every sampled `bayes_glm` fit failed on current macOS toolchains without a local compiler wrapper. PyTensor 3 chooses the flag by the compiler's version instead, and runs the model graph through Numba by default, so the C++ compiler only builds PyTensor's small bootstrap module. `bayes_compare(method="loo")` still uses ArviZ's PSIS-LOO; ArviZ 1 dropped WAIC, so `method="waic"` is now computed by stats3 from the pointwise log likelihoods with the same definition, and both methods return the same table as before (rank, `elpd_*`, `p_*`, `elpd_diff`, stacking `weight`, `se`, `dse`, `warning`). As in ArviZ 1, `se` and `dse` now use the sample variance of the pointwise values (ArviZ 0.x used the population variance, a factor of `sqrt(n/(n-1))` smaller). A sampled fit's `idata` is now an xarray `DataTree`, as PyMC 6 returns.
+
 ## 0.2.0 — 2026-10-24
 
 Models beyond lm and glm: estimated marginal means, robust standard errors, side-by-side model tables, negative binomial, robust and quantile regression, ordinal regression, and a first Bayesian layer with exact and sampled models.

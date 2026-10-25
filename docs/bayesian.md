@@ -41,7 +41,8 @@ do not have finite means. Draws remain available for other transformations.
 ## Sampled models
 
 Install `pip install "stats3[bayes]"`. The supported dependency series are
-PyMC 5.28–5.x and ArviZ 0.21–0.22, with their existing InferenceData API.
+PyMC 6.3–6.x (with PyTensor 3) and ArviZ 1.1–1.x, whose fits are xarray
+DataTrees.
 Importing stats3 and using exact methods never imports these optional packages.
 
 ```python
@@ -213,8 +214,13 @@ accuracy against independent quadrature. All ten likelihood families run
 through all four data backends and are checked against independent SciPy
 pointwise likelihoods, response means and predictive distributions.
 
-LOO and WAIC use ArviZ and return its diagnostics/warnings and stacking
-weights. Both require the extra, including for exact models. Compared fits
+LOO uses ArviZ's PSIS-LOO and returns its standard errors and reliability
+warning; WAIC is computed by stats3 from the pointwise log likelihoods, as
+ArviZ 0.x did before dropping it, and warns when the pointwise posterior
+variance exceeds 0.4. Both rank the models, give the difference from the
+best model with its standard error, and Bayesian stacking weights (Yao,
+Vehtari, Simpson and Gelman, 2018). Both require the extra, including for
+exact models. Compared fits
 must have identical response values, category order/trials, used row positions
 and weights. Exact Gaussian `evidence` comparison uses proper prior
 normalizations, returns log Bayes factors relative to the first model,

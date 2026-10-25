@@ -183,7 +183,8 @@ class SampledModel(BayesianModel):
                 random_seed=int(self.rng.integers(1, 2**30)), target_accept=target_accept,
                 nuts={"max_treedepth": max_treedepth}, progressbar=progressbar,
                 initvals={"cutpoints_centered": np.linspace(-1, 1, len(self.response_levels)-1)} if family == "ordinal" else None,
-                return_inferencedata=True, idata_kwargs={"log_likelihood": True})
+                return_inferencedata=True)
+            pm.compute_log_likelihood(self.idata, progressbar=False)
         self.beta_draws = self.idata.posterior["beta"].values
         self.extra_draws = {name: self.idata.posterior[name].values for name in self.idata.posterior.data_vars
                             if name != "beta" and not name.startswith("coefficient_") and not name.endswith("_centered")}
@@ -370,7 +371,7 @@ def bayes_glm(formula, family="gaussian", *, link=None, priors=None, draws=1000,
               progressbar=False, weights=None, offset=None, contrasts=None, na_action="omit"):
     """Bayesian GLMs and independent noncentered random intercepts/slopes.
 
-    Requires ``stats3[bayes]`` (PyMC 5 and ArviZ's pre-refactor API).
+    Requires ``stats3[bayes]`` (PyMC 6 and ArviZ 1).
     Families: gaussian, student_t, binomial, poisson, negative_binomial,
     gamma, lognormal, exponential, ordinal and multinomial. Defaults are
     identity for continuous symmetric outcomes, logit for binomial/ordinal,
