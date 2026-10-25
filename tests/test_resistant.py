@@ -34,17 +34,38 @@ RLM = {
     "no_intercept": lambda d: rlm(d, "mpg ~ 0 + wt + hp"),
     "xtwx": lambda d: rlm(d, "mpg ~ wt + hp", cov_method="XtWX"),
     "case_xtwx": lambda d: rlm(d, "mpg ~ wt + hp", weights="w", wt_method="case", cov_method="XtWX"),
+    "mm": lambda d: rlm(d, "mpg ~ wt + hp", method="MM"),
+    # Random lqs subsets come from R's own stream, so set.seed(3) is matched exactly.
+    "mm_factors": lambda d: rlm(d, "mpg ~ wt + factor(cyl)", method="MM", seed=3),
+    "mm_weighted": lambda d: rlm(d, "mpg ~ wt + hp", method="MM", weights="w"),
+    "mm_case": lambda d: rlm(d, "mpg ~ wt + hp", method="MM", weights="w", wt_method="case"),
+    "mm_tuning": lambda d: rlm(d, "mpg ~ wt + hp", method="MM", tuning=3),
+    "mm_offset": lambda d: rlm(d, "mpg ~ wt + offset(hp / 10)", method="MM"),
+    "lts": lambda d: rlm(d, "mpg ~ wt + hp", init="lts", seed=3),
+    "lts_exact": lambda d: rlm(d, "mpg ~ wt + hp", init="lts", lqs_control={"nsamp": "exact"}),
+    "lts_bisquare": lambda d: rlm(d, "mpg ~ wt + hp", init="lts", psi="bisquare", seed=4),
 }
 RQ = {
-    "median": lambda d: rq(d, "mpg ~ wt + hp"),
-    "lower": lambda d: rq(d, "mpg ~ wt + hp", tau=.25),
-    "upper": lambda d: rq(d, "mpg ~ wt + hp", tau=.75),
-    "factors": lambda d: rq(d, "mpg ~ wt + factor(cyl)"),
-    "weighted": lambda d: rq(d, "mpg ~ wt + hp", weights="w"),
-    "zero_weights": lambda d: rq(d, "mpg ~ wt + hp", weights="w0"),
-    "no_intercept": lambda d: rq(d, "mpg ~ 0 + wt + hp"),
+    "median": lambda d: rq(d, "mpg ~ wt + hp", se="nid"),
+    "lower": lambda d: rq(d, "mpg ~ wt + hp", tau=.25, se="nid"),
+    "upper": lambda d: rq(d, "mpg ~ wt + hp", tau=.75, se="nid"),
+    "factors": lambda d: rq(d, "mpg ~ wt + factor(cyl)", se="nid"),
+    "weighted": lambda d: rq(d, "mpg ~ wt + hp", weights="w", se="nid"),
+    "zero_weights": lambda d: rq(d, "mpg ~ wt + hp", weights="w0", se="nid"),
+    "no_intercept": lambda d: rq(d, "mpg ~ 0 + wt + hp", se="nid"),
     "iid": lambda d: rq(d, "mpg ~ wt + hp", se="iid"),
     "weighted_iid": lambda d: rq(d, "mpg ~ wt + hp", se="iid", weights="w"),
+    "rank": lambda d: rq(d, "mpg ~ wt + hp"),
+    "rank_lower": lambda d: rq(d, "mpg ~ wt + hp", tau=.25, se="rank"),
+    "rank_factors": lambda d: rq(d, "mpg ~ wt + factor(cyl)", tau=.6),
+    "rank_nid": lambda d: rq(d, "mpg ~ wt + hp", iid=False),
+    "rank_nid_lower": lambda d: rq(d, "mpg ~ wt + hp", tau=.25, iid=False),
+    "rank_weighted": lambda d: rq(d, "mpg ~ wt + hp", weights="w"),
+    "rank_zero_weights": lambda d: rq(d, "mpg ~ wt + hp", weights="w0"),
+    "offset": lambda d: rq(d, "mpg ~ wt + offset(hp / 10)", tau=.6),
+    # Bootstrap rows come from R's own stream, so set.seed() is matched draw for draw.
+    "boot": lambda d: rq(d, "mpg ~ wt + hp", se="boot", seed=1),
+    "boot_weighted": lambda d: rq(d, "mpg ~ wt + hp", tau=.75, weights="w", se="boot", seed=2),
 }
 TABLES = {"tidy": lambda f: tidy(f, conf_int=True), "vcov": vcov, "augment": augment, "glance": glance,
           "predict": lambda f: predict(f, cars().head(5), interval="confidence", se_fit=True)}
@@ -70,7 +91,7 @@ def test_tables_match_r(reference, backend, table):
     for name, make in (RLM if kind == "rlm" else RQ).items():
         fit = make(data)
         with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message=r"rq\(\): .*non-positive density")
+            warnings.filterwarnings("ignore", message=r"rq\(\): .*(non-positive density|fis <=0)")
             if table == "predict":
                 new, _ = as_input(cars().head(5), backend, [])
                 result = predict(fit, new, interval="confidence", se_fit=True)
@@ -81,6 +102,9 @@ def test_tables_match_r(reference, backend, table):
             result = as_polars(result).select(".fitted", ".resid")
         # LP residuals at zero are rounded differently by the two solvers.
         loose = {".resid": (1e-9, 1e-10)} if kind == "rq" else None
+        if name.startswith("boot"):
+            # summary.rq reports 2 * (1 - pt(|t|)), which rounds to 1e-14 near zero.
+            loose = {**loose, "p_value": (1e-9, 1e-13)}
         assert_matches_r(result, expected[f"{name}__{table}"], loose=loose)
 
 
@@ -174,3 +198,76 @@ def test_singular_and_unsupported_inference(make):
         tidy(fit, vcov="HC3")
     with pytest.raises(TypeError, match="single-model"):
         anova(fit)
+
+
+def test_mm_options_follow_mass():
+    data = cars()
+    mm = rlm(data, "mpg ~ wt + hp", method="MM")
+    # MASS's MM always uses bisquare at the S-estimate's fixed scale.
+    assert rlm(data, "mpg ~ wt + hp", method="MM", psi="hampel").coef == pytest.approx(mm.coef, rel=1e-15)
+    with pytest.warns(UserWarning, match="at least 1.548"):
+        low = rlm(data, "mpg ~ wt + hp", method="MM", tuning=1.5)
+    assert low.coef == pytest.approx(mm.coef, rel=1e-15)
+    start = rlm(data, "mpg ~ wt + hp", init=list(mm.coef))
+    assert start.coef == pytest.approx(rlm(data, "mpg ~ wt + hp").coef, rel=1e-3)
+    with pytest.warns(UserWarning, match="all sets will be tried"):
+        exact = rlm(data, "mpg ~ wt + hp", init="lts", lqs_control={"nsamp": 10**6})
+    assert exact.coef == pytest.approx(rlm(data, "mpg ~ wt + hp", init="lts", lqs_control={"nsamp": "exact"}).coef)
+    for bad in ({"method": "S"}, {"init": "lqs"}, {"init": [1.0]}, {"lqs_control": {"psamp": 3}},
+                {"lqs_control": {"nsamp": 0}}):
+        with pytest.raises(ValueError):
+            rlm(data, "mpg ~ wt + hp", **bad)
+
+
+def test_rq_default_inference_switches_at_1001_rows():
+    rng = np.random.default_rng(1)
+    small = pl.DataFrame({"x": rng.normal(size=1000)}).with_columns(y=pl.col("x") + rng.normal(size=1000))
+    big = pl.concat([small, small.head(1)])
+    assert rq(small, "y ~ x").se_method == "rank"
+    fit = rq(big, "y ~ x")
+    assert fit.se_method == "nid"
+    assert tidy(fit)["std_error"].null_count() == 0
+    rank = tidy(rq(small, "y ~ x"), conf_int=True)
+    assert rank["std_error"].null_count() == 2
+    assert (rank["conf_low"] < rank["estimate"]).all() and (rank["estimate"] < rank["conf_high"]).all()
+
+
+def test_rq_offsets_are_subtracted_from_the_response():
+    data = cars().with_columns(off=pl.col("hp") / 10)
+    formula = rq(data, "mpg ~ wt + offset(off)", tau=.6)
+    argument = rq(data, "mpg ~ wt", offset="off", tau=.6)
+    adjusted = rq(data.with_columns(adj=pl.col("mpg") - pl.col("off")), "adj ~ wt", tau=.6)
+    assert formula.coef == pytest.approx(adjusted.coef) and argument.coef == pytest.approx(adjusted.coef)
+    assert formula.fitted == pytest.approx(adjusted.fitted + data["off"].to_numpy())
+    assert predict(argument, data.head(3))["fit"].to_list() == pytest.approx(formula.fitted[:3])
+
+
+def test_rank_inference_edge_cases():
+    # rq.fit.br gives no intervals for a single coefficient.
+    one = tidy(rq({"y": [1., 2., 4., 9., 15., 3.]}, "y ~ 1"), conf_int=True)
+    assert one["conf_low"].null_count() == 1 and one["std_error"].null_count() == 1
+    # Ties and duplicate rows (degenerate vertices) still give intervals around the estimate.
+    penguins = pl.read_csv(DATA / "penguins.csv", null_values="NA")
+    table = tidy(rq(penguins, "body_mass_g ~ flipper_length_mm + species"), conf_int=True)
+    assert (table["conf_low"] < table["estimate"]).all() and (table["estimate"] < table["conf_high"]).all()
+    for bad in ({"se": "ker"}, {"iid": 1}, {"r": 1}, {"r": 2.5}):
+        with pytest.raises(ValueError):
+            rq(cars(), "mpg ~ wt", **bad)
+
+
+def test_bootstrap_matches_r_in_distribution(reference):
+    kind, expected = reference
+    if kind != "rq":
+        return
+    # With another seed the draws differ from R's set.seed(1) draws; the
+    # bootstrap SEs then agree only up to Monte Carlo error. Each SE from
+    # r=200 draws has relative SD about 1 / sqrt(2 * 199) = 5%, so their
+    # ratio has SD about 7%; 30% is a four-SD band.
+    want = expected["boot__vcov"]
+    r_se = np.sqrt([want["data"][i + 1][i] for i in range(3)])
+    fit = rq(cars(), "mpg ~ wt + hp", se="boot", seed=11)
+    assert np.sqrt(np.diag(fit.cov_unscaled)) == pytest.approx(r_se, rel=.3)
+    assert not np.allclose(fit.boot_coefficients, rq(cars(), "mpg ~ wt + hp", se="boot", seed=1).boot_coefficients)
+    again = rq(cars(), "mpg ~ wt + hp", se="boot", seed=11)
+    assert np.array_equal(again.boot_coefficients, fit.boot_coefficients)
+    assert rq(cars(), "mpg ~ wt + hp").boot_coefficients is None

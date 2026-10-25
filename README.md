@@ -188,19 +188,31 @@ tidy(robust_fit, conf_int=True)
 predict(quantile_fit, new_rows, interval="confidence")
 ```
 
-`rlm()` follows MASS's default M-estimation with Huber, bisquare or Hampel
+`rlm()` follows MASS's M-estimation with Huber, bisquare or Hampel
 scores, MAD or Huber proposal-2 scale, inverse-variance or case weights,
-and `XtX` or `XtWX` coefficient covariance. It reports R's t statistics
-and normal confidence intervals; p-values remain missing because
-`summary.rlm` supplies none. MM/LTS initialization is not included.
+and `XtX` or `XtWX` coefficient covariance. `method="MM"` gives MASS's
+MM-estimate: an S-estimate from `lqs`, then bisquare M-steps at its fixed
+scale. `init="lts"` starts the M iterations from `lqs`'s least trimmed
+squares. Like MASS, `lqs` tries every subset when there are fewer than
+5000, and otherwise random ones (`lqs_control={"nsamp": ...}`); those come
+from R's generator, so `seed=` gives the same fit as `set.seed()` in R.
+`rlm()` reports R's t statistics and normal confidence intervals; p-values
+remain missing because `summary.rlm` supplies none.
 
 `rq()` minimizes weighted pinball loss with a sparse linear program. It
-fits one `tau` at a time and uses quantreg's `nid` inference by default, or
-`se="iid"`, with t tests and t intervals. This differs from R's small-sample
-default of rank intervals; rank/bootstrap inference is not included.
-`anova(full_fit, reduced_fit)` gives Wald tests for nested models with the
-same tau. Offsets are rejected; fit an explicitly adjusted response instead.
-For nonunique optima, the LP solver may choose different coefficients from R.
+fits one `tau` at a time with inference as in `summary.rq`. By default,
+fits with fewer than 1001 rows get rank-inversion confidence intervals
+(`se="rank"`, with `iid=False` for quantreg's nid rank variant) and larger
+fits get `nid` standard errors. `se="iid"` gives iid standard errors, and
+`se="boot"` the xy-pair bootstrap with `r` replications (200 by default),
+drawn from R's generator so that `seed=` matches `set.seed()` in R. Rank
+fits have intervals but no standard errors or tests, as in R; their
+`vcov()`, prediction intervals and marginal means use `nid` covariance, as
+quantreg's do. `anova(full_fit, reduced_fit)` gives Wald tests for nested
+models with the same tau. Offsets are subtracted from the response
+(quantreg 6.1 silently ignores `offset()` terms). For nonunique optima, the
+LP solver may choose different coefficients from R, and rank intervals may
+follow a different vertex path from R's; R warns about these fits.
 Both models support groups, row alignment, `vcov()`, `modelsummary()` and
 estimated marginal means. Quantile fit statistics follow `logLik.rq`'s
 asymmetric-Laplace convention; R leaves BIC missing. Robust fits report their
@@ -280,7 +292,7 @@ statsmodels' formula interface.
 | MASS | `glm_nb("y ~ x")`, `glm("y ~ x", family=negative_binomial(theta))` |
 | MASS::polr | `polr("y ~ x", method="logistic")` |
 | MASS::rlm | `rlm("y ~ x", psi="huber")` |
-| quantreg::rq | `rq("y ~ x", tau=0.5, se="nid")` |
+| quantreg::rq | `rq("y ~ x", tau=0.5, se="rank")` |
 
 ## Bayesian statistics
 
