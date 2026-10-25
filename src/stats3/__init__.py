@@ -69,6 +69,7 @@ from stats3.ordinal import polr
 from stats3.ranks import cor_test, friedman_test, kruskal_test, wilcox_test
 from stats3.report import modelsummary
 from stats3.resistant import rlm, rq
+from stats3.gam import gam
 from stats3.robust import vcov_cl, vcov_hc, vcov_nw
 
 # In IPython / Jupyter, turn on unquoted formulas and bare column names in
@@ -112,6 +113,7 @@ __all__ = [
     "fligner_test",
     "friedman_test",
     "Gamma",
+    "gam",
     "gaussian",
     "glance",
     "glm",
