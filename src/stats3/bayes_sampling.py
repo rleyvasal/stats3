@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 
 from stats3._data import step
-from stats3.bayes import BayesianModel, Prior, _sampling_options, prior
+from stats3.bayes import BayesianModel, Prior, _draw_summary, _sampling_options, prior
 from stats3.core import _warn
 from stats3.formula import parse_formula
 from stats3.models import Models, NA_ACTIONS, _ModelStep, _contrasts, _model_frames
@@ -32,7 +32,7 @@ def _random_formula(formula):
     random = []
 
     def remove(match):
-        lhs, group = (s.strip() for s in match.groups())
+        lhs, bars, group = match.group(1).strip(), match.group(2), match.group(3).strip()
         if not re.fullmatch(r"[A-Za-z_]\w*", group):
             raise ValueError("bayes_glm(): random effects need a single grouping column")
         labels = [s.strip() for s in lhs.split("+")]
@@ -42,22 +42,25 @@ def _random_formula(formula):
         slopes = [s for s in labels if s not in ("0", "1")]
         if not intercept and not slopes:
             raise ValueError("bayes_glm(): empty random-effects term")
-        random.append((group, intercept, slopes))
+        # (1 + x | g) correlates the effects, as lme4 and brms do; (1 + x || g) does not.
+        random.append((group, intercept, slopes, bars == "|"))
         return ""
 
-    fixed = re.sub(r"\(([^()|]+)\|([^()|]+)\)", remove, formula)
+    fixed = re.sub(r"\(([^()|]+)(\|\|?)([^()|]+)\)", remove, formula)
     if "|" in fixed:
         raise ValueError("bayes_glm(): unsupported random-effects syntax")
     lhs, rhs = fixed.split("~", 1)
     rhs = re.sub(r"\+(?:\s*\+)+", "+", rhs).strip().strip("+").strip() or "1"
-    if len({g for g, _, _ in random}) != len(random):
+    if len({g for g, *_ in random}) != len(random):
         raise ValueError("bayes_glm(): combine slopes for the same group in one random-effects term")
     return f"{lhs.strip()} ~ {rhs}", random
 
 
-def _rv(pm, name, spec, **kwargs):
+def _distribution(pm, name, spec):
     if not isinstance(spec, Prior):
         raise TypeError("priors must be declared with prior()")
+    if spec.distribution == "lkj":
+        raise ValueError(f"{name}: prior('lkj') is only for group_cor")
     if (name in ("sigma", "alpha", "nu_minus_two") or name.endswith("_sd")) and spec.distribution not in (
         "half_normal", "half_student_t", "exponential", "gamma", "inverse_gamma", "beta"
     ):
@@ -65,7 +68,19 @@ def _rv(pm, name, spec, **kwargs):
     distributions = {"normal": pm.Normal, "student_t": pm.StudentT, "half_normal": pm.HalfNormal,
         "half_student_t": pm.HalfStudentT, "exponential": pm.Exponential, "gamma": pm.Gamma,
         "inverse_gamma": pm.InverseGamma, "beta": pm.Beta}
-    return distributions[spec.distribution](name, **spec.parameters, **kwargs)
+    return distributions[spec.distribution]
+
+
+def _rv(pm, name, spec, **kwargs):
+    return _distribution(pm, name, spec)(name, **spec.parameters, **kwargs)
+
+
+def _correlation_matrix(values, size):
+    """Correlation matrices from draws of their upper triangles, in brms order."""
+    matrix = np.broadcast_to(np.eye(size), (*values.shape[:-1], size, size)).copy()
+    i, j = np.triu_indices(size, 1)
+    matrix[..., i, j] = matrix[..., j, i] = values
+    return matrix
 
 
 class SampledModel(BayesianModel):
@@ -89,20 +104,25 @@ class SampledModel(BayesianModel):
             self.parameter_names = self.parameter_names[1:]
         p = self.x.shape[1]
         if family == "multinomial":
-            if random:
-                raise ValueError("bayes_glm(): multinomial random effects are not included in this first implementation")
             self.parameter_names = [f"{lv}:{n}" for lv in self.response_levels[1:] for n in self.design.names]
-        for j, (group, intercept, slopes) in enumerate(random):
+        # Multinomial fits get a separate, uncorrelated set of varying effects
+        # for each non-reference category, as brms's categorical family does.
+        categories = list(self.response_levels[1:]) if family == "multinomial" else [None]
+        for group, intercept, slopes, correlated in random:
             levels = sorted(frame.rows[group].unique().to_list(), key=str)
             columns = [np.ones(self.n)] if intercept else []
             for slope in slopes:
                 if frame.variables[slope].levels is not None:
                     raise ValueError("bayes_glm(): random slopes must be numeric")
                 columns.append(frame.variables[slope].values)
-            self.random.append({"group": group, "slopes": slopes, "intercept": intercept,
-                "levels": levels, "x": np.column_stack(columns),
-                "codes": np.array([levels.index(v) for v in frame.rows[group].to_list()]),
-                "name": f"group_{j}"})
+            terms = ["(Intercept)"] if intercept else []
+            for k, category in enumerate(categories):
+                self.random.append({"group": group, "slopes": slopes, "intercept": intercept,
+                    "levels": levels, "x": np.column_stack(columns),
+                    "codes": np.array([levels.index(v) for v in frame.rows[group].to_list()]),
+                    "terms": [*terms, *slopes], "category": None if category is None else k,
+                    "dpar": "" if category is None else f"mu{category}_",
+                    "correlated": correlated and len(columns) > 1, "name": f"group_{len(self.random)}"})
         pm = _pymc()
         import pytensor.tensor as pt
 
@@ -132,14 +152,30 @@ class SampledModel(BayesianModel):
                 beta = theta - (theta @ centers) * intercept
             pm.Deterministic("beta", beta, dims="coefficient")
             for effect in self.random:
-                name = effect["name"]
-                spread = effect["x"].std(axis=0, ddof=1) if self.n > 1 else np.zeros(effect["x"].shape[1])
+                name, size = effect["name"], effect["x"].shape[1]
+                spread = effect["x"].std(axis=0, ddof=1) if self.n > 1 else np.zeros(size)
                 spread[~(spread > 0)] = 1  # the intercept column, and constant slopes
-                sd = _rv(pm, f"{name}_sd", self._prior("group_sd", prior("half_normal", sigma=2.5 * scale / spread)),
-                         shape=effect["x"].shape[1])
-                z = pm.Normal(f"z_{name}", 0, 1, shape=(len(effect["levels"]), effect["x"].shape[1]))
-                b = pm.Deterministic(name, z * sd)
-                eta = eta + pt.sum(b[effect["codes"]] * effect["x"], axis=1)
+                sd_prior = self._prior("group_sd", prior("half_normal", sigma=2.5 * scale / spread))
+                z = pm.Normal(f"z_{name}", 0, 1, shape=(len(effect["levels"]), size))
+                if effect["correlated"]:
+                    # Noncentred: b = z L', with L the Cholesky factor of the
+                    # covariance diag(sd) R diag(sd) and R ~ LKJ(eta).
+                    cor_prior = self._prior("group_cor", prior("lkj", eta=2))
+                    if cor_prior.distribution != "lkj":
+                        raise ValueError("group_cor needs prior('lkj', eta=...)")
+                    chol, corr, sd = pm.LKJCholeskyCov(f"z_{name}_cholesky", eta=cor_prior.parameters["eta"], n=size,
+                        sd_dist=_distribution(pm, f"{name}_sd", sd_prior).dist(**sd_prior.parameters, shape=size),
+                        compute_corr=True, store_in_trace=False)
+                    pm.Deterministic(f"{name}_sd", sd)
+                    pm.Deterministic(f"{name}_cor", corr[np.triu_indices(size, 1)])
+                    b = pm.Deterministic(name, z @ chol.T)
+                else:
+                    b = pm.Deterministic(name, z * _rv(pm, f"{name}_sd", sd_prior, shape=size))
+                contribution = pt.sum(b[effect["codes"]] * effect["x"], axis=1)
+                if effect["category"] is None:
+                    eta = eta + contribution
+                else:
+                    eta = eta + contribution[:, None] * np.eye(len(self.response_levels)-1)[effect["category"]]
             if family in ("gaussian", "student_t", "lognormal"):
                 sigma = _rv(pm, "sigma", self._prior("sigma", prior("exponential", lam=1 / scale)))
                 sd = sigma / np.sqrt(frame.weights) if family in ("gaussian", "student_t") else sigma
@@ -270,8 +306,9 @@ class SampledModel(BayesianModel):
             raise ValueError("re_formula must be None or 'population'")
         if self.family_name == "multinomial":
             beta = samples["beta"].reshape(*samples["beta"].shape[:2], len(self.response_levels)-1, x.shape[1])
-            return np.einsum("cdkp,np->cdnk", beta, x) + offset[:, None]
-        eta = np.einsum("cdp,np->cdn", samples["beta"], x) + offset
+            eta = np.einsum("cdkp,np->cdnk", beta, x) + offset[:, None]
+        else:
+            eta = np.einsum("cdp,np->cdn", samples["beta"], x) + offset
         if re_formula == "population":
             return eta
         rng = np.random.default_rng() if rng is None else rng
@@ -283,18 +320,50 @@ class SampledModel(BayesianModel):
             columns.extend(rows[s].cast(pl.Float64).to_numpy() for s in effect["slopes"])
             z = np.column_stack(columns)
             values = samples[effect["name"]]
+            target = eta if effect["category"] is None else eta[..., effect["category"]]
             new = {}
             for i, level in enumerate(rows[group].to_list()):
                 if level in effect["levels"]:
                     b = values[:, :, effect["levels"].index(level)]
                 elif allow_new_levels:
                     if level not in new:
-                        new[level] = rng.normal(size=values.shape[:2]+(z.shape[1],)) * samples[effect["name"]+"_sd"]
+                        new[level] = self._new_effect(samples, effect, rng)
                     b = new[level]
                 else:
                     raise ValueError(f"new level {level!r} in {group!r}; use allow_new_levels=True or re_formula='population'")
-                eta[:, :, i] += np.einsum("cdp,p->cd", b, z[i])
+                target[:, :, i] += np.einsum("cdp,p->cd", b, z[i])
         return eta
+
+    def _new_effect(self, samples, effect, rng):
+        """One draw of a new group's effects per posterior draw."""
+        sd = samples[effect["name"]+"_sd"]
+        z = rng.normal(size=sd.shape)
+        if not effect["correlated"]:
+            return z * sd
+        chol = np.linalg.cholesky(_correlation_matrix(samples[effect["name"]+"_cor"], sd.shape[-1]))
+        return sd * np.einsum("cdkl,cdl->cdk", chol, z)
+
+    def _group_labels(self, effect):
+        return [effect["dpar"] + ("Intercept" if t == "(Intercept)" else t) for t in effect["terms"]]
+
+    def tidy(self, conf_int=False, conf_level=.95, exponentiate=False, vcov=None):
+        """Coefficients, then varying-effect SDs and correlations named as brms
+        names them (``sd_g__Intercept``, ``cor_g__Intercept__x``); these last
+        rows are never exponentiated."""
+        out = super().tidy(conf_int, conf_level, exponentiate, vcov)
+        if not self.random:
+            return out
+        names, values = [], []
+        for effect in self.random:
+            labels, group = self._group_labels(effect), effect["group"]
+            names += [f"sd_{group}__{label}" for label in labels]
+            values.append(self.extra_draws[effect["name"]+"_sd"])
+            if effect["correlated"]:
+                names += [f"cor_{group}__{labels[i]}__{labels[j]}" for i, j in zip(*np.triu_indices(len(labels), 1))]
+                values.append(self.extra_draws[effect["name"]+"_cor"])
+        extra = _draw_summary(np.concatenate(values, axis=-1), names, conf_level).with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("statistic"), pl.lit(None, dtype=pl.Float64).alias("p_value"))
+        return pl.concat([out, self._with_key(extra).select(out.columns)])
 
     def _mean(self, samples, eta):
         from scipy.special import expit, ndtr, softmax
@@ -369,7 +438,7 @@ class SampledModel(BayesianModel):
 def bayes_glm(formula, family="gaussian", *, link=None, priors=None, draws=1000, tune=1000,
               chains=4, seed=None, target_accept=.9, max_treedepth=10, cores=1,
               progressbar=False, weights=None, offset=None, contrasts=None, na_action="omit"):
-    """Bayesian GLMs and independent noncentered random intercepts/slopes.
+    """Bayesian GLMs and noncentered varying intercepts/slopes.
 
     Requires ``stats3[bayes]`` (PyMC 6 and ArviZ 1).
     Families: gaussian, student_t, binomial, poisson, negative_binomial,
@@ -378,9 +447,11 @@ def bayes_glm(formula, family="gaussian", *, link=None, priors=None, draws=1000,
     and log for positive/count outcomes; binomial also has probit/cloglog,
     ordinal has probit. Lognormal eta is the mean log outcome.
 
-    ``(1 + x | subject)`` adds independent varying intercepts/slopes.
-    ``by=`` instead fits separate, unpooled models. Multinomial random
-    effects and correlated varying coefficients are not included.
+    ``(1 + x | subject)`` adds correlated varying intercepts/slopes, with an
+    LKJ prior on their correlation and a noncentred Cholesky factor;
+    ``(1 + x || subject)`` keeps them independent. Multinomial fits get
+    separate effects for each non-reference category, as in brms.
+    ``by=`` instead fits separate, unpooled models.
     Sampling uses predictors centred at their means, as rstanarm does, so
     intercept and cutpoint priors apply at those means; reported
     coefficients are for the uncentred predictors.
@@ -388,9 +459,11 @@ def bayes_glm(formula, family="gaussian", *, link=None, priors=None, draws=1000,
     the intercept Normal(mean response, 2.5 s_y) (Gaussian-type families),
     sigma Exponential(1/s_y), group SDs HalfNormal(2.5 s_y/s_x), where s_y
     is the response SD for gaussian/student_t/lognormal and 1 otherwise;
-    alpha Exponential(1), nu=2+Exponential(1/30), ordered cutpoints Normal(0,5).
-    ``priors`` overrides beta, individual coefficient names, sigma,
-    alpha, group_sd, nu_minus_two and cutpoints with fixed ``prior()`` objects.
+    alpha Exponential(1), nu=2+Exponential(1/30), ordered cutpoints Normal(0,5),
+    varying-effect correlations LKJ(2).
+    ``priors`` overrides beta, individual coefficient names, sigma, alpha,
+    group_sd, group_cor (``prior("lkj", eta=...)``), nu_minus_two and
+    cutpoints with fixed ``prior()`` objects.
     ``family=Gamma()`` warns and uses the log link.
     """
     if callable(family):
@@ -429,7 +502,7 @@ def bayes_glm(formula, family="gaussian", *, link=None, priors=None, draws=1000,
         parsed = parse_formula(fixed, "bayes_glm", data.columns)
         parsed.contrasts, parsed.offset_arg = _contrasts(contrasts, parsed, "bayes_glm"), offset
         frame_formula = copy.deepcopy(parsed)
-        extras = [v for group, _, slopes in random for v in [group, *slopes]]
+        extras = [v for group, _, slopes, _ in random for v in [group, *slopes]]
         for label in extras:
             if label not in frame_formula.variables():
                 frame_formula.terms.append((label,))
@@ -439,3 +512,36 @@ def bayes_glm(formula, family="gaussian", *, link=None, priors=None, draws=1000,
         return Models(fits, data) if data._groups else fits[0]
 
     return _ModelStep(apply, "bayes_glm")
+
+
+def bayes_ranef(model, *, level=.95):
+    """Group-level deviations from the population coefficients, as brms's
+    ``ranef()``: one row per grouping column, group level and term, with
+    posterior means, SDs, equal-tail credible intervals and P(deviation>0).
+    Multinomial terms are prefixed by their category, as the coefficients are.
+    """
+    from stats3.bayes import _bayesian_fits
+
+    frames = []
+    for fit in _bayesian_fits(model):
+        effects = getattr(fit, "random", [])
+        if not effects:
+            raise ValueError("bayes_ranef(): the model has no varying effects")
+        parts = []
+        groups = list(dict.fromkeys(e["group"] for e in effects))
+        for effect in effects:
+            values = fit.extra_draws[effect["name"]]
+            n_levels, size = values.shape[2:]
+            prefix = "" if effect["category"] is None else f"{fit.response_levels[effect['category']+1]}:"
+            table = _draw_summary(values.reshape(fit.chains, fit.draws, -1),
+                                  [prefix+t for t in effect["terms"]] * n_levels, level)
+            parts.append(pl.concat([pl.DataFrame({
+                "group": [effect["group"]] * n_levels * size,
+                "level": pl.Series([str(v) for v in effect["levels"] for _ in range(size)], dtype=pl.String),
+                "__group": [groups.index(effect["group"])] * n_levels * size,
+                "__level": np.repeat(np.arange(n_levels), size)}), table], how="horizontal"))
+        # Grouping column, then level, then terms (categories in order).
+        out = pl.concat(parts).with_row_index("__order").sort("__group", "__level", "__order").drop(
+            "__group", "__level", "__order")
+        frames.append(fit._with_key(out))
+    return model._stack(frames) if isinstance(model, Models) else model._write(frames[0])

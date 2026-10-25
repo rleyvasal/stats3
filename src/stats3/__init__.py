@@ -16,7 +16,7 @@ from stats3.bayes import (
     hypothesis, posterior_draws, posterior_epred, posterior_predict, posterior_summary,
     pp_check, prior, prior_predict,
 )
-from stats3.bayes_sampling import bayes_glm
+from stats3.bayes_sampling import bayes_glm, bayes_ranef
 from stats3.bayes_marginal import bayes_emmeans
 from stats3.checks import (
     bartlett_test,
@@ -88,6 +88,7 @@ __all__ = [
     "bayes_glm",
     "bayes_emmeans",
     "bayes_lm",
+    "bayes_ranef",
     "hypothesis",
     "posterior_draws",
     "posterior_epred",

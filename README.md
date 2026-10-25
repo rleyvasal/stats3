@@ -313,16 +313,19 @@ pp_check(fit, statistic="sd", seed=42)
 
 The sampled engine supports Gaussian, Student-t, binomial, Poisson,
 negative binomial, gamma, lognormal, exponential, ordinal and multinomial
-models, plus independent varying intercepts/slopes. It uses optional PyMC 6
+models, plus varying intercepts/slopes: `(1 + x | g)` correlated under an
+LKJ prior (named as brms names them in `tidy()`), `(1 + x || g)`
+independent, multinomial ones per category, with `bayes_ranef` group-level
+summaries. It uses optional PyMC 6
 and ArviZ 1 dependencies. All four data backends, formulas, offsets, grouped
 fits and missing-row alignment carry through. `posterior_draws`,
-`posterior_epred`, `prior_predict`, `bayes_emmeans`, contrasts and ROPE
+`posterior_epred`, `prior_predict`, `bayes_emmeans` (category probabilities
+for ordinal and multinomial fits), contrasts and ROPE
 probabilities expose posterior uncertainty; `bayes_compare` offers LOO,
 WAIC and exact Gaussian model evidence. `bayes_binom_test` and
 `bayes_poisson_test` give exact conjugate scalar inference and log Bayes factors.
 
-This is a first Bayesian implementation. Correlated varying effects,
-multinomial varying effects, categorical marginal means, custom likelihoods,
+This is a first Bayesian implementation. Custom likelihoods,
 survival/time-series models and general model-evidence estimation remain
 outside its scope. Frequentist multinomial and mixed models are still
 pending; Bayesian work now takes priority over those remaining tier 2 items.

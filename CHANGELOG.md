@@ -6,6 +6,10 @@ under **Changed**.
 
 ## Unreleased
 
+### Added
+
+- `bayes_glm` varying effects are complete. `(1 + x | g)` now estimates correlated intercepts and slopes, with an LKJ prior on their correlation (`LKJ(2)` by default; `priors={"group_cor": prior("lkj", eta=...)}`) and a noncentred Cholesky parameterization; `(1 + x || g)` keeps independent effects. Multinomial fits accept varying effects, one set per non-reference category, as brms's `categorical()` does. `tidy()` adds the group SDs and correlations under brms's names (`sd_g__Intercept`, `cor_g__Intercept__x`), and the new `bayes_ranef()` summarizes group-level deviations with credible intervals. `bayes_emmeans` gives ordinal and multinomial category probabilities per reference-grid cell, computed draw by draw, with contrasts within each category and emmeans's latent scale for `type="link"`. Checked against independent log-density formulas, simulated-parameter recovery, and brms fits with the same priors.
+
 ### Changed
 
 - The `bayes` extra now needs PyMC 6 (`pymc>=6.3,<7`, with PyTensor 3) and ArviZ 1 (`arviz>=1.1,<2`). PyTensor 2, which PyMC 5 requires, cannot compile its C extensions with Apple clang 21 (Xcode 27): it passes the `-ld64` linker flag that this clang removed, so every sampled `bayes_glm` fit failed on current macOS toolchains without a local compiler wrapper. PyTensor 3 chooses the flag by the compiler's version instead, and runs the model graph through Numba by default, so the C++ compiler only builds PyTensor's small bootstrap module. `bayes_compare(method="loo")` still uses ArviZ's PSIS-LOO; ArviZ 1 dropped WAIC, so `method="waic"` is now computed by stats3 from the pointwise log likelihoods with the same definition, and both methods return the same table as before (rank, `elpd_*`, `p_*`, `elpd_diff`, stacking `weight`, `se`, `dse`, `warning`). As in ArviZ 1, `se` and `dse` now use the sample variance of the pointwise values (ArviZ 0.x used the population variance, a factor of `sqrt(n/(n-1))` smaller). A sampled fit's `idata` is now an xarray `DataTree`, as PyMC 6 returns.

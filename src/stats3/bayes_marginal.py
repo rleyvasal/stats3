@@ -71,8 +71,14 @@ def bayes_emmeans(model, specs, *, by=None, at=None, weights="equal", type="resp
     Grids follow ``emmeans``. ``weights`` is equal, cells, or proportional.
     Response transformations happen *before* averaging. Random effects
     are set to zero (population coefficients); these are not integrals over
-    the random-effect distribution. Ordinal/multinomial means are deferred.
-    Offset arguments must name a column and contribute their fitted mean.
+    the random-effect distribution. Offset arguments must name a column and
+    contribute their fitted mean.
+
+    Ordinal and multinomial fits give one marginal probability per
+    reference-grid cell and response ``category``, averaged draw by draw;
+    contrasts compare cells within each category. ``type="link"`` follows
+    emmeans's ``mode="latent"``: the ordinal linear predictor minus the mean
+    cutpoint, or the multinomial logits centred across categories.
     """
     from stats3._data import column_name
     from stats3.emm import _cell_counts, _reference_grid
@@ -81,14 +87,12 @@ def bayes_emmeans(model, specs, *, by=None, at=None, weights="equal", type="resp
     _check_conf_level(level)
     specs = [specs] if isinstance(specs, str) else list(specs)
     by = [] if by is None else ([by] if isinstance(by, str) else list(by))
-    if not specs or len(set([*by, *specs])) != len([*by, *specs]):
+    if not specs or len(set([*by, *specs])) != len([*by, *specs]) or "category" in [*by, *specs]:
         raise ValueError("bayes_emmeans(): specs and by must be nonempty/distinct column names")
     if weights not in ("equal", "cells", "proportional") or type not in ("response", "link"):
         raise ValueError("use weights='equal'/'cells'/'proportional', type='response'/'link'")
     parts = []
     for fit in _bayesian_fits(model):
-        if fit.family_name in ("ordinal", "multinomial"):
-            raise ValueError("Bayesian ordinal/multinomial marginal means are not implemented; use posterior_epred()")
         grid, factors = _reference_grid(fit, at or {})
         if not set([*specs, *by]) <= set(grid.columns):
             raise ValueError("specs/by must name model variables")
@@ -110,6 +114,12 @@ def bayes_emmeans(model, specs, *, by=None, at=None, weights="equal", type="resp
         samples = fit._posterior_samples()
         eta = fit._eta(samples, x, off, rows, re_formula="population")
         predictions = eta if type == "link" else fit._mean(samples, eta)
+        # Link-scale categorical means follow emmeans's mode="latent".
+        if type == "link" and fit.family_name == "ordinal":
+            predictions = eta - samples["cutpoints"].mean(axis=-1)[..., None]
+        elif type == "link" and fit.family_name == "multinomial":
+            logits = np.concatenate([np.zeros((*eta.shape[:-1], 1)), eta], axis=-1)
+            predictions = logits - logits.mean(axis=-1, keepdims=True)
         counts = _cell_counts(fit, grid, factors)
         keep = [*by, *specs]
         other = [f for f in factors if f not in keep]
@@ -130,13 +140,19 @@ def bayes_emmeans(model, specs, *, by=None, at=None, weights="equal", type="resp
                 mask &= np.array([v == value for v in grid[name].to_list()])
             if w[mask].sum() == 0:
                 raise ValueError("a requested marginal mean has no observed cells under these weights")
-            values.append(np.average(predictions[:, :, mask], weights=w[mask], axis=-1))
-        values = np.stack(values, axis=-1)
+            values.append(np.average(predictions[:, :, mask], weights=w[mask], axis=2))
+        values = np.stack(values, axis=2)
+        split = list(by)
+        if values.ndim == 4:
+            # One block of cells per response category, category outermost.
+            labels = pl.concat([labels.with_columns(pl.lit(level).alias("category")) for level in fit.response_levels])
+            values = np.concatenate(np.moveaxis(values, -1, 0), axis=-1)
+            split.append("category")
         for name, value in fit.key.items():
             labels = labels.with_columns(pl.lit(value).alias(name))
-        keys = [*fit.groups, *by]
-        if by:
-            indices = labels.with_row_index("__i").partition_by(by, maintain_order=True)
+        keys = [*fit.groups, *split]
+        if split:
+            indices = labels.with_row_index("__i").partition_by(split, maintain_order=True)
             for subset in indices:
                 selected = subset["__i"].to_numpy()
                 parts.append((labels[selected], values[:, :, selected], keys))
