@@ -29,12 +29,16 @@ class Prior:
 
 def prior(distribution="normal", **parameters):
     """Declare normal, student_t, half_normal, half_student_t, exponential,
-    gamma, inverse_gamma or beta priors using PyMC's parameter names.
+    gamma, inverse_gamma or beta priors using PyMC's parameter names, or
+    ``prior("lkj", eta=2)`` for varying-effect correlations.
     """
     allowed = {"normal", "student_t", "half_normal", "half_student_t", "exponential",
-               "gamma", "inverse_gamma", "beta"}
+               "gamma", "inverse_gamma", "beta", "lkj"}
     if distribution not in allowed:
         raise ValueError(f"prior(): distribution must be one of {sorted(allowed)}")
+    if distribution == "lkj" and (set(parameters) != {"eta"} or np.ndim(parameters["eta"]) != 0
+                                  or not np.isfinite(parameters["eta"]) or parameters["eta"] <= 0):
+        raise ValueError("prior('lkj') needs one positive scalar eta")
     return Prior(distribution, dict(parameters))
 
 

@@ -91,6 +91,9 @@ families):
 - `sigma`: `Exponential(1 / s_y)`;
 - varying-effect SDs: `HalfNormal(2.5 s_y)` for intercepts and
   `HalfNormal(2.5 s_y / s_x)` for slopes;
+- varying-effect correlations: `LKJ(2)`, which mildly favours smaller
+  correlations (brms's own default is `LKJ(1)`, uniform over correlation
+  matrices; rstanarm's `decov()` is also LKJ-based);
 - `alpha`: `Exponential(1)`;
 - `nu_minus_two`: `Exponential(1/30)`;
 - ordered cutpoints: iid `Normal(0, 5)` restricted to increasing order.
@@ -111,11 +114,13 @@ Sampled Gaussian priors are independent of sigma and differ from the exact
 engine's conjugate conditional prior; the two engines do not fit the same
 default model.
 
-Override `beta`, an individual coefficient name (including `(Intercept)`),
-`sigma`, `alpha`, `group_sd`, `nu_minus_two`, or `cutpoints` in `priors`.
+Override `beta`, an individual coefficient name (including `(Intercept)`, or
+`blue:(Intercept)` for a multinomial category), `sigma`, `alpha`, `group_sd`,
+`group_cor`, `nu_minus_two`, or `cutpoints` in `priors`.
 Unused names raise an error. `prior()` accepts `normal`, `student_t`,
 `half_normal`, `half_student_t`, `exponential`, `gamma`, `inverse_gamma`,
-and `beta`, using PyMC parameter names. Choose distributions whose support
+and `beta`, using PyMC parameter names, and `prior("lkj", eta=...)` for
+`group_cor` only. Choose distributions whose support
 matches the parameter. Cutpoint priors must have scalar, exchangeable
 parameters; prior predictive cutpoints are sorted iid prior draws.
 
@@ -128,17 +133,38 @@ predict(fit, newdata, re_formula="population")     # subject effects set to zero
 posterior_predict(fit, newdata, allow_new_levels=True, seed=42)
 ```
 
-Varying coefficients are independent and noncentered; the `|` syntax here
-does not estimate correlations. Slopes must name numeric columns. Multiple
-grouping columns are supported as separate terms. Unknown groups raise by
+`(1 + x | subject)` estimates correlated varying intercepts and slopes, as
+lme4, brms and rstanarm do: each subject's effects are multivariate normal
+with SDs `group_sd` and correlation matrix `R ~ LKJ(eta)`. Sampling is
+noncentred: `b = z L'`, with `z` standard normal and `L` the Cholesky factor
+of `diag(sd) R diag(sd)`. `(1 + x || subject)` keeps independent effects,
+`b = z * sd`; a single-term `(1 | subject)` is the same either way. Slopes
+must name numeric columns. Multiple grouping columns are supported as
+separate terms, uncorrelated with each other.
+
+Multinomial models give each non-reference category its own varying
+effects, as brms's `categorical()` family does without a shared `|ID|`:
+separate SDs (and correlations), uncorrelated across categories.
+
+`tidy()` lists the coefficients, then the group SDs and correlations under
+brms's names: `sd_subject__Intercept`, `sd_subject__x`,
+`cor_subject__Intercept__x`, and `sd_g__mublue_Intercept` for a multinomial
+category. `exponentiate=True` leaves these rows unchanged.
+`bayes_ranef(fit)` summarizes each group's deviations from the population
+coefficients, as brms's `ranef()`: one row per grouping column, level and
+term (`group`, `level`, `term`), with posterior mean, SD, equal-tail
+credible interval and `prob_positive`. Raw draws stay in
+`posterior_draws()` (`group_0`, `group_0_sd`, `group_0_cor`, numbered in
+formula order, multinomial categories in turn). Unknown groups raise by
 default; `allow_new_levels=True` samples one new effect per distinct new
-group and posterior draw, preserving within-group dependence. The seed
+group and posterior draw, from that draw's SDs and correlations, preserving
+within-group dependence. The seed
 controls these predictions. Setting effects to zero is not the same as
 integrating a nonlinear response over their distribution.
 
 `by=` / tidy3 `group_by()` fits independent models with independently seeded
 draws; it does not pool their parameters. Select `models[0]` for predictive
-draws. Multinomial varying effects are deferred.
+draws.
 
 ## Posterior workflow
 
@@ -189,8 +215,15 @@ The reference grid and equal/cell/proportional weights follow `emmeans`.
 `type="response"` transforms each posterior draw before averaging.
 `type="link"` averages linear predictors. Offsets use the same cell weights;
 an `offset=` column contributes its mean over fitted rows. Varying effects
-are zero for these marginal means. Multinomial/ordinal marginal means are
-deferred. Pairwise/named contrasts retain joint posterior draws and report
+are zero for these marginal means.
+
+Ordinal and multinomial fits give marginal category probabilities: one row
+per reference-grid cell and response `category`, each the weighted average
+of that cell's probabilities computed draw by draw, as emmeans's
+`mode="prob"`. Contrasts compare cells within each category.
+`type="link"` follows emmeans's `mode="latent"`: the ordinal linear
+predictor minus the mean cutpoint, or the multinomial logits centred across
+categories. Pairwise/named contrasts retain joint posterior draws and report
 credible intervals and sign probabilities; frequentist multiplicity
 adjustments are not applied. `emmeans()` directs Bayesian fits to this API.
 
@@ -213,6 +246,16 @@ separate weighted Gaussian, logistic and Poisson tests check Monte Carlo
 accuracy against independent quadrature. All ten likelihood families run
 through all four data backends and are checked against independent SciPy
 pointwise likelihoods, response means and predictive distributions.
+Correlated and multinomial varying effects are checked by comparing the
+model's log density with independent formulas (including the Jacobian of
+the Cholesky parameterization), by recovering simulated SDs, correlations
+and group effects, and loosely against brms 2.23 fits with the same priors
+(`tests/r_brms_cases.R`, stored in `tests/data/brms_groups.json`): posterior
+means within a quarter posterior SD and SDs within 20%, a distributional
+comparison rather than an exact one. PyMC 6.3's LKJ log density carries a
+constant of the wrong sign (`+log B(1/2, eta)` instead of `-log B(1/2, eta)`
+for two terms); it does not change the posterior, and stats3 has no
+quantity that depends on it.
 
 LOO uses ArviZ's PSIS-LOO and returns its standard errors and reliability
 warning; WAIC is computed by stats3 from the pointwise log likelihoods, as
@@ -244,8 +287,8 @@ comparisons of numeric group means via factor coefficients/contrasts.
 
 ## Remaining scope
 
-Correlated varying effects, multinomial varying effects, categorical marginal
-means/augmentation, general model evidence, custom likelihoods, censoring,
+Categorical augmentation, varying effects correlated across grouping
+terms or multinomial categories (brms's `|ID|`), general model evidence, custom likelihoods, censoring,
 survival, time-series and nonparametric Bayesian models are not implemented.
 Bayesian tests are not claimed to reproduce unspecified defaults from R's
 BayesFactor, brms or rstanarm. Exact results are checked against independent
