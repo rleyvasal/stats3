@@ -3,9 +3,10 @@
 import subprocess
 
 import numpy as np
+import polars as pl
 import pytest
 
-from stats3 import Gamma, contrast, emmeans, gaussian, glm, lm, pairs, tidy
+from stats3 import Gamma, contrast, emmeans, gaussian, glm, lm, pairs, tidy, vcov_cl
 from oracle import BACKENDS, DATA, R_COMMAND, _oracle, as_input, as_polars, assert_matches_r, penguins
 
 
@@ -133,3 +134,76 @@ def test_grouped_emmeans_matches_r(backend, r_emmeans):
     result = tidy(emmeans(lm(frame, "body_mass_g ~ flipper_length_mm + sex", by=by), "sex"))
     assert type(result) is type(frame)
     assert_matches_r(result, r_emmeans["grouped"])
+
+
+def _housing():
+    import warnings
+
+    from test_ordinal import housing
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return housing().with_columns(Rev=pl.col("Sat"))
+
+
+def _polr(data, formula="Sat ~ Infl + Type + Cont", **kwargs):
+    from stats3 import polr
+
+    return polr(data, formula, weights="Freq", **kwargs)
+
+
+POLR_CASES = {
+    "polr_latent": lambda d: emmeans(_polr(d), "Infl"),
+    "polr_latent_pairs": lambda d: pairs(emmeans(_polr(d), "Infl")),
+    "polr_latent_effects": lambda d: contrast(emmeans(_polr(d), "Infl"), "eff"),
+    "polr_prob": lambda d: emmeans(_polr(d), "Infl", by="Sat", mode="prob"),
+    "polr_prob_pairs": lambda d: pairs(emmeans(_polr(d), "Infl", by="Sat", mode="prob")),
+    "polr_prob_two": lambda d: emmeans(_polr(d), ["Infl", "Sat"], mode="prob"),
+    "polr_mean_class": lambda d: emmeans(_polr(d), "Infl", mode="mean.class"),
+    "polr_mean_class_pairs": lambda d: pairs(emmeans(_polr(d), "Infl", mode="mean.class")),
+    "polr_by": lambda d: emmeans(_polr(d), "Infl", by="Cont"),
+    "polr_proportional": lambda d: emmeans(_polr(d), "Infl", weights="proportional"),
+    "polr_cells": lambda d: emmeans(_polr(d), "Infl", weights="cells"),
+    "polr_prob_cells": lambda d: emmeans(_polr(d), "Infl", by="Sat", mode="prob", weights="cells"),
+    "polr_offset": lambda d: emmeans(_polr(d, "Sat ~ Infl + Type + offset(off)"), "Infl"),
+    "polr_offset_prob": lambda d: emmeans(_polr(d, "Sat ~ Infl + Type + offset(off)"), "Infl", by="Sat", mode="prob"),
+    "polr_probit_prob": lambda d: emmeans(_polr(d, method="probit"), "Infl", by="Sat", mode="prob"),
+    "polr_cloglog_mean_class": lambda d: emmeans(_polr(d, method="cloglog"), "Infl", mode="mean.class"),
+    "polr_cauchit_prob": lambda d: emmeans(_polr(d, method="cauchit"), "Infl", by="Sat", mode="prob"),
+    "polr_loglog_prob": lambda d: emmeans(_polr(d, method="loglog"), "Infl", by="Sat", mode="prob"),
+    "polr_loglog_mean_class": lambda d: emmeans(_polr(d, method="loglog"), "Infl", mode="mean.class"),
+    "polr_robust": lambda d: emmeans(_polr(d), "Infl", vcov=vcov_cl("Type")),
+    "polr_robust_prob": lambda d: emmeans(_polr(d), "Infl", by="Sat", mode="prob", vcov=vcov_cl("Type", type="HC1")),
+}
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("name", sorted(POLR_CASES))
+def test_polr_emmeans_matches_r(name, backend, r_emmeans):
+    frame, _ = as_input(_housing(), backend, [])
+    result = tidy(POLR_CASES[name](frame))
+    assert type(result) is type(frame)
+    # The polr estimates match MASS at optimizer accuracy (see test_ordinal),
+    # so the means and their standard errors do too. Cauchit is looser: MASS's
+    # optimum is set by its stopping rule (see test_ordinal). Cluster score
+    # sums nearly cancel, so robust standard errors amplify that error.
+    rel, absolute = (2e-6, 1e-7)
+    if "cauchit" in name:
+        rel, absolute = (3e-5, 3e-6)
+    if "robust" in name:
+        rel, absolute = (3e-4, 1e-4)
+    loose = {c: (rel, absolute) for c in ("estimate", "std_error", "statistic", "conf_low", "conf_high")}
+    # Tukey p-values and intervals use R's ptukey/qtukey accuracy, as above.
+    loose["p_value"] = (1e-6, 1e-9)
+    if "pairs" in name:
+        loose.update(conf_low=(max(rel, 1e-6), max(absolute, 1e-6)), conf_high=(max(rel, 1e-6), max(absolute, 1e-6)))
+    assert_matches_r(result, r_emmeans[name], loose=loose)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_grouped_polr_emmeans_matches_r(backend, r_emmeans):
+    frame, by = as_input(_housing(), backend, ["Cont"])
+    result = tidy(emmeans(_polr(frame, "Sat ~ Infl + Type", by=by), "Infl"))
+    assert type(result) is type(frame)
+    loose = {c: (2e-6, 1e-7) for c in ("estimate", "std_error", "conf_low", "conf_high")}
+    assert_matches_r(result, r_emmeans["polr_grouped"], loose=loose)

@@ -6,6 +6,10 @@ under **Changed**.
 
 ## Unreleased
 
+### Added
+
+- `polr()` gaps closed: `tidy(fit, conf_int=True)` now gives MASS's profile likelihood intervals (`confint.polr`, slopes only), with `conf_method="wald"` for the previous Wald intervals; `method="cauchit"` (with MASS's ±100 clamp of the latent bounds, which moves the cauchit optimum); `tidy(fit, vcov=vcov_cl(...))` and `vcov(fit, vcov_cl(...))` reproduce sandwich's `vcovCL` (HC0/HC1, multi-way, `cadjust`), tested as `coeftest`, while `vcovHC`, `NeweyWest`, clustered HC2/HC3 and loglog fits raise R's errors; `emmeans(fit, "x", mode=...)` gives emmeans' `"latent"`, `"prob"` and `"mean.class"` scales, with `pairs` and `contrast`, cell weights from the prior weights, offsets and robust covariance. Checked against MASS, sandwich and emmeans on all four backends; loglog probabilities are validated through the equivalent cloglog fit of the reversed response, since emmeans 2.0.4 mishandles loglog.
+
 ### Changed
 
 - The `bayes` extra now needs PyMC 6 (`pymc>=6.3,<7`, with PyTensor 3) and ArviZ 1 (`arviz>=1.1,<2`). PyTensor 2, which PyMC 5 requires, cannot compile its C extensions with Apple clang 21 (Xcode 27): it passes the `-ld64` linker flag that this clang removed, so every sampled `bayes_glm` fit failed on current macOS toolchains without a local compiler wrapper. PyTensor 3 chooses the flag by the compiler's version instead, and runs the model graph through Numba by default, so the C++ compiler only builds PyTensor's small bootstrap module. `bayes_compare(method="loo")` still uses ArviZ's PSIS-LOO; ArviZ 1 dropped WAIC, so `method="waic"` is now computed by stats3 from the pointwise log likelihoods with the same definition, and both methods return the same table as before (rank, `elpd_*`, `p_*`, `elpd_diff`, stacking `weight`, `se`, `dse`, `warning`). As in ArviZ 1, `se` and `dse` now use the sample variance of the pointwise values (ArviZ 0.x used the population variance, a factor of `sqrt(n/(n-1))` smaller). A sampled fit's `idata` is now an xarray `DataTree`, as PyMC 6 returns.

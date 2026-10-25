@@ -1,5 +1,5 @@
 ordinal_cases <- function() {
-  suppressPackageStartupMessages(library(MASS))
+  suppressPackageStartupMessages({library(MASS); library(sandwich)})
   d <- housing
   d$off <- seq(-.3,.3,length.out=nrow(d))
   d$x <- (seq_len(nrow(d)) %% 7)/4
@@ -9,6 +9,9 @@ ordinal_cases <- function() {
     probit=list(formula=Sat~Infl+Type+Cont,method="probit"),
     loglog=list(formula=Sat~Infl+Type+Cont,method="loglog"),
     cloglog=list(formula=Sat~Infl+Type+Cont,method="cloglog"),
+    # MASS's default start fails for cauchit here; start from the logistic fit.
+    cauchit=list(formula=Sat~Infl+Type+Cont,method="cauchit",
+                 start=c(-0.4,-1.2,0.6,0.4,1.1,-0.4,-0.5,0.7)*c(-1,-1,-1,-1,-1,-1,1,1)),
     intercept=list(formula=Sat~1),
     numeric=list(formula=Sat~x+Cont),
     no_intercept=list(formula=Sat~0+x),
@@ -24,6 +27,29 @@ ordinal_cases <- function() {
     }
     do.call(polr,c(spec,list(data=data,Hess=TRUE,control=list(reltol=1e-13,maxit=1000))))
   }
+  # confint.polr profiles the slopes only; the thresholds get no interval.
+  profile_table <- function(f,tidy,level=.95) {
+    ci <- matrix(NA_real_,nrow(tidy),2)
+    p <- length(coef(f))
+    # profile.polr drops the model matrix's first column as the intercept,
+    # so it fails for 0 + x; stats3 profiles the same model as Sat ~ x.
+    if(attr(terms(f),"intercept")==0) f <- update(f,.~.+1,data=f$model,weights=`(weights)`)
+    if(p) ci[seq_len(p),] <- matrix(suppressMessages(confint(f,level=level)),p,2)
+    tidy$conf_low <- ci[,1]; tidy$conf_high <- ci[,2]
+    tidy
+  }
+  # lmtest's coeftest/coefci (t on df.residual) with sandwich's vcovCL, for
+  # every parameter; coeftest itself lists the slopes only.
+  robust_table <- function(f,v) {
+    b <- c(coef(f),f$zeta); se <- sqrt(diag(v)); t <- b/se; q <- qt(.975,f$df.residual)
+    data.frame(term=names(b),estimate=unname(b),std_error=unname(se),statistic=unname(t),
+               p_value=unname(2*pt(-abs(t),f$df.residual)),conf_low=unname(b-q*se),conf_high=unname(b+q*se))
+  }
+  robust_vcov <- function(f,v) {
+    out <- data.frame(term=rownames(v),v,check.names=FALSE)
+    names(out) <- c("term",rownames(v))
+    out
+  }
   tables <- function(f,extra_offset=FALSE) {
     b <- c(coef(f),f$zeta); v <- vcov(f); se <- sqrt(diag(v))
     probs <- f$fitted.values
@@ -36,13 +62,14 @@ ordinal_cases <- function() {
     off <- model.offset(mf)
     if(!is.null(off)) eta <- eta+off
     if(extra_offset) eta <- eta+new$off
-    cdf <- switch(f$method,logistic=plogis,probit=pnorm,loglog=MASS:::pgumbel,cloglog=MASS:::pGumbel)
+    cdf <- switch(f$method,logistic=plogis,probit=pnorm,loglog=MASS:::pgumbel,cloglog=MASS:::pGumbel,cauchit=pcauchy)
     probability <- t(vapply(eta,function(e) diff(c(0,cdf(f$zeta-e),1)),numeric(length(f$lev))))
     colnames(probability) <- f$lev
     covariance <- data.frame(term=names(b),v,check.names=FALSE)
     names(covariance) <- c("term",names(b))
-    list(tidy=data.frame(term=names(b),estimate=unname(b),std_error=unname(se),statistic=unname(b/se),
-          p_value=NA_real_,conf_low=unname(b-qnorm(.975)*se),conf_high=unname(b+qnorm(.975)*se)),
+    tidy <- data.frame(term=names(b),estimate=unname(b),std_error=unname(se),statistic=unname(b/se),
+          p_value=NA_real_,conf_low=unname(b-qnorm(.975)*se),conf_high=unname(b+qnorm(.975)*se))
+    list(tidy=tidy,profile=profile_table(f,tidy),profile90=profile_table(f,tidy,.9),
       vcov=covariance,probs=as.data.frame(probs),class=data.frame(fit=classes(probs)),
       new_probs=as.data.frame(probability),new_class=data.frame(fit=classes(probability)),
       augment=data.frame(.fitted=classes(probs),.linear_predictor=unname(f$lp)),
@@ -63,5 +90,21 @@ ordinal_cases <- function() {
   out$compare <- data.frame(term=c("Sat ~ 1","Sat ~ Infl + Type + Cont"),
       df_residual=comparison[[2]],residual_deviance=comparison[[3]],df=comparison[[5]],
       statistic=comparison[[6]],p_value=comparison[[7]])
+  robust <- list(
+    cluster=list(spec="logistic",args=list(cluster=~Type)),
+    hc1=list(spec="logistic",args=list(cluster=~Type,type="HC1")),
+    no_cadjust=list(spec="logistic",args=list(cluster=~Type,cadjust=FALSE)),
+    two_way=list(spec="logistic",args=list(cluster=~Type+Cont)),
+    probit=list(spec="probit",args=list(cluster=~Infl)),
+    cauchit=list(spec="cauchit",args=list(cluster=~Type)),
+    offset=list(spec="offset",args=list(cluster=~Type)),
+    zero_weights=list(spec="zero_weights",args=list(cluster=~Type)),
+    unweighted=list(spec="unweighted",args=list(cluster=~Type)))
+  specs$unweighted <- list(formula=Sat~x+Cont,weights=rep(1,nrow(d)))
+  out$robust <- lapply(robust,function(r) {
+    f <- fit_one(specs[[r$spec]])
+    v <- do.call(vcovCL,c(list(f),r$args))
+    list(tidy=robust_table(f,v),vcov=robust_vcov(f,v),hessian=robust_vcov(f,vcov(f)))
+  })
   out
 }

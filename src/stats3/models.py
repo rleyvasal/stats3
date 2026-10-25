@@ -1519,8 +1519,9 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
         unknown = set(kwargs) - {"conf_method", "vcov"}
         if unknown:
             raise TypeError(f"tidy(): unexpected arguments for a model: {sorted(unknown)}")
-        if "conf_method" in opts and not all(isinstance(f, GeneralizedLinearModel) for f in _fits(model)):
-            raise TypeError("tidy(): conf_method is for glm fits")
+        if "conf_method" in opts and not all(isinstance(f, GeneralizedLinearModel) or getattr(f, "kind", None) == "ordinal"
+                                             for f in _fits(model)):
+            raise TypeError("tidy(): conf_method is for glm and polr fits")
         if opts.get("vcov") is not None:
             as_vcov(opts["vcov"])
         return _table(model, "tidy", **opts)

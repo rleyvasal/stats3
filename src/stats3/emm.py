@@ -91,13 +91,20 @@ def _reference_grid(fit: Any, at: Mapping[str, Any]) -> tuple[pl.DataFrame, list
 def _cell_counts(fit: Any, grid: pl.DataFrame, factors: list[str]) -> np.ndarray:
     """How many of the model's rows fall in each grid cell (emmeans' .wgt.)."""
     if not factors:
-        return np.full(grid.height, float(fit.frame.rows.height))
-    counts = fit.frame.rows.group_by(factors).len()
+        return np.full(grid.height, float(_weighted_rows(fit)["len"].sum()))
+    counts = _weighted_rows(fit).group_by(factors).agg(pl.col("len").sum())
     counts = counts.with_columns(pl.col(n).cast(grid.schema[n]) for n in factors)
     joined = grid.select(factors).with_row_index("__i").join(
         counts, on=factors, how="left", nulls_equal=True
     ).sort("__i")
     return joined["len"].fill_null(0).cast(pl.Float64).to_numpy()
+
+
+def _weighted_rows(fit: Any) -> pl.DataFrame:
+    """The model's rows with a ``len`` column to total: 1 per row, or for
+    polr fits the prior weights, as emmeans' ``.wgt.`` for clm/polr."""
+    weights = fit.prior_weights if _ordinal(fit) else np.ones(fit.frame.rows.height)
+    return fit.frame.rows.with_columns(len=pl.Series(np.asarray(weights, dtype=float)))
 
 
 def _numeric_label(levels: Sequence[Any]) -> bool:
@@ -116,17 +123,10 @@ class _Estimates:
         self.fit, self.keys, self.labels, self.lin, self.by = fit, keys, labels, lin, by
         self.vcov, self.type, self.level = vcov, type_, level
         self.offset = np.zeros(labels.height)
-        kept = fit.qr.kept
-        b = np.where(np.isnan(fit.coef), 0.0, fit.coef)
-        self.estimate = lin @ b
-        if vcov is None:
-            v = fit.cov_unscaled * fit.scale
-        else:
-            from stats3.robust import as_vcov, covariance
-
-            v = covariance(fit, as_vcov(vcov))
-        lk = lin[:, kept]
-        self.se = np.sqrt(np.einsum("ij,jk,ik->i", lk, v, lk))
+        self.b, self.v, self.kept = _parameters(fit, vcov)
+        self.estimate = lin @ self.b
+        lk = lin[:, self.kept]
+        self.se = np.sqrt(np.einsum("ij,jk,ik->i", lk, self.v, lk))
         estimable = _estimable(fit, lin)
         self.estimate[~estimable] = np.nan
         self.se[~estimable] = np.nan
@@ -134,9 +134,30 @@ class _Estimates:
         self.df[~np.isfinite(self.estimate)] = np.nan
 
 
+def _parameters(fit: Any, vcov: Any) -> tuple[np.ndarray, np.ndarray, list[int]]:
+    """The parameters the grid's linear functions apply to, their covariance,
+    and which columns of the linear functions they are."""
+    if _ordinal(fit):
+        b, v = fit._emm_parameters(vcov)
+        return b, v, list(range(len(b)))
+    if vcov is None:
+        v = fit.cov_unscaled * fit.scale
+    else:
+        from stats3.robust import as_vcov, covariance
+
+        v = covariance(fit, as_vcov(vcov))
+    return np.where(np.isnan(fit.coef), 0.0, fit.coef), v, fit.qr.kept
+
+
+def _ordinal(fit: Any) -> bool:
+    return getattr(fit, "kind", None) == "ordinal"
+
+
 def _df(fit: Any) -> float:
     from stats3.models import GeneralizedLinearModel
 
+    if _ordinal(fit):
+        return math.inf
     if isinstance(fit, GeneralizedLinearModel):
         # emmeans: the residual df for gaussian and Gamma glms, else asymptotic.
         return float(fit.df_residual) if fit.family.family in ("gaussian", "Gamma") else math.inf
@@ -145,7 +166,7 @@ def _df(fit: Any) -> float:
 
 def _estimable(fit: Any, lin: np.ndarray) -> np.ndarray:
     """estimability's check: is each row in the row space of the model matrix?"""
-    if len(fit.qr.kept) == lin.shape[1]:
+    if _ordinal(fit) or len(fit.qr.kept) == lin.shape[1]:
         return np.ones(lin.shape[0], dtype=bool)
     x = fit.design.matrix
     _, s, vt = np.linalg.svd(x, full_matrices=True)
@@ -387,17 +408,9 @@ class Contrasts:
                 use = "sidak"
             self.adjust_used = use
             lin = weights @ part.lin[idx]
-            b = np.where(np.isnan(part.fit.coef), 0.0, part.fit.coef)
-            est = lin @ b + weights @ part.offset[idx]
-            kept = part.fit.qr.kept
-            if part.vcov is None:
-                v = part.fit.cov_unscaled * part.fit.scale
-            else:
-                from stats3.robust import as_vcov, covariance
-
-                v = covariance(part.fit, as_vcov(part.vcov))
-            lk = lin[:, kept]
-            se = np.sqrt(np.einsum("ij,jk,ik->i", lk, v, lk))
+            est = lin @ part.b + weights @ part.offset[idx]
+            lk = lin[:, part.kept]
+            se = np.sqrt(np.einsum("ij,jk,ik->i", lk, part.v, lk))
             bad = ~_estimable(part.fit, lin) | ~np.isfinite(est)
             est[bad], se[bad] = np.nan, np.nan
             df = np.full(len(est), _df(part.fit))
@@ -450,11 +463,8 @@ class Contrasts:
 
 
 def _one(fit: Any, specs: list[str], by: list[str], at: Mapping[str, Any], weights: str, vcov: Any,
-         type_: str, level: float) -> _Estimates:
+         type_: str, level: float, mode: str | None = None) -> _Estimates:
     grid, factors = _reference_grid(fit, at)
-    for name in [*specs, *by]:
-        if name not in grid.columns:
-            raise ValueError(f"emmeans(): {name!r} is not a variable in the model; its variables are {grid.columns}")
     design_grid = grid
     static_offset = None
     if fit.formula.offset_arg is not None:
@@ -485,12 +495,17 @@ def _one(fit: Any, specs: list[str], by: list[str], at: Mapping[str, Any], weigh
         # emmeans' "proportional": the averaged-over factors' joint frequencies
         # over the whole data, the same for every cell of specs.
         if other:
-            joint = fit.frame.rows.group_by(other).len()
+            joint = _weighted_rows(fit).group_by(other).agg(pl.col("len").sum())
             joint = joint.with_columns(pl.col(n).cast(grid.schema[n]) for n in other)
             w = grid.select(other).with_row_index("__i").join(
                 joint, on=other, how="left", nulls_equal=True).sort("__i")["len"].fill_null(0).cast(pl.Float64).to_numpy()
         else:
             w = np.ones(grid.height)
+    if _ordinal(fit):
+        grid, x, offset, w = fit._emm_cells(grid, x, offset, w, mode)
+    for name in [*specs, *by]:
+        if name not in grid.columns:
+            raise ValueError(f"emmeans(): {name!r} is not a variable in the model; its variables are {grid.columns}")
     # Spec cells in emmeans' order: the first spec varies fastest, within by.
     cells = grid.select(keep).with_columns(__w=pl.Series(w), __i=pl.int_range(pl.len()))
     labels = grid.select(keep).unique(maintain_order=True)
@@ -536,6 +551,7 @@ def emmeans(
     weights: str = "equal",
     vcov: Any = None,
     level: float = 0.95,
+    mode: str | None = None,
 ) -> EMMeans:
     """Estimated marginal means, as emmeans' ``emmeans(fit, specs)``.
 
@@ -554,6 +570,13 @@ def emmeans(
     standard error, back-transformed intervals). ``vcov`` takes a robust
     covariance as in ``tidy``. A grouped fit gives means for each group.
 
+    For ``polr`` fits, ``mode`` picks emmeans' scale: ``"latent"`` (the
+    default; the linear predictor minus the mean threshold), ``"prob"``
+    (each class's probability, with the response as a factor to put in
+    ``specs`` or ``by``) or ``"mean.class"`` (the expected class number).
+    Probabilities are averaged over the grid on the probability scale, with
+    delta-method standard errors and asymptotic intervals, as emmeans.
+
     The result prints as a table; ``tidy(emm)`` gives it as a frame, and
     ``emm.pairs()`` / ``emm.contrast(...)`` (or ``pairs(emm)``,
     ``contrast(emm, ...)``) compare the means.
@@ -562,8 +585,16 @@ def emmeans(
 
     if any(getattr(f, "kind", None) == "bayesian" for f in _fits(model)):
         raise TypeError("emmeans(): use bayes_emmeans() for posterior marginal means")
-    if any(getattr(f, "kind", None) == "ordinal" for f in _fits(model)):
-        raise TypeError("emmeans(): ordinal marginal means are not implemented; use predict(type='probs')")
+    if any(_ordinal(f) for f in _fits(model)):
+        from stats3.ordinal import EMM_MODES
+
+        mode = "latent" if mode is None else mode
+        if mode not in EMM_MODES:
+            raise ValueError(f"emmeans(): mode must be one of {list(EMM_MODES)}, got {mode!r}")
+        if type != "link":
+            raise ValueError("emmeans(): polr fits choose their scale with mode=, not type=")
+    elif mode is not None:
+        raise ValueError("emmeans(): mode= is for polr fits")
 
     specs_ = [specs] if isinstance(specs, str) else list(specs)
     by_ = [] if by is None else ([by] if isinstance(by, str) else list(by))
@@ -575,7 +606,7 @@ def emmeans(
         raise ValueError(f"emmeans(): weights must be one of {list(WEIGHTS)}, got {weights!r}")
     _check_conf_level(level)
     fits = _fits(model)
-    parts = [_one(fit, specs_, by_, at or {}, weights, vcov, type, level) for fit in fits]
+    parts = [_one(fit, specs_, by_, at or {}, weights, vcov, type, level, mode) for fit in fits]
     return EMMeans(parts, specs_, fits[0]._data)
 
 
