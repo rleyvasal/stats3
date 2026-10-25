@@ -66,6 +66,7 @@ from stats3.models import (
 from stats3.pairwise import pairwise_prop_test, pairwise_t_test, pairwise_wilcox_test
 from stats3.negbin import glm_nb, negative_binomial
 from stats3.ordinal import polr
+from stats3.penalized import coef, cv_glmnet, glmnet
 from stats3.ranks import cor_test, friedman_test, kruskal_test, wilcox_test
 from stats3.report import modelsummary
 from stats3.resistant import rlm, rq
@@ -103,9 +104,11 @@ __all__ = [
     "binom_test",
     "binomial",
     "chisq_test",
+    "coef",
     "cohens_d",
     "contrast",
     "cor_test",
+    "cv_glmnet",
     "emmeans",
     "eta_squared",
     "fisher_test",
@@ -116,6 +119,7 @@ __all__ = [
     "glance",
     "glm",
     "glm_nb",
+    "glmnet",
     "hedges_g",
     "inverse_gaussian",
     "kruskal_test",

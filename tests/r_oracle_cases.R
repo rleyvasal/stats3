@@ -654,6 +654,10 @@ result <- switch(
       pa_sig=power_row(power.anova.test(groups=3, n=10, between.var=1, within.var=2, power=0.9, sig.level=NULL))
     ))
   },
+  glmnet = {
+    source("tests/r_glmnet_cases.R")
+    glmnet_cases()
+  },
   ordinal = {
     source("tests/r_ordinal_cases.R")
     ordinal_cases()
