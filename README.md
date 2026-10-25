@@ -290,6 +290,38 @@ As in R, `anova` and `mauchly_test` refuse weighted fits (`manova` takes
 weights). `glance`, `augment`, `emmeans` and `modelsummary` are not
 available for multivariate fits.
 
+Nonlinear least squares follows R's `nls`. The model is an arithmetic
+expression of columns and parameters (`+ - * / ^` and R's math functions,
+such as `exp`, `log`, `sqrt`, `pnorm` or `lgamma`); the names in `start`
+are the parameters:
+
+```python
+fit = nls(puromycin, "rate ~ Vm * conc / (K + conc)", start={"Vm": 200, "K": 0.1})
+tidy(fit, conf_int=True)             # t tests; confint.nls's profile intervals
+nls(dnase, "density ~ SSlogis(log(conc), Asym, xmid, scal)", by="Run")  # self-starting
+nls(puromycin, "rate ~ conc / (K + conc)", start={"K": 0.1}, algorithm="plinear")  # .lin is Vm
+nls(puromycin, "rate ~ Vm * conc / (K + conc)", start={"Vm": 200, "K": 0.1},
+    algorithm="port", lower=[0, 0.07])
+anova(smaller_fit, fit)              # F test of each model against the one before
+```
+
+The default algorithm is R's Gauss-Newton iteration, with R's
+relative-offset convergence criterion, step halving, `control=` (`maxiter`,
+`tol`, `min_factor`, `warn_only`, `scale_offset`) and error messages
+("singular gradient", "step factor ... reduced below 'minFactor'").
+Gradients come from symbolic differentiation of the expression, where R
+uses forward differences. `SSlogis`, `SSasymp`, `SSmicmen`, `SSgompertz`,
+`SSfpl` and `SSweibull` find their own starting values with R's
+initial-value methods. `algorithm="plinear"` is Golub-Pereyra, with the
+conditionally linear terms as `cbind(...)` columns. `algorithm="port"`
+takes `lower`/`upper` bounds and reaches R's bounded optimum with a
+trust-region solver rather than the PORT library, so `glance()`'s `fin_tol`
+is missing for it. Profile intervals solve for the end points that
+`confint.nls` interpolates from a spline, so they can differ from R's in the
+fourth significant digit. `weights`, `na_action`, `by=`, `glance`,
+`augment`, `predict` and `vcov` work as for `lm`. Indexed parameters
+(`a[group]`), `subset` and `trace` are not included.
+
 `na_action="exclude"` (R's `na.exclude`) keeps every row in `augment` and
 `predict`, with missing values where a row was not used, so the results line
 up with the data.
@@ -378,6 +410,7 @@ Component signs come from the LAPACK routines R calls (dgesdd for `prcomp`,
 dsyevr for `cmdscale`); they match R's here, but another LAPACK may flip a
 component, scores and loadings together. `princomp` and `factanal` fix
 their signs as R does.
+| `nls`, `confint.nls` | `nls("y ~ a * exp(-b * x)", start=...)`, `SSlogis` and other self-starting models, `algorithm="plinear"` / `"port"` |
 
 ## Bayesian statistics
 

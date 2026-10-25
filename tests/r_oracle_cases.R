@@ -760,6 +760,10 @@ result <- switch(
     source("tests/r_mlm_cases.R")
     mlm_cases()
   },
+  nls = {
+    source("tests/r_nls_cases.R")
+    nls_cases()
+  },
   negbin = {
     source("tests/r_negbin_cases.R")
     negbin_cases()

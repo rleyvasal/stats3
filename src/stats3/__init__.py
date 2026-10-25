@@ -71,6 +71,7 @@ from stats3.negbin import glm_nb, negative_binomial
 from stats3.multivariate import (
     cmdscale, cutree, dist, factanal, hclust, kmeans, prcomp, princomp, promax, varimax,
 )
+from stats3.nonlinear import nls
 from stats3.ordinal import polr
 from stats3.ranks import (
     ansari_test,
@@ -146,6 +147,7 @@ __all__ = [
     "mood_test",
     "multinom",
     "negative_binomial",
+    "nls",
     "oneway_test",
     "p_adjust",
     "pairwise_prop_test",
