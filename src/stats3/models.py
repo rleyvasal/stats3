@@ -1647,6 +1647,11 @@ def anova(*models: Any, test: Any = None, type: Any = 1, **kwargs: Any) -> Any: 
         raise ValueError("anova(): models were not all fitted to the same size of dataset")
     if all(isinstance(f, LinearModel) for f in fits):
         return fits[0]._write(_anova_lm(fits))
+    compare = getattr(fits[0], "_anova_models", None)
+    if compare is not None:
+        if any(f.__class__ is not fits[0].__class__ for f in fits):
+            raise TypeError(f"anova(): compare {fits[0].verb} fits with {fits[0].verb} fits")
+        return fits[0]._write(compare(fits, test))
     from stats3.ordinal import OrdinalModel, _anova_polr
 
     if any(isinstance(f, OrdinalModel) for f in fits):

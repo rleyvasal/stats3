@@ -378,6 +378,45 @@ halving) for `glm`. On 1,000,000 rows with 13 coefficients `lm` takes about
 0.16 s and a Poisson `glm` about 0.6 s, against about 1.1 s and 1.9 s for
 statsmodels' formula interface.
 
+## Survival analysis
+
+```python
+from stats3 import coxph, cox_zph, survdiff, survfit, survreg, tidy, glance, predict
+
+km = survfit(lung, "Surv(time, status) ~ sex")     # Kaplan-Meier, log intervals
+tidy(km)                                            # one row per time per stratum
+glance(km)                                          # medians and their intervals
+glance(survdiff(lung, "Surv(time, status) ~ sex"))  # log-rank; rho=1 for Peto-Peto
+
+fit = coxph(lung, "Surv(time, status) ~ age + sex + strata(inst)")
+tidy(fit, conf_int=True, exponentiate=True)         # hazard ratios
+glance(fit)                                         # LR, Wald, score tests, concordance
+cox_zph(fit)                                        # proportional-hazards test
+survfit(fit, newdata=new_rows)                      # predicted survival curves
+
+survreg(lung, "Surv(time, status) ~ age + sex", dist="weibull")
+```
+
+These follow R's survival package. The response is `Surv(time, status)`
+(status 0/1, 1/2 or logical, or a comparison such as `status == 2`) or
+`Surv(start, stop, status)` for counting-process data. `coxph` uses Efron
+ties by default (`ties="breslow"` or `"exact"`), takes `strata()`,
+weights and offsets, and gives robust standard errors with `cluster(id)`,
+`robust=True` or non-integer weights, as R does. Its Newton steps,
+step halving and stopping rule are R's, so coefficients agree to rounding.
+`predict` gives `type="lp"`, `"risk"` or `"expected"` (with R's
+stratum-centred linear predictors), and `anova` gives sequential tables and
+nested comparisons. `survreg` fits Weibull, exponential, lognormal,
+loglogistic, gaussian, logistic and extreme-value models; `predict` gives
+the response, linear predictor and quantiles. `by=` fits one model per
+group, and `na_action="exclude"` lines predictions up with the data.
+
+Not included yet: left- and interval-censored data, multi-state models,
+`tt()` terms, frailty, `survreg` strata and robust variances, `survfit`
+on a stratified Cox model with new data, and Kaplan-Meier curves with
+non-integer weights (R's robust variance). Times are compared exactly
+(R's `timefix` rounding is not applied).
+
 ## What's in it
 
 | R | stats3 |
@@ -471,6 +510,9 @@ log likelihood is never below R's, and estimates agree with R's to about
 1e-4. Lags count observations (R's lag times the frequency), and missing
 values follow `na_action` as in R: `"fail"` by default, or `"pass"`,
 `"omit"` or `"contiguous"`.
+| survival: `survfit`, `survdiff` | `survfit("Surv(time, status) ~ g")` (Kaplan-Meier), `survdiff("Surv(time, status) ~ g", rho=0)` |
+| survival: `coxph`, `cox.zph` | `coxph("Surv(time, status) ~ x + strata(s) + cluster(id)")`, `cox_zph(fit)`, `survfit(fit, newdata)` |
+| survival: `survreg` | `survreg("Surv(time, status) ~ x", dist="weibull")` |
 
 ## Bayesian statistics
 

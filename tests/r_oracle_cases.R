@@ -768,6 +768,10 @@ result <- switch(
     source("tests/r_smoothing_cases.R")
     smoothing_cases()
   },
+  survival = {
+    source("tests/r_survival_cases.R")
+    survival_cases()
+  },
   negbin = {
     source("tests/r_negbin_cases.R")
     negbin_cases()
