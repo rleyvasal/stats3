@@ -29,7 +29,7 @@ FUNCTIONS = frozenset({
     "bayes_lm", "bayes_glm", "polr",
     "aov", "bartlett_test", "binom_test", "chisq_test", "cohens_d", "cor_test",
     "eta_squared", "fisher_test", "fligner_test", "friedman_test", "glm", "glm_nb", "hedges_g",
-    "kruskal_test", "ks_test", "levene_test", "lm", "mantelhaen_test", "mcnemar_test",
+    "kruskal_test", "ks_test", "levene_test", "lm", "manova", "mantelhaen_test", "mauchly_test", "mcnemar_test",
     "oneway_test", "p_adjust", "pairwise_prop_test", "pairwise_t_test",
     "pairwise_wilcox_test", "poisson_test", "prop_test", "rlm", "rq", "shapiro_test", "t_test",
     "tukey_hsd", "var_test", "vcov_cl", "vcov_nw", "wilcox_test",

@@ -225,6 +225,27 @@ the Hessian, as `summary.polr`; p-values stay missing, as R reports none, and
 likelihood. The cauchit link, robust covariance and marginal means for
 ordinal fits are not included yet.
 
+Several responses in `cbind()` make a multivariate linear model, R's `mlm`,
+and `manova` gives `summary.manova`'s table:
+
+```python
+fit = lm(iris, "cbind(sepal_length, sepal_width, petal_length, petal_width) ~ species")
+tidy(fit, conf_int=True)              # one coefficient table per response, with a response column
+anova(fit, test="Wilks")              # anova.mlm: Pillai (default), Wilks, Hotelling-Lawley, Roy
+manova(iris, "cbind(sepal_length, petal_length) ~ species", test="Roy")
+anova(fit, test="Spherical", X="~ 1") # univariate F with Greenhouse-Geisser and Huynh-Feldt p-values
+mauchly_test(fit, X="~ 1")            # Mauchly's test of sphericity
+```
+
+The tests use R's sequential sums of squares and cross products and its F
+approximations. `X=`, `M=` (formulas on `idata=`, one row per response, or
+matrices) or `T=` test contrasts of the responses, as in repeated-measures
+designs; `anova(fit1, fit2)` compares nested multivariate fits, as
+`anova.mlmlist`. `predict` and `vcov` follow `predict.mlm` and `vcov.mlm`.
+As in R, `anova` and `mauchly_test` refuse weighted fits (`manova` takes
+weights). `glance`, `augment`, `emmeans` and `modelsummary` are not
+available for multivariate fits.
+
 `na_action="exclude"` (R's `na.exclude`) keeps every row in `augment` and
 `predict`, with missing values where a row was not used, so the results line
 up with the data.
@@ -273,6 +294,7 @@ statsmodels' formula interface.
 | effectsize | `cohens_d`, `hedges_g`, `eta_squared` |
 | `power.t.test`, `power.prop.test`, `power.anova.test` | `power_t_test`, `power_prop_test`, `power_anova_test` |
 | `lm`, `glm` | `lm`, `glm`, with broom's `tidy`, `glance`, `augment`, and `anova`, `predict` |
+| `lm` with `cbind()`, `manova`, `anova.mlm`, `mauchly.test` | `lm("cbind(y1, y2) ~ x")`, `manova(...)`, `anova(fit, test="Spherical", X="~ 1")`, `mauchly_test(fit, X="~ 1")` |
 | `car::Anova` | `anova(fit, type=2)`, `anova(fit, type=3)` |
 | sandwich, `lmtest::coeftest` | `tidy(fit, vcov="HC3")`, `vcov_cl(...)`, `vcov_nw()`, `vcov(fit)` |
 | modelsummary | `modelsummary(fit1, fit2)`: a frame, Markdown or HTML |

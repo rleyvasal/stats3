@@ -670,6 +670,10 @@ result <- switch(
     source("tests/r_resistant_cases.R")
     resistant_cases("rq")
   },
+  mlm = {
+    source("tests/r_mlm_cases.R")
+    mlm_cases()
+  },
   negbin = {
     source("tests/r_negbin_cases.R")
     negbin_cases()

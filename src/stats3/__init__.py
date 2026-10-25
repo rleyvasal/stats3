@@ -63,6 +63,7 @@ from stats3.models import (
     tidy,
     vcov,
 )
+from stats3.mlm import manova, mauchly_test
 from stats3.pairwise import pairwise_prop_test, pairwise_t_test, pairwise_wilcox_test
 from stats3.negbin import glm_nb, negative_binomial
 from stats3.ordinal import polr
@@ -122,7 +123,9 @@ __all__ = [
     "ks_test",
     "levene_test",
     "lm",
+    "manova",
     "mantelhaen_test",
+    "mauchly_test",
     "mcnemar_test",
     "modelsummary",
     "negative_binomial",

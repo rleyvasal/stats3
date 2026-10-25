@@ -6,6 +6,10 @@ under **Changed**.
 
 ## Unreleased
 
+### Added
+
+- Multivariate linear models (`stats3.mlm`): `lm(data, "cbind(y1, y2, ...) ~ x")` fits R's `mlm`, with `tidy` giving one coefficient table per response (a `response` column, as broom's `tidy.mlm`), `predict` and `vcov` as `predict.mlm` and `vcov.mlm`, and `anova(fit)` as `anova.mlm`: Pillai (default), Wilks, Hotelling-Lawley and Roy tests from the sequential SSCP matrices, `test="Spherical"` with Greenhouse-Geisser and Huynh-Feldt epsilons and p-values, within-subject contrasts through `X=`, `M=`, `idata=` or `T=`, and `anova(fit1, fit2)` for nested fits (`anova.mlmlist`). `manova(data, "cbind(...) ~ g", test=, intercept=)` gives `summary.manova`'s table; `mauchly_test(fit, X="~ 1")` is `mauchly.test`. Checked against R on iris and penguins on all four backends, with grouped `by=` runs. With a one-row contrast R's multivariate `anova.mlm` fails; stats3 gives the multivariate test, equal to the univariate one.
+
 ### Changed
 
 - The `bayes` extra now needs PyMC 6 (`pymc>=6.3,<7`, with PyTensor 3) and ArviZ 1 (`arviz>=1.1,<2`). PyTensor 2, which PyMC 5 requires, cannot compile its C extensions with Apple clang 21 (Xcode 27): it passes the `-ld64` linker flag that this clang removed, so every sampled `bayes_glm` fit failed on current macOS toolchains without a local compiler wrapper. PyTensor 3 chooses the flag by the compiler's version instead, and runs the model graph through Numba by default, so the C++ compiler only builds PyTensor's small bootstrap module. `bayes_compare(method="loo")` still uses ArviZ's PSIS-LOO; ArviZ 1 dropped WAIC, so `method="waic"` is now computed by stats3 from the pointwise log likelihoods with the same definition, and both methods return the same table as before (rank, `elpd_*`, `p_*`, `elpd_diff`, stacking `weight`, `se`, `dse`, `warning`). As in ArviZ 1, `se` and `dse` now use the sample variance of the pointwise values (ArviZ 0.x used the population variance, a factor of `sqrt(n/(n-1))` smaller). A sampled fit's `idata` is now an xarray `DataTree`, as PyMC 6 returns.
