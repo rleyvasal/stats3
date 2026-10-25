@@ -86,6 +86,7 @@ from stats3.ranks import (
 )
 from stats3.report import modelsummary
 from stats3.resistant import rlm, rq
+from stats3.gam import gam
 from stats3.robust import vcov_cl, vcov_hc, vcov_nw
 from stats3.smoothing import ksmooth, loess, lowess, smooth_spline
 from stats3.timeseries import acf, arima, box_test, ccf, pacf
@@ -142,6 +143,7 @@ __all__ = [
     "fligner_test",
     "friedman_test",
     "Gamma",
+    "gam",
     "gaussian",
     "glance",
     "glm",

@@ -1526,7 +1526,7 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
         opts = {"conf_int": conf_int, "conf_level": conf_level, **kwargs}
         if exponentiate:
             opts["exponentiate"] = True
-        unknown = set(kwargs) - {"conf_method", "vcov", "return_zeros", "effects"}
+        unknown = set(kwargs) - {"conf_method", "vcov", "return_zeros", "effects", "parametric"}
         if unknown:
             raise TypeError(f"tidy(): unexpected arguments for a model: {sorted(unknown)}")
         if "conf_method" in opts and not all(isinstance(f, GeneralizedLinearModel) or getattr(f, "kind", None) == "ordinal"
@@ -1538,7 +1538,7 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
             as_vcov(opts["vcov"])
         return _table(model, "tidy", **opts)
 
-    if x is None and not args and set(kwargs) <= {"conf_method", "vcov", "matrix", "return_zeros", "effects"}:
+    if x is None and not args and set(kwargs) <= {"conf_method", "vcov", "matrix", "return_zeros", "effects", "parametric"}:
         return _ModelVerb(run, "tidy")
     if _is_model(x) or isinstance(x, (EMMeans, Contrasts, BayesianEstimates)):
         return run(x)
@@ -1693,6 +1693,12 @@ def anova(*models: Any, test: Any = None, type: Any = 1, **kwargs: Any) -> Any: 
         if not all(isinstance(f, LoessModel) for f in fits):
             raise TypeError("anova(): compare loess fits with loess fits")
         return fits[0]._write(_anova_loess(fits))
+    from stats3.gam import GeneralizedAdditiveModel, _anova_gam
+
+    if any(isinstance(f, GeneralizedAdditiveModel) for f in fits):
+        if not all(isinstance(f, GeneralizedAdditiveModel) for f in fits):
+            raise TypeError("anova(): compare gam fits with gam fits")
+        return fits[0]._write(_anova_gam(fits, test))
     from stats3.resistant import QuantileModel, _anova_rq
 
     if any(isinstance(f, QuantileModel) for f in fits):

@@ -477,6 +477,60 @@ on a stratified Cox model with new data, and Kaplan-Meier curves with
 non-integer weights (R's robust variance). Times are compared exactly
 (R's `timefix` rounding is not applied).
 
+### Generalized additive models
+
+`gam()` is mgcv's `gam`: penalized regression smooths with their smoothing
+parameters chosen by GCV (UBRE for binomial and Poisson), the default, or
+`method="REML"`.
+
+```python
+fit = gam(penguins, "body_mass_g ~ s(flipper_length_mm) + s(bill_depth_mm, bs='cr') + species",
+          method="REML")
+tidy(fit)                    # parametric terms, as summary.gam
+tidy(fit, parametric=False)  # smooths: edf, ref_df, F (or Chi.sq) and p-value
+```
+
+```text
+┌──────────────────────┬──────────┬──────────┬───────────┬─────────┐
+│ term                 ┆ edf      ┆ ref_df   ┆ statistic ┆ p_value │
+╞══════════════════════╪══════════╪══════════╪═══════════╪═════════╡
+│ s(flipper_length_mm) ┆ 1.366226 ┆ 1.640748 ┆ 39.397472 ┆ 0.0     │
+│ s(bill_depth_mm)     ┆ 2.588033 ┆ 3.266838 ┆ 32.547571 ┆ 0.0     │
+└──────────────────────┴──────────┴──────────┴───────────┴─────────┘
+```
+
+Smooths are `s()` with `bs="tp"` (thin plate regression splines, the
+default, with mgcv's eigen-truncation and, past 2000 unique values, its
+knot sample from R's random number generator), `"cr"`, `"cs"`, `"ps"` or
+`"re"`, with `k=`, `m=`, `fx=` and `by=` (a factor gives one smooth per
+level; a number multiplies the smooth); `te()` builds tensor products of
+those marginals. The bases, penalty scaling and centring constraints are
+ports of mgcv's, and the families are `glm`'s, with weights and offsets.
+Every trial set of smoothing parameters is fitted to convergence (mgcv's
+outer iteration, with full Newton weights for non-canonical links).
+`glance` gives the adjusted R², deviance explained, GCV/UBRE/REML score,
+scale, AIC and BIC (with mgcv's smoothing-parameter-corrected degrees of
+freedom under REML); `augment` and `predict(type="link"/"response"/
+"terms", se_fit=True)` give fits and standard errors; `anova(fit)` is
+`anova.gam`'s Wald table and `anova(fit1, fit2)` its deviance comparison;
+`vcov(fit)` is the Bayesian covariance `Vp` (`"Ve"` frequentist, `"Vc"`
+with smoothing parameter uncertainty). broom's `tidy.gam` defaults to the
+smooth table; stats3's `tidy` keeps to its other models and gives the
+parametric table unless `parametric=False`.
+
+mgcv stops its optimizers early; stats3 optimizes the same criteria to full
+precision, and agrees with mgcv run with tight tolerances to about 1e-7.
+Thin plate basis columns match mgcv's up to sign (LAPACK's eigenvector
+signs), so compare their coefficients up to sign; fitted values, degrees of
+freedom, smoothing parameters and tests do not depend on it. Two mgcv
+behaviours rest on rounding: `cs`'s shrinkage of the cubic spline
+penalty's null space depends on which null eigenvectors LAPACK returns
+first, and Gaussian GCV fits end with a probe towards infinite smoothing
+parameters in the direction of the gradient's sign, which at a converged
+optimum is noise. Usually both agree with mgcv; when they don't, the fits
+differ. `ti()`, `t2()`, `id=`, `gam.side` constraints for nested smooths,
+`select=`, other bases and `method="ML"`/`"P-REML"` are not included.
+
 ## What's in it
 
 | R | stats3 |
@@ -575,6 +629,7 @@ values follow `na_action` as in R: `"fail"` by default, or `"pass"`,
 | survival: `coxph`, `cox.zph` | `coxph("Surv(time, status) ~ x + strata(s) + cluster(id)")`, `cox_zph(fit)`, `survfit(fit, newdata)` |
 | survival: `survreg` | `survreg("Surv(time, status) ~ x", dist="weibull")` |
 | glmnet | `glmnet("y ~ .", family=, alpha=)`, `cv_glmnet(..., foldid=)`, `coef(fit, s=)` |
+| mgcv::gam | `gam("y ~ s(x) + te(x, z) + f", method="REML")` |
 
 ## Bayesian statistics
 
