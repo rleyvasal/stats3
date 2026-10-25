@@ -73,6 +73,7 @@ from stats3.multivariate import (
 )
 from stats3.nonlinear import nls
 from stats3.ordinal import polr
+from stats3.penalized import coef, cv_glmnet, glmnet
 from stats3.ranks import (
     ansari_test,
     cor_test,
@@ -127,11 +128,13 @@ __all__ = [
     "box_test",
     "ccf",
     "chisq_test",
+    "coef",
     "cohens_d",
     "contrast",
     "cox_zph",
     "coxph",
     "cor_test",
+    "cv_glmnet",
     "emmeans",
     "eta_squared",
     "fisher_test",
@@ -142,6 +145,7 @@ __all__ = [
     "glance",
     "glm",
     "glm_nb",
+    "glmnet",
     "hedges_g",
     "inverse_gaussian",
     "kruskal_test",

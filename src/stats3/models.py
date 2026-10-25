@@ -1526,7 +1526,7 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
         opts = {"conf_int": conf_int, "conf_level": conf_level, **kwargs}
         if exponentiate:
             opts["exponentiate"] = True
-        unknown = set(kwargs) - {"conf_method", "vcov"}
+        unknown = set(kwargs) - {"conf_method", "vcov", "return_zeros"}
         if unknown:
             raise TypeError(f"tidy(): unexpected arguments for a model: {sorted(unknown)}")
         if "conf_method" in opts and not all(isinstance(f, GeneralizedLinearModel) or getattr(f, "kind", None) == "ordinal"
@@ -1536,7 +1536,7 @@ def tidy(x: Any = None, *args: Any, conf_int: bool = False, conf_level: float = 
             as_vcov(opts["vcov"])
         return _table(model, "tidy", **opts)
 
-    if x is None and not args and set(kwargs) <= {"conf_method", "vcov", "matrix"}:
+    if x is None and not args and set(kwargs) <= {"conf_method", "vcov", "matrix", "return_zeros"}:
         return _ModelVerb(run, "tidy")
     if _is_model(x) or isinstance(x, (EMMeans, Contrasts, BayesianEstimates)):
         return run(x)

@@ -352,6 +352,37 @@ steps amplify last-bit differences in the criterion; the fit at a given
 `spar`, `lambda_` or `df` matches to full precision. Each smoother takes
 `by=`, and drops rows missing x or y.
 
+Penalized regression follows glmnet: lasso, ridge and elastic-net paths for
+the gaussian, binomial, poisson, multinomial and Cox families, and
+`cv_glmnet` to choose lambda.
+
+```python
+fit = glmnet(mtcars, "mpg ~ .", alpha=0.5)        # a formula, as glmnetUtils; or glmnet(x=X, y=y)
+tidy(fit)                                       # term, step, estimate, lambda, dev_ratio (broom)
+coef(fit, s=0.1)                                # interpolated along the path, as coef.glmnet
+predict(fit, new_rows, s=[1, 0.1], type="response")
+cv = cv_glmnet(mtcars, "am ~ wt + hp + qsec", family="binomial", foldid="fold", type_measure="auc")
+glance(cv)                                      # lambda_min, lambda_1se
+fit = glmnet(lung, "Surv(time, status) ~ age + sex + ph_ecog", family="cox", cox_ties="efron")
+```
+
+Model-matrix columns come from the formula code without the intercept column
+(factors get treatment contrasts, as glmnetUtils' `use.model.frame=TRUE`).
+The lambda sequence (`nlambda`, `lambda_min_ratio`, or `lambda_=`),
+standardization, `intercept`, `penalty_factor`, `exclude`, lower/upper limits,
+weights, offsets, `dfmax` and glmnet's early stopping rules follow glmnet 5.1.
+Where glmnet stops coordinate descent at `thresh`, stats3 solves each lambda
+exactly (Newton steps on the exact likelihood, with coordinate descent to find
+the active set and a linear solve on it), so `thresh` is accepted but not
+needed; R's coefficients agree to its own convergence (about 1e-8 relative to
+the largest coefficient for gaussian fits at a tight `thresh`). `glance` gives
+`nulldev`, `npasses` (stats3's own passes, not glmnet's) and `nobs`.
+`cv_glmnet` matches R exactly when given the same `foldid` (a column name or
+one fold per row); without it, folds are drawn with NumPy (`seed=`). Grouped
+multinomial (`type.multinomial="grouped"`), `mgaussian`, start-stop and
+stratified Cox responses, relaxed fits and `exact=TRUE` predictions are not
+included.
+
 `na_action="exclude"` (R's `na.exclude`) keeps every row in `augment` and
 `predict`, with missing values where a row was not used, so the results line
 up with the data.
@@ -513,6 +544,7 @@ values follow `na_action` as in R: `"fail"` by default, or `"pass"`,
 | survival: `survfit`, `survdiff` | `survfit("Surv(time, status) ~ g")` (Kaplan-Meier), `survdiff("Surv(time, status) ~ g", rho=0)` |
 | survival: `coxph`, `cox.zph` | `coxph("Surv(time, status) ~ x + strata(s) + cluster(id)")`, `cox_zph(fit)`, `survfit(fit, newdata)` |
 | survival: `survreg` | `survreg("Surv(time, status) ~ x", dist="weibull")` |
+| glmnet | `glmnet("y ~ .", family=, alpha=)`, `cv_glmnet(..., foldid=)`, `coef(fit, s=)` |
 
 ## Bayesian statistics
 
