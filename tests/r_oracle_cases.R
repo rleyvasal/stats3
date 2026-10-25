@@ -780,6 +780,10 @@ result <- switch(
     source("tests/r_multivariate_cases.R")
     multivariate_cases()
   },
+  timeseries = {
+    source("tests/r_timeseries_cases.R")
+    timeseries_cases()
+  },
   emmeans = {
     source("tests/r_emm_cases.R")
     emm_cases()

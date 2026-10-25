@@ -86,6 +86,7 @@ from stats3.report import modelsummary
 from stats3.resistant import rlm, rq
 from stats3.robust import vcov_cl, vcov_hc, vcov_nw
 from stats3.smoothing import ksmooth, loess, lowess, smooth_spline
+from stats3.timeseries import acf, arima, box_test, ccf, pacf
 
 # In IPython / Jupyter, turn on unquoted formulas and bare column names in
 # stats3 calls (from the next cell on), as tidy3 does for its verbs.
@@ -113,13 +114,17 @@ __all__ = [
     "prior",
     "prior_predict",
     "pp_check",
+    "acf",
     "anova",
     "ansari_test",
     "aov",
+    "arima",
     "augment",
     "bartlett_test",
     "binom_test",
     "binomial",
+    "box_test",
+    "ccf",
     "chisq_test",
     "cohens_d",
     "contrast",
@@ -157,6 +162,7 @@ __all__ = [
     "pairwise_prop_test",
     "pairwise_t_test",
     "pairwise_wilcox_test",
+    "pacf",
     "pairs",
     "poisson",
     "polr",
