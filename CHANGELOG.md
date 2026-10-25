@@ -6,6 +6,10 @@ under **Changed**.
 
 ## Unreleased
 
+### Added
+
+- `aov` and `tukey_hsd` take several terms: `aov("y ~ a + b")`, `aov("y ~ a * b")` and covariates (`aov("y ~ x + a")`) give `summary(aov())`'s sequential (type I) table, fitted with the `lm` engine; `tukey_hsd` gives `TukeyHSD`'s table for every factor term, interactions included, with R's `which=` and `ordered=`. Unbalanced designs use R's `model.tables` means (later terms adjusted for earlier ones) and Tukey-Kramer intervals, and empty interaction cells give missing comparisons, as in R. `Error()` strata raise a clear error. The one-factor forms are unchanged.
+
 ### Changed
 
 - The `bayes` extra now needs PyMC 6 (`pymc>=6.3,<7`, with PyTensor 3) and ArviZ 1 (`arviz>=1.1,<2`). PyTensor 2, which PyMC 5 requires, cannot compile its C extensions with Apple clang 21 (Xcode 27): it passes the `-ld64` linker flag that this clang removed, so every sampled `bayes_glm` fit failed on current macOS toolchains without a local compiler wrapper. PyTensor 3 chooses the flag by the compiler's version instead, and runs the model graph through Numba by default, so the C++ compiler only builds PyTensor's small bootstrap module. `bayes_compare(method="loo")` still uses ArviZ's PSIS-LOO; ArviZ 1 dropped WAIC, so `method="waic"` is now computed by stats3 from the pointwise log likelihoods with the same definition, and both methods return the same table as before (rank, `elpd_*`, `p_*`, `elpd_diff`, stacking `weight`, `se`, `dse`, `warning`). As in ArviZ 1, `se` and `dse` now use the sample variance of the pointwise values (ArviZ 0.x used the population variance, a factor of `sqrt(n/(n-1))` smaller). A sampled fit's `idata` is now an xarray `DataTree`, as PyMC 6 returns.

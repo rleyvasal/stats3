@@ -258,7 +258,7 @@ statsmodels' formula interface.
 | `t.test` | `t_test("y ~ g")`, `t_test(x, mu=)`, `t_test(x, y, paired=True)` |
 | `wilcox.test` | `wilcox_test(...)`, same forms; R 4.6's exact tests with ties |
 | `kruskal.test`, `friedman.test` | `kruskal_test("y ~ g")`, `friedman_test("y ~ g \| block")` |
-| `aov`, `TukeyHSD` | `aov("y ~ g")`, `tukey_hsd("y ~ g")` (one grouping column) |
+| `aov`, `TukeyHSD` | `aov("y ~ a * b")`, `aov("y ~ x + a")`: `summary(aov())`'s sequential table; `tukey_hsd("y ~ a * b", which=, ordered=)`: per-term comparisons, interactions included (no `Error()` strata) |
 | `oneway.test` | `oneway_test("y ~ g")`: Welch's ANOVA, or `var_equal=True` |
 | `pairwise.t.test`, `pairwise.wilcox.test`, `pairwise.prop.test` | `pairwise_t_test("y ~ g")`, `pairwise_wilcox_test("y ~ g")`, `pairwise_prop_test(x, n)`: one row per pair, `p_adjust_method=` |
 | `cor.test` | `cor_test(x, y, method="pearson" / "spearman" / "kendall")` |

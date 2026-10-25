@@ -151,6 +151,20 @@ result <- switch(
     }
     q <- props(p)
     two <- props(p[p$island != "Biscoe", ])
+    # Every term's table, stacked: TukeyHSD gives a list of them.
+    tukey_terms <- function(fit, ...) {
+      t <- TukeyHSD(fit, ...)
+      do.call(rbind, lapply(names(t), function(nm) {
+        m <- t[[nm]]
+        data.frame(term=nm, contrast=rownames(m), estimate=m[, "diff"], conf_low=m[, "lwr"],
+                   conf_high=m[, "upr"], adj_p_value=m[, "p adj"], row.names=NULL)
+      }))
+    }
+    sexed <- p[!is.na(p$sex), ]
+    # Balanced: the first 10 penguins of each species and sex.
+    balanced <- sexed |> group_by(species, sex) |> filter(row_number() <= 10) |> ungroup() |> as.data.frame()
+    # An empty cell: no Chinstrap males.
+    no_cell <- p[!(p$species == "Chinstrap" & p$sex %in% "male"), ]
     suppressWarnings(list(
       w_two=row(wilcox.test(body_mass_g ~ sex, data=p)),
       w_two_no_correct=row(wilcox.test(body_mass_g ~ sex, data=p, correct=FALSE)),
@@ -190,6 +204,25 @@ result <- switch(
       t_species=tukey_table(aov(body_mass_g ~ species, data=p)),
       t_by_sex=by(p, "sex", function(d) tukey_table(aov(flipper_length_mm ~ island, data=d))),
       t_small_99=tukey_table(aov(a ~ h, data=s), conf.level=0.99),
+      a_two_way=aov_table(aov(body_mass_g ~ species + sex, data=p)),
+      a_two_way_reversed=aov_table(aov(body_mass_g ~ sex + species, data=p)),
+      a_interaction=aov_table(aov(body_mass_g ~ species * sex, data=p)),
+      a_balanced=aov_table(aov(body_mass_g ~ species * sex, data=balanced)),
+      a_covariate=aov_table(aov(body_mass_g ~ flipper_length_mm + species, data=p)),
+      a_covariate_interaction=aov_table(aov(body_mass_g ~ flipper_length_mm * species, data=p)),
+      a_aliased=aov_table(aov(body_mass_g ~ species * island, data=p)),
+      a_empty_cell=aov_table(aov(body_mass_g ~ species * sex, data=no_cell)),
+      a_three_way=aov_table(aov(bill_length_mm ~ species * sex * factor(year), data=p)),
+      a_interaction_by_year=by(p, "year", function(d) aov_table(aov(bill_depth_mm ~ species * sex, data=d))),
+      t_two_way=tukey_terms(aov(body_mass_g ~ species + sex, data=p)),
+      t_interaction=tukey_terms(aov(body_mass_g ~ species * sex, data=p)),
+      t_balanced_90=tukey_terms(aov(body_mass_g ~ species * sex, data=balanced), conf.level=0.9),
+      t_covariate=tukey_terms(aov(body_mass_g ~ flipper_length_mm + species, data=p), which="species"),
+      t_empty_cell=tukey_terms(aov(body_mass_g ~ species * sex, data=no_cell), which="species:sex"),
+      t_ordered=tukey_terms(aov(body_mass_g ~ sex * species, data=p), which=c("species", "sex:species"), ordered=TRUE),
+      t_one_way_ordered=tukey_table(aov(flipper_length_mm ~ island, data=p), ordered=TRUE),
+      t_three_way_year=tukey_terms(aov(bill_length_mm ~ species * sex * factor(year), data=p), which="sex:factor(year)"),
+      t_interaction_by_year=by(p, "year", function(d) tukey_terms(aov(bill_depth_mm ~ species * sex, data=d))),
       x_species_island=row(chisq.test(p$species, p$island)),
       x_yates=row(chisq.test(p$sex, p$dream)),
       x_no_yates=row(chisq.test(p$sex, p$dream, correct=FALSE)),
