@@ -585,6 +585,8 @@ def emmeans(
 
     if any(getattr(f, "kind", None) == "bayesian" for f in _fits(model)):
         raise TypeError("emmeans(): use bayes_emmeans() for posterior marginal means")
+    if any(getattr(f, "kind", None) == "multinomial" for f in _fits(model)):
+        raise TypeError("emmeans(): multinomial marginal means are not implemented; use predict(type='probs')")
     if any(_ordinal(f) for f in _fits(model)):
         from stats3.ordinal import EMM_MODES
 

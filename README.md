@@ -247,6 +247,28 @@ factor to put in specs or `by=`) and `"mean.class"`, with `pairs` and
 `contrast`. For loglog fits, stats3 gives the correct class probabilities,
 where emmeans 2.0.4 back-transforms with the wrong tail.
 
+Unordered categorical responses get nnet's baseline-category logit, `multinom`:
+
+```python
+penguins = penguins.with_columns(mass=pl.col("body_mass_g") / 1000)
+fit = multinom(penguins, "species ~ mass + sex")
+tidy(fit, conf_int=True)             # one row per (y_level, term): Chinstrap and Gentoo against Adelie
+predict(fit, new_rows, type="probs") # one column per level; "class" (default)
+anova(smaller_fit, fit)              # likelihood ratio test of nested fits, as anova.multinom
+```
+
+The first response level is the reference (a Polars `Enum`, a pandas category
+or `factor()` sets the order; other responses become factors with sorted
+levels, as in R). Weights, sum contrasts, groups and `na_action` work as for
+`glm`; an offset is one column for a two-level response, or one column per
+level (`offset=["o1", "o2", "o3"]`, R's `offset(cbind(...))`). stats3 finds the
+maximum likelihood by Newton's method rather than nnet's BFGS, so it agrees
+with nnet to the precision nnet reaches (about 1e-5); standard errors come
+from the exact Hessian, as `summary.multinom`, and `tidy` gives broom's Wald z
+tests (`exponentiate=True` for odds ratios). Aliased columns share nnet's
+minimum-norm solution. `glance` gives `edf`, `deviance`, `AIC` and `nobs`.
+Weight decay, count-matrix responses and marginal means are not included yet.
+
 `na_action="exclude"` (R's `na.exclude`) keeps every row in `augment` and
 `predict`, with missing values where a row was not used, so the results line
 up with the data.
@@ -302,6 +324,7 @@ statsmodels' formula interface.
 | emmeans | `emmeans(fit, "species")`, `pairs(emm)`, `contrast(emm, ...)` |
 | MASS | `glm_nb("y ~ x")`, `glm("y ~ x", family=negative_binomial(theta))` |
 | MASS::polr | `polr("y ~ x", method="logistic")` |
+| nnet::multinom | `multinom("y ~ x")` |
 | MASS::rlm | `rlm("y ~ x", psi="huber")` |
 | quantreg::rq | `rq("y ~ x", tau=0.5, se="rank")` |
 

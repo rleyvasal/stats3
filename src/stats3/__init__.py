@@ -65,6 +65,7 @@ from stats3.models import (
     vcov,
 )
 from stats3.pairwise import pairwise_prop_test, pairwise_t_test, pairwise_wilcox_test
+from stats3.multinomial import multinom
 from stats3.negbin import glm_nb, negative_binomial
 from stats3.ordinal import polr
 from stats3.ranks import (
@@ -137,6 +138,7 @@ __all__ = [
     "mcnemar_test",
     "modelsummary",
     "mood_test",
+    "multinom",
     "negative_binomial",
     "oneway_test",
     "p_adjust",
