@@ -4,7 +4,9 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.3.0 — 2026-10-25
+
+Most of R's remaining modelling toolkit: mixed models, generalized additive models, survival analysis, penalized and multinomial regression, nonlinear least squares, smoothers, time series, multivariate methods and multivariate linear models, multi-factor ANOVA, four more base R tests, and completed polr, rlm, rq and Bayesian varying effects. The `bayes` extra moves to PyMC 6.
 
 ### Added
 
