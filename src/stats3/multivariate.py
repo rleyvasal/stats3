@@ -11,6 +11,7 @@ and the one NumPy links usually share but need not.
 
 from __future__ import annotations
 
+import platform
 from typing import Any
 
 import numpy as np
@@ -35,10 +36,18 @@ except ImportError:  # Python 3.12
             return x * y + z
         return float(Fraction(x) * Fraction(y) + Fraction(z))
 
-# R's C and Fortran accumulate squared differences as ``sum += d * d``,
-# which compilers for arm64 (and x86-64 with FMA) fuse into one rounding.
-# The fused sums are R's on such builds; they decide exact ties in hclust
-# and kmeans. Elsewhere R's last bits can differ.
+# R's C and Fortran accumulate squared differences as ``sum += d * d``.
+# Compilers for 64-bit ARM fuse that into one rounding by default; R's
+# x86-64 builds target the baseline instruction set, which has no fused
+# multiply-add, and round twice. The last bit decides exact ties in hclust
+# and kmeans, so stats3 rounds as R's build for this machine does.
+R_FUSES_MULTIPLY_ADD = platform.machine().lower() in ("arm64", "aarch64")
+
+if not R_FUSES_MULTIPLY_ADD:
+    def _fma(x: float, y: float, z: float) -> float:  # noqa: F811
+        """x * y + z rounded twice, as R's x86-64 builds compute it."""
+        return x * y + z
+
 _fma_vector = np.frompyfunc(_fma, 3, 1)
 
 

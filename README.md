@@ -525,48 +525,13 @@ signs), so compare their coefficients up to sign; fitted values, degrees of
 freedom, smoothing parameters and tests do not depend on it. Two mgcv
 behaviours rest on rounding: `cs`'s shrinkage of the cubic spline
 penalty's null space depends on which null eigenvectors LAPACK returns
-first, and Gaussian GCV fits end with a probe towards infinite smoothing
+first, so mgcv's own `cs` fits differ between LAPACK builds (stats3 and R
+agree on macOS; on Linux the tests check only the parts that do not depend
+on the choice), and Gaussian GCV fits end with a probe towards infinite smoothing
 parameters in the direction of the gradient's sign, which at a converged
 optimum is noise. Usually both agree with mgcv; when they don't, the fits
 differ. `ti()`, `t2()`, `id=`, `gam.side` constraints for nested smooths,
 `select=`, other bases and `method="ML"`/`"P-REML"` are not included.
-
-## What's in it
-
-| R | stats3 |
-|---|---|
-| `t.test` | `t_test("y ~ g")`, `t_test(x, mu=)`, `t_test(x, y, paired=True)` |
-| `wilcox.test` | `wilcox_test(...)`, same forms; R 4.6's exact tests with ties |
-| `kruskal.test`, `friedman.test`, `quade.test` | `kruskal_test("y ~ g")`, `friedman_test("y ~ g \| block")`, `quade_test("y ~ g \| block")` |
-| `ansari.test`, `mood.test` | `ansari_test("y ~ g")`, `ansari_test(x, y, conf_int=True)`: exact or normal, with the ratio of scales; `mood_test("y ~ g")`, with ties as in R 4.x |
-| `aov`, `TukeyHSD` | `aov("y ~ a * b")`, `aov("y ~ x + a")`: `summary(aov())`'s sequential table; `tukey_hsd("y ~ a * b", which=, ordered=)`: per-term comparisons, interactions included (no `Error()` strata) |
-| `oneway.test` | `oneway_test("y ~ g")`: Welch's ANOVA, or `var_equal=True` |
-| `pairwise.t.test`, `pairwise.wilcox.test`, `pairwise.prop.test` | `pairwise_t_test("y ~ g")`, `pairwise_wilcox_test("y ~ g")`, `pairwise_prop_test(x, n)`: one row per pair, `p_adjust_method=` |
-| `cor.test` | `cor_test(x, y, method="pearson" / "spearman" / "kendall")` |
-| `chisq.test` | `chisq_test(x, y)`, `chisq_test(x, p=[...])` |
-| `fisher.test` | `fisher_test(x, y)`: odds ratio for 2 x 2, exact p-value for larger tables |
-| `mcnemar.test`, `mantelhaen.test` | `mcnemar_test(x, y)`, `mantelhaen_test(x, y, strata)`, `exact=True` for 2 x 2 x K |
-| `prop.test`, `prop.trend.test`, `binom.test` | `prop_test(x, n)`, `prop_trend_test(x, n, score=)`, `binom_test(sex == "male")` |
-| `poisson.test` | `poisson_test(events, time)`: one rate, or the ratio of two |
-| `shapiro.test`, `ks.test` | `shapiro_test(x)`, `ks_test(x, "pnorm", mean=, sd=)`, `ks_test(x, y)` |
-| `bartlett.test`, `fligner.test`, `var.test`, `car::leveneTest` | `bartlett_test`, `fligner_test`, `var_test`, `levene_test` |
-| `p.adjust` | `p_adjust(p, "BH")`: on a vector or Series, or a column in `with_columns` / `mutate` |
-| effectsize | `cohens_d`, `hedges_g`, `eta_squared` |
-| `power.t.test`, `power.prop.test`, `power.anova.test` | `power_t_test`, `power_prop_test`, `power_anova_test` |
-| `lm`, `glm` | `lm`, `glm`, with broom's `tidy`, `glance`, `augment`, and `anova`, `predict` |
-| `lm` with `cbind()`, `manova`, `anova.mlm`, `mauchly.test` | `lm("cbind(y1, y2) ~ x")`, `manova(...)`, `anova(fit, test="Spherical", X="~ 1")`, `mauchly_test(fit, X="~ 1")` |
-| `car::Anova` | `anova(fit, type=2)`, `anova(fit, type=3)` |
-| sandwich, `lmtest::coeftest` | `tidy(fit, vcov="HC3")`, `vcov_cl(...)`, `vcov_nw()`, `vcov(fit)` |
-| modelsummary | `modelsummary(fit1, fit2)`: a frame, Markdown or HTML |
-| emmeans | `emmeans(fit, "species")`, `pairs(emm)`, `contrast(emm, ...)` |
-| MASS | `glm_nb("y ~ x")`, `glm("y ~ x", family=negative_binomial(theta))` |
-| MASS::polr | `polr("y ~ x", method="logistic")` |
-| nnet::multinom | `multinom("y ~ x")` |
-| lme4::lmer | `lmer("y ~ x + (x \|\| g)")`, `ranef(fit)`, `predict(fit, re_form=...)` |
-| MASS::rlm | `rlm("y ~ x", psi="huber")` |
-| quantreg::rq | `rq("y ~ x", tau=0.5, se="rank")` |
-| `prcomp`, `princomp`, `factanal` | `prcomp("~ a + b", scale_=True)`, `princomp(cols, cor=True)`, `factanal(cols, 2, rotation="promax")`; `varimax`, `promax` |
-| `dist`, `hclust`, `cutree`, `cmdscale`, `kmeans` | `dist(cols) >> hclust("average")`, `cutree(fit, k=3)`, `dist(cols) >> cmdscale(2)`, `kmeans(cols, centers)` |
 
 ## Multivariate exploration
 
@@ -587,7 +552,9 @@ Base R's `prcomp`, `princomp`, `factanal` (with `varimax` and `promax`),
 `hclust` and `cmdscale` take, grouping columns and all. The algorithms are
 ports of R's own code (hclust.f, kmns.f, kmeans.c, distance.c), so the merge
 matrix, heights and leaf order of `hclust`, ties included, and k-means from
-given centres are R's exactly. Random k-means starts use NumPy's generator,
+given centres are R's exactly. Sums of squares round as R's build for the
+machine computes them (fused on 64-bit ARM, not on x86-64), since the last
+bit decides which tied merge comes first. Random k-means starts use NumPy's generator,
 so with `centers=k` only the objective is comparable with R. `factanal` is
 R's maximum-likelihood fit over the uniquenesses, run to full precision.
 Component signs come from the LAPACK routines R calls (dgesdd for `prcomp`,
@@ -630,6 +597,43 @@ values follow `na_action` as in R: `"fail"` by default, or `"pass"`,
 | survival: `survreg` | `survreg("Surv(time, status) ~ x", dist="weibull")` |
 | glmnet | `glmnet("y ~ .", family=, alpha=)`, `cv_glmnet(..., foldid=)`, `coef(fit, s=)` |
 | mgcv::gam | `gam("y ~ s(x) + te(x, z) + f", method="REML")` |
+
+## What's in it
+
+| R | stats3 |
+|---|---|
+| `t.test` | `t_test("y ~ g")`, `t_test(x, mu=)`, `t_test(x, y, paired=True)` |
+| `wilcox.test` | `wilcox_test(...)`, same forms; R 4.6's exact tests with ties |
+| `kruskal.test`, `friedman.test`, `quade.test` | `kruskal_test("y ~ g")`, `friedman_test("y ~ g \| block")`, `quade_test("y ~ g \| block")` |
+| `ansari.test`, `mood.test` | `ansari_test("y ~ g")`, `ansari_test(x, y, conf_int=True)`: exact or normal, with the ratio of scales; `mood_test("y ~ g")`, with ties as in R 4.x |
+| `aov`, `TukeyHSD` | `aov("y ~ a * b")`, `aov("y ~ x + a")`: `summary(aov())`'s sequential table; `tukey_hsd("y ~ a * b", which=, ordered=)`: per-term comparisons, interactions included (no `Error()` strata) |
+| `oneway.test` | `oneway_test("y ~ g")`: Welch's ANOVA, or `var_equal=True` |
+| `pairwise.t.test`, `pairwise.wilcox.test`, `pairwise.prop.test` | `pairwise_t_test("y ~ g")`, `pairwise_wilcox_test("y ~ g")`, `pairwise_prop_test(x, n)`: one row per pair, `p_adjust_method=` |
+| `cor.test` | `cor_test(x, y, method="pearson" / "spearman" / "kendall")` |
+| `chisq.test` | `chisq_test(x, y)`, `chisq_test(x, p=[...])` |
+| `fisher.test` | `fisher_test(x, y)`: odds ratio for 2 x 2, exact p-value for larger tables |
+| `mcnemar.test`, `mantelhaen.test` | `mcnemar_test(x, y)`, `mantelhaen_test(x, y, strata)`, `exact=True` for 2 x 2 x K |
+| `prop.test`, `prop.trend.test`, `binom.test` | `prop_test(x, n)`, `prop_trend_test(x, n, score=)`, `binom_test(sex == "male")` |
+| `poisson.test` | `poisson_test(events, time)`: one rate, or the ratio of two |
+| `shapiro.test`, `ks.test` | `shapiro_test(x)`, `ks_test(x, "pnorm", mean=, sd=)`, `ks_test(x, y)` |
+| `bartlett.test`, `fligner.test`, `var.test`, `car::leveneTest` | `bartlett_test`, `fligner_test`, `var_test`, `levene_test` |
+| `p.adjust` | `p_adjust(p, "BH")`: on a vector or Series, or a column in `with_columns` / `mutate` |
+| effectsize | `cohens_d`, `hedges_g`, `eta_squared` |
+| `power.t.test`, `power.prop.test`, `power.anova.test` | `power_t_test`, `power_prop_test`, `power_anova_test` |
+| `lm`, `glm` | `lm`, `glm`, with broom's `tidy`, `glance`, `augment`, and `anova`, `predict` |
+| `lm` with `cbind()`, `manova`, `anova.mlm`, `mauchly.test` | `lm("cbind(y1, y2) ~ x")`, `manova(...)`, `anova(fit, test="Spherical", X="~ 1")`, `mauchly_test(fit, X="~ 1")` |
+| `car::Anova` | `anova(fit, type=2)`, `anova(fit, type=3)` |
+| sandwich, `lmtest::coeftest` | `tidy(fit, vcov="HC3")`, `vcov_cl(...)`, `vcov_nw()`, `vcov(fit)` |
+| modelsummary | `modelsummary(fit1, fit2)`: a frame, Markdown or HTML |
+| emmeans | `emmeans(fit, "species")`, `pairs(emm)`, `contrast(emm, ...)` |
+| MASS | `glm_nb("y ~ x")`, `glm("y ~ x", family=negative_binomial(theta))` |
+| MASS::polr | `polr("y ~ x", method="logistic")` |
+| nnet::multinom | `multinom("y ~ x")` |
+| lme4::lmer | `lmer("y ~ x + (x \|\| g)")`, `ranef(fit)`, `predict(fit, re_form=...)` |
+| MASS::rlm | `rlm("y ~ x", psi="huber")` |
+| quantreg::rq | `rq("y ~ x", tau=0.5, se="rank")` |
+| `prcomp`, `princomp`, `factanal` | `prcomp("~ a + b", scale_=True)`, `princomp(cols, cor=True)`, `factanal(cols, 2, rotation="promax")`; `varimax`, `promax` |
+| `dist`, `hclust`, `cutree`, `cmdscale`, `kmeans` | `dist(cols) >> hclust("average")`, `cutree(fit, k=3)`, `dist(cols) >> cmdscale(2)`, `kmeans(cols, centers)` |
 
 ## Bayesian statistics
 

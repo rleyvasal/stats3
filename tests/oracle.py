@@ -99,12 +99,39 @@ def _r_command() -> list[str] | None:
 
 R_COMMAND = _r_command()
 
+# R packages each oracle case needs beyond the four that R_COMMAND checks.
+# A case whose packages are missing skips, naming them, instead of failing
+# when its R script stops.
+R_PACKAGES = {
+    "emmeans": ("emmeans", "MASS"),
+    "gam": ("mgcv",),
+    "glmnet": ("glmnet", "survival"),
+    "lmer": ("lme4",),
+    "multinom": ("nnet", "broom"),
+    "negbin": ("MASS", "emmeans"),
+    "ordinal": ("MASS",),
+    "rlm": ("MASS", "emmeans"),
+    "rq": ("quantreg", "emmeans"),
+    "survival": ("survival", "broom"),
+}
+
+
+@lru_cache(maxsize=None)
+def _missing_r_packages(packages: tuple[str, ...]) -> tuple[str, ...]:
+    """The packages in ``packages`` that R cannot load."""
+    check = "cat(Filter(function(p) !requireNamespace(p, quietly=TRUE), setdiff(commandArgs(TRUE), \"--args\")))"
+    probe = subprocess.run([*R_COMMAND, "-e", check, "--args", *packages], capture_output=True, text=True)
+    return tuple(probe.stdout.split())
+
 
 @lru_cache(maxsize=None)
 def _oracle(case: str) -> dict:
     """R's results for one oracle case, as parsed JSON."""
     if R_COMMAND is None:
         pytest.skip("R oracle unavailable; install R with dplyr, jsonlite, sandwich and lmtest")
+    missing = _missing_r_packages(R_PACKAGES.get(case, ()))
+    if missing:
+        pytest.skip(f"the {case} oracle needs R's {', '.join(missing)}")
     completed = subprocess.run(
         [*R_COMMAND, str(R_CASES), case],
         cwd=ROOT, check=True, capture_output=True, text=True,

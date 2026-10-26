@@ -798,9 +798,13 @@ def _ansari_scores(values: np.ndarray, m: int) -> tuple[float, bool, np.ndarray]
 
 
 def _r_mean(a: np.ndarray) -> float:
-    """R's ``mean``: a sequential sum, then one correction pass. Where the
-    tie-corrected AB z is exactly 0 in exact arithmetic, its sign (which R's
-    interval code tests) follows this rounding."""
+    """R's ``mean``: a sequential sum, then one correction pass, both in C's
+    ``long double`` (80-bit on x86-64, the same as double on 64-bit ARM), as
+    NumPy's longdouble is. Where the tie-corrected AB z is exactly 0 in exact
+    arithmetic, its sign (which R's interval code tests) follows this
+    rounding, so the platform's long double decides whether R's estimate
+    exists."""
+    a = np.asarray(a, dtype=np.longdouble)
     s = np.cumsum(a)[-1] / len(a)
     return float(s + np.cumsum(a - s)[-1] / len(a))
 

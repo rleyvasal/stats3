@@ -120,7 +120,8 @@ def _check(result, expected, rel, table, p_rel=None):
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("name", sorted(FITS))
 @pytest.mark.parametrize("table", sorted(TABLES))
-def test_gam_matches_r(name, table, backend, r_gam):
+def test_gam_matches_r(name, table, backend, r_gam, cs_same_basis):
+    _skip_unless_same_cs_basis(name, cs_same_basis)
     frame, _ = as_input(data(), backend, [])
     fit = FITS[name](frame)
     result = TABLES[table](fit)
@@ -136,7 +137,8 @@ def test_mgcv_default_controls(name, table, r_gam):
 
 
 @pytest.mark.parametrize("name", sorted(FITS))
-def test_smoothing_parameters(name, r_gam):
+def test_smoothing_parameters(name, r_gam, cs_same_basis):
+    _skip_unless_same_cs_basis(name, cs_same_basis)
     fit = FITS[name](data())
     table = pl.DataFrame({"term": list(fit.smoothing_parameters), "sp": list(fit.smoothing_parameters.values())})
     want = r_gam[f"{name}__sp"]
@@ -184,19 +186,51 @@ def test_coefficients_and_covariances(name, r_gam):
                          loose=_floors(want, rel))
 
 
-def test_cs_penalties_match_r(r_gam):
-    """mgcv's cs shrinks the cr penalty's 2-d null space with 0.1 and 0.01
-    times its smallest positive eigenvalue, on whichever null eigenvectors
-    LAPACK returns first, which rounding decides. stats3 asks LAPACK the
-    same way (dsyevr); the cs cases are ones where both choose alike, which
-    this checks."""
+CS_PENALTIES = (("x0", 8), ("x2", 10))
+
+
+def _cs_penalties(r_gam):
+    """stats3's and R's cs penalty matrices, for each cs smooth in FITS."""
     from stats3.gam_smooth import cr_basis
 
-    for name, k in (("x0", 8), ("x2", 10)):
-        S = cr_basis(data()[name].to_numpy(), k, 0.1).S[0]
-        frame = pl.DataFrame({f"V{j + 1}": S[:, j] for j in range(k)})
-        want = r_gam[f"cs_penalty_{name}"]
-        assert_matches_r(frame, want, rel=1e-9, loose={c: (1e-9, 1e-9 * np.abs(S).max()) for c in frame.columns})
+    return [(cr_basis(data()[name].to_numpy(), k, 0.1).S[0],
+             np.array(r_gam[f"cs_penalty_{name}"]["data"], dtype=float).T) for name, k in CS_PENALTIES]
+
+
+@pytest.fixture(scope="module")
+def cs_same_basis(r_gam):
+    """Whether R's LAPACK returned the same null-space eigenvectors as
+    stats3's here. mgcv's cs shrinks the cr penalty's 2-d null space with 0.1
+    and 0.01 times its smallest positive eigenvalue, on whichever null
+    eigenvectors LAPACK returns first. Any orthonormal pair is valid and the
+    choice depends on the LAPACK build (stats3 and R both call dsyevr, but
+    NumPy's and R's libraries can differ), so mgcv's own cs fits differ
+    across platforms; they are comparable with R only where both agree."""
+    return all(np.allclose(ours, want, rtol=1e-9, atol=1e-9 * np.abs(want).max()) for ours, want in _cs_penalties(r_gam))
+
+
+def _skip_unless_same_cs_basis(name, cs_same_basis):
+    if name == "cs" and not cs_same_basis:
+        pytest.skip("R's LAPACK chose a different cs null-space basis on this platform; "
+                    "test_cs_penalties_match_r checks the basis-independent parts")
+
+
+def test_cs_penalties_match_r(r_gam, cs_same_basis):
+    """The cs penalty's eigenvalues, its shrunk null space and its action on
+    the complement match R on every platform. Where R's LAPACK chose the same
+    null-space eigenvectors, the matrices match entry by entry too."""
+    for ours, want in _cs_penalties(r_gam):
+        scale = np.abs(want).max()
+        values, vectors = np.linalg.eigh((ours + ours.T) / 2)
+        want_values, want_vectors = np.linalg.eigh((want + want.T) / 2)
+        assert values == pytest.approx(want_values, rel=1e-9, abs=1e-9 * scale)
+        # the two shrunk directions are the two smallest eigenvalues
+        null, want_null = vectors[:, :2] @ vectors[:, :2].T, want_vectors[:, :2] @ want_vectors[:, :2].T
+        assert np.abs(null - want_null).max() < 1e-8
+        rest = np.eye(len(ours)) - null
+        assert np.abs(rest @ ours @ rest - rest @ want @ rest).max() < 1e-9 * scale
+        if cs_same_basis:
+            assert np.abs(ours - want).max() < 1e-9 * scale
 
 
 def _new_rows():

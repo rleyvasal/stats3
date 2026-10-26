@@ -11,7 +11,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     # A stalled R install fails the run instead of holding it for hours.
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       matrix:
         python-version: ["3.12", "3.14"]
@@ -24,7 +24,7 @@ jobs:
         with:
           use-public-rspm: true
       - name: Install R packages
-        run: Rscript -e 'install.packages(c("dplyr", "jsonlite", "sandwich", "lmtest", "emmeans", "MASS", "quantreg")); library(emmeans); library(MASS); library(quantreg)'
+        run: Rscript -e 'pkgs <- c("dplyr", "jsonlite", "sandwich", "lmtest", "emmeans", "MASS", "quantreg", "car", "broom", "survival", "nnet", "mgcv", "lme4", "glmnet"); install.packages(pkgs); for (p in pkgs) library(p, character.only = TRUE)'
       - name: Install
         run: python -m pip install -e ".[dev]"
       - name: Test
