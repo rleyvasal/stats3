@@ -2,6 +2,10 @@
 
 Formulas take ``Surv(time, status)`` or ``Surv(start, stop, status)`` on
 the left. ``status`` is 0/1, logical, or 1/2 (2 = event), as in R.
+``survreg`` and ``survfit`` also take R's left- and interval-censored forms:
+``Surv(time, status, type="left")``, ``Surv(lower, upper, type="interval2")``
+(a missing bound is unbounded) and ``Surv(time, time2, event, type="interval")``
+(event 0 right-censored, 1 exact, 2 left-censored, 3 interval-censored).
 ``survfit`` gives Kaplan-Meier curves, ``survdiff`` the G-rho family of
 log-rank tests, ``coxph`` Cox models (with ``strata()`` and ``cluster()``
 terms, weights and offsets), ``cox_zph`` the proportional-hazards test,
@@ -80,16 +84,58 @@ class _Spec:
     strata: list[str]
     cluster: str | None
     response: str
+    surv_type: str = "right"  # right, counting, left, interval or interval2
+    missing: dict[int, str] | None = None  # Surv() argument -> its missing-value flag column
+
+
+_SURV_TYPES = ("right", "left", "counting", "interval", "interval2")
+
+
+def _surv_type(args: list[str], verb: str) -> tuple[list[str], str]:
+    """Surv()'s positional arguments and its type, R's default when not given."""
+    import re
+
+    kinds = [a for a in args if re.match(r"type\s*=", a)]
+    positional = [a for a in args if a not in kinds]
+    if len(kinds) > 1:
+        raise ValueError(f"{verb}(): Surv() takes one type=")
+    if kinds:
+        value = kinds[0].split("=", 1)[1].strip().strip("'\"")
+        if value not in _SURV_TYPES:
+            raise ValueError(f"{verb}(): Surv() type must be one of {list(_SURV_TYPES)}, got {value!r}")
+    else:
+        value = "counting" if len(positional) == 3 else "right"
+    wanted = {"right": (1, 2), "left": (2,), "counting": (3,), "interval": (3,), "interval2": (2,)}[value]
+    if len(positional) not in wanted:
+        raise ValueError(f"{verb}(): Surv(..., type={value!r}) takes {' or '.join(map(str, wanted))} arguments")
+    return positional, value
 
 
 def _specification(text: str, verb: str, data: Data, contrasts: Any, offset: Any,
                    allow_cluster: bool = True) -> tuple[_Spec, Formula, Data]:
     parsed = parse_formula(text, verb, data.columns)
     surv = _call_args(parsed.response or "", "Surv")
-    if surv is None or not 1 <= len(surv) <= 3:
+    if surv is None or not 1 <= len(surv) <= 4:
         raise ValueError(f"{verb}(): the response must be Surv(time, status) or Surv(start, stop, status)")
-    hidden = {}
+    surv, surv_type = _surv_type(surv, verb)
+    hidden, missing = {}, {}
+    # Interval bounds may be missing (unbounded): carry each as a value and a
+    # flag, so the model frame keeps the row. Both bounds missing is a missing row.
+    bounds = {"interval2": (0, 1), "interval": (1,)}.get(surv_type, ())
+    exprs = {}
+    for i in bounds:
+        expr = _readable(surv[i], verb)
+        exprs[i] = (expr if expr is not None else variable_expr(surv[i], verb)[0]).cast(pl.Float64)
+    absent = {i: e.is_null() | e.is_nan() for i, e in exprs.items()}
+    for i, e in exprs.items():
+        keep = ~(absent[0] & absent[1]) if surv_type == "interval2" else pl.lit(True)
+        hidden[f"{_HIDDEN}{i}"] = pl.when(keep).then(pl.when(absent[i]).then(0.0).otherwise(e))
+        hidden[f"{_HIDDEN}na{i}"] = absent[i].cast(pl.Float64)
+        missing[i] = f"{_HIDDEN}na{i}"
     for i, label in enumerate(surv):
+        if i in exprs:
+            surv[i] = f"{_HIDDEN}{i}"
+            continue
         expr = _readable(label, verb)
         if expr is not None:
             hidden[f"{_HIDDEN}{i}"] = expr
@@ -113,13 +159,15 @@ def _specification(text: str, verb: str, data: Data, contrasts: Any, offset: Any
     covariates = replace(parsed, terms=terms, response=None)
     covariates.contrasts = _contrasts(contrasts, covariates, verb)
     covariates.offset_arg = offset
-    extra = [*surv[1:], *strata, *([cluster] if cluster else [])]
+    extra = [*surv[1:], *missing.values(), *strata, *([cluster] if cluster else [])]
     seen = set(covariates.variables())
     frame_terms = list(terms) + [(v,) for v in dict.fromkeys(extra) if v not in seen]
     framing = replace(parsed, response=surv[0], terms=frame_terms)
     if hidden:
         data = Data(data._lf.with_columns(**hidden), data._groups, data._levels, data.kind, data.source)
-    return _Spec(covariates, surv, strata, cluster, parsed.response), framing, data
+    spec = _Spec(covariates, surv, strata, cluster, parsed.response)
+    spec.surv_type, spec.missing = surv_type, missing
+    return spec, framing, data
 
 
 def _values(frame: _Frame, label: str, first: bool) -> np.ndarray:
@@ -136,13 +184,19 @@ def _values(frame: _Frame, label: str, first: bool) -> np.ndarray:
 @dataclass
 class _Response:
     start: np.ndarray  # -inf for right-censored data
-    stop: np.ndarray
-    status: np.ndarray
+    stop: np.ndarray  # the time; for an interval, its lower end (R's time1)
+    status: np.ndarray  # 1 for an event (an exact time), else 0
     counting: bool
+    kind: str = "right"  # right, counting, or censored (left/interval types)
+    code: np.ndarray | None = None  # R's status: 0 right, 1 exact, 2 left, 3 interval
+    upper: np.ndarray | None = None  # an interval's upper end (R's time2)
 
 
 def _response(frame: _Frame, spec: _Spec, verb: str) -> _Response:
     cols = [_values(frame, label, i == 0) for i, label in enumerate(spec.surv)]
+    kind = spec.surv_type
+    if kind in ("left", "interval", "interval2"):
+        return _censored_response(frame, spec, cols, verb)
     if len(cols) == 1:
         cols.append(np.ones(len(cols[0])))
     status = cols[-1]
@@ -153,8 +207,45 @@ def _response(frame: _Frame, spec: _Spec, verb: str) -> _Response:
     if len(cols) == 3:
         if np.any(cols[1] <= cols[0]):
             raise ValueError(f"{verb}(): stop time must be greater than start time")
-        return _Response(cols[0], cols[1], status, True)
+        return _Response(cols[0], cols[1], status, True, "counting")
     return _Response(np.full(len(status), -np.inf), cols[0], status, False)
+
+
+def _censored_response(frame: _Frame, spec: _Spec, cols: list[np.ndarray], verb: str) -> _Response:
+    """Surv(type = "left", "interval" or "interval2"), coded as R's Surv does."""
+    n = len(cols[0])
+    flag = {i: _values(frame, label, False).astype(bool) for i, label in (spec.missing or {}).items()}
+    upper = np.ones(n)
+    if spec.surv_type == "left":
+        status = cols[1]
+        if len(status) and np.max(status) == 2:
+            status = status - 1
+        if np.any((status != 0) & (status != 1)):
+            raise ValueError(f"{verb}(): invalid status values; use 0/1, 1/2 or TRUE/FALSE")
+        time, code = cols[0], np.where(status == 1, 1, 2)
+    elif spec.surv_type == "interval":
+        time, code = cols[0], cols[2].astype(float)
+        if np.any(~np.isin(code, (0, 1, 2, 3))):
+            raise ValueError(f"{verb}(): Surv(type='interval') event codes must be 0, 1, 2 or 3")
+        interval = code == 3
+        if np.any(interval & flag[1]):
+            raise ValueError(f"{verb}(): an interval-censored row (event 3) needs both times")
+        upper = np.where(interval, cols[1], 1.0)
+    else:  # interval2: missing lower is left-censored, missing upper right-censored
+        lower, high = cols[0], cols[1]
+        code = np.where(flag[0], 2, np.where(flag[1], 0, np.where(lower == high, 1, 3)))
+        time = np.where(flag[0], high, lower)
+        upper = np.where(code == 3, high, 1.0)
+    code = code.astype(np.int64)
+    if np.any((code == 3) & (upper < time)):
+        raise ValueError(f"{verb}(): invalid interval: start > stop")
+    return _Response(np.full(n, -np.inf), time.astype(float), (code == 1).astype(float), False,
+                     "censored", code, upper.astype(float))
+
+
+def _r_type(spec: _Spec) -> str:
+    """The type R's Surv object reports (interval2 is stored as interval)."""
+    return "interval" if spec.surv_type == "interval2" else spec.surv_type
 
 
 def _level_label(v: Variable, value: Any) -> str:
@@ -249,6 +340,9 @@ def _at_risk_sums(y: _Response, times: np.ndarray, values: np.ndarray) -> np.nda
 
 
 def _subset(y: _Response, keep) -> _Response:
+    if y.kind == "censored":
+        return _Response(y.start[keep], y.stop[keep], y.status[keep], y.counting, y.kind,
+                         y.code[keep], y.upper[keep])
     return _Response(y.start[keep], y.stop[keep], y.status[keep], y.counting)
 
 
@@ -289,7 +383,12 @@ def _confint(p, se, conf_type, level):
 _CONF_TYPES = ("log", "log-log", "plain", "logit", "arcsin", "none")
 
 
-def _km(y: _Response, w: np.ndarray) -> dict[str, np.ndarray]:
+def _km(y: _Response, w: np.ndarray, robust: bool = False) -> dict[str, np.ndarray]:
+    """The (weighted) Kaplan-Meier curve. ``robust`` gives R's infinitesimal
+    jackknife variance, as survfitKM's ``robust=TRUE`` (R's default for
+    non-integer weights): ``std_err`` is then R's, on the survival scale, and
+    ``se_log`` (on the log scale) sets the intervals; otherwise both are
+    Greenwood's standard error of -log(survival)."""
     times = np.unique(y.stop)
     pos = np.searchsorted(times, y.stop)
     n_event = np.bincount(pos, weights=w * y.status, minlength=len(times))
@@ -298,8 +397,116 @@ def _km(y: _Response, w: np.ndarray) -> dict[str, np.ndarray]:
     with np.errstate(divide="ignore", invalid="ignore"):
         surv = np.cumprod(np.where(n_risk > 0, 1 - n_event / n_risk, 1.0))
         var = np.cumsum(np.where(n_event > 0, n_event / (n_risk * (n_risk - n_event)), 0.0))
-    return {"time": times, "n_risk": n_risk, "n_event": n_event, "n_censor": n_censor,
-            "surv": surv, "std_err": np.sqrt(var)}
+    curve = {"time": times, "n_risk": n_risk, "n_event": n_event, "n_censor": n_censor, "surv": surv}
+    if not robust:
+        curve["std_err"] = curve["se_log"] = np.sqrt(var)
+        return curve
+    se_log = _km_jackknife(y, w, times, n_risk, n_event)
+    # R's robust curves: once survival reaches 0, standard error and limits are 0.
+    se_log = np.where(surv == 0, 0.0, se_log)
+    curve["se_log"], curve["std_err"] = se_log, surv * se_log
+    return curve
+
+
+def _km_jackknife(y: _Response, w, times, n_risk, n_event) -> np.ndarray:
+    """The infinitesimal jackknife standard error of log S(t): each row's
+    derivative of log S(t) in its own weight, D_i(t), with
+    sqrt(sum_i (w_i D_i(t))^2). D_i(t) = H(min(t, stop_i)) - H(start_i) minus,
+    for an event at t_k <= t, 1 / (n_k - d_k), where H sums d / (n (n - d))."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        h = np.where(n_event > 0, n_event / (n_risk * (n_risk - n_event)), 0.0)
+        jump = np.where(n_event > 0, 1 / (n_risk - n_event), 0.0)
+    H = np.cumsum(h)
+    total = np.zeros(len(times))
+    np_err = np.errstate(invalid="ignore", over="ignore")
+    np_err.__enter__()
+    chunk = max(1, int(2e6 // max(1, len(times))))
+    for a in range(0, len(w), chunk):
+        stop, start = y.stop[a:a + chunk], y.start[a:a + chunk]
+        status, wt = y.status[a:a + chunk], w[a:a + chunk]
+        at_stop = np.searchsorted(times, stop, "right") - 1  # last time <= stop
+        upto = np.minimum(np.arange(len(times))[None, :], at_stop[:, None])
+        D = np.where(upto >= 0, H[np.maximum(upto, 0)], 0.0)
+        if y.counting:
+            # At risk on (start, stop]: subtract H up to min(t, start).
+            before = np.searchsorted(times, start, "right") - 1  # last time <= start
+            upto0 = np.minimum(np.arange(len(times))[None, :], before[:, None])
+            D = D - np.where(upto0 >= 0, H[np.maximum(upto0, 0)], 0.0)
+        event_k = np.searchsorted(times, stop)
+        hit = (status == 1)[:, None] & (np.arange(len(times))[None, :] >= event_k[:, None])
+        D = D - np.where(hit, jump[np.minimum(event_k, len(times) - 1)][:, None], 0.0)
+        total += np.sum((wt[:, None] * D) ** 2, axis=0)
+    np_err.__exit__(None, None, None)
+    return np.sqrt(total)
+
+
+def _turnbull(y: _Response, wt: np.ndarray) -> dict[str, np.ndarray]:
+    """R's survfitTurnbull for one curve: Turnbull's estimator for left- and
+    interval-censored data, by R's self-consistency iteration (Kaplan-Meier
+    refits with the censored rows' weight spread over the jump times, Aitken
+    acceleration every fifth step) and its stopping rule, so its values are
+    R's, including where they stop short of the limit."""
+    status = y.code.copy()
+    time1, time2 = y.stop, y.upper
+    status[(status == 3) & (time1 == time2)] = 1
+    n = len(status)
+    third = status == 3
+    stat2 = np.r_[np.array([2, 0, 1, 2])[status], np.ones(int(third.sum()), dtype=np.int64)]
+    times2 = np.r_[time1, time2[third]]
+    order = np.lexsort((stat2, times2))
+    times2, stat2 = times2[order], stat2[order]
+    pairs = (stat2[:-1] != 1) & (stat2[1:] == 1)
+    jtimes = np.r_[times2[stat2 == 0], (0.5 * (times2[:-1] + times2[1:]))[pairs]]
+    mintime = float(np.min(jtimes))
+    early = (status == 2) & (time1 < mintime)
+    if early.any():
+        status[early] = 1
+        jtimes = np.r_[time1[early], jtimes]
+    jtimes = np.unique(jtimes)
+    njump = len(jtimes)
+    real = status < 2
+    pseudo_y = _Response(np.full(int(real.sum()) + njump, -np.inf), np.r_[time1[real], jtimes],
+                         np.r_[status[real], np.ones(njump)].astype(float), False)
+    censored = status > 1
+    if censored.any():
+        lower, upper, left = time1[censored][:, None], time2[censored][:, None], (status[censored] == 2)[:, None]
+        wtmat = ((left & (jtimes[None, :] <= lower))
+                 | (~left & (jtimes[None, :] > lower) & (jtimes[None, :] <= upper))).astype(float)
+        lwt = wt[censored]
+    else:
+        wtmat, lwt = np.ones((1, njump)), np.ones(1)
+
+    def at_jumps(fit):
+        return fit["surv"][np.searchsorted(fit["time"], jtimes)]
+
+    column = wtmat.sum(axis=0)
+    fit = {"time": jtimes, "surv": 1 - np.cumsum(column) / column.sum()}
+    old = fit["surv"]
+    iteration, eps = 0, 1.0
+    aitken1 = jump1 = np.zeros(njump)
+    jump2 = np.zeros(njump)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        while eps > 5e-5:
+            iteration += 1
+            jumps = -np.diff(np.r_[1.0, at_jumps(fit)])
+            aitken2, aitken1, jsave = aitken1, jumps - jump1, jumps
+            if iteration % 5 == 0:
+                oldlik = float(np.sum(np.log(wtmat @ jumps)))
+                jumps = jump2 - aitken2 ** 2 / (aitken1 - aitken2)
+                bad = (jumps <= 0) | (jumps >= 1) | ~np.isfinite(jumps)
+                jumps = np.where(bad, jsave, jumps)
+                if float(np.sum(np.log(wtmat @ jumps))) < oldlik:
+                    jumps = jsave
+            jump2, jump1 = jump1, jsave
+            spread = wtmat * jumps[None, :]
+            spread = (lwt / spread.sum(axis=1))[:, None] * spread
+            fit = _km(pseudo_y, np.r_[wt[real], spread.sum(axis=0)], robust=True)
+            stemp = at_jumps(fit)
+            eps = 1.0 if iteration % 5 < 2 else float(np.max(np.abs(old - stemp)))
+            old = stemp
+    fit["n_event"] = np.where((fit["time"] < mintime) & (fit["n_event"] > 0), 0.0, fit["n_event"])
+    fit["iterations"] = iteration
+    return fit
 
 
 def _minmin(y, x):
@@ -386,8 +593,9 @@ class SurvivalCurves(_Curves):
         if spec.strata:
             raise ValueError("survfit(): use the grouping variables directly, not strata()")
         w = frame.weights
-        if np.any(w != np.floor(w)):
-            raise ValueError("survfit(): non-integer weights need R's robust variance, which is not available")
+        # R's survfit: non-integer weights switch to the robust (infinitesimal
+        # jackknife) variance; left- and interval-censored data to Turnbull's estimator.
+        robust = bool(np.any(w != np.floor(w)))
         y = _response(frame, spec, "survfit")
         labels = [t[0] for t in spec.formula.terms]
         if any(len(t) > 1 for t in spec.formula.terms):
@@ -396,10 +604,11 @@ class SurvivalCurves(_Curves):
         self.curves = []
         for k in range(max(len(names), 1)):
             keep = codes == k
-            curve = _km(_subset(y, keep), w[keep])
+            curve = (_turnbull(_subset(y, keep), w[keep]) if y.kind == "censored"
+                     else _km(_subset(y, keep), w[keep], robust))
             curve["records"] = int(keep.sum())
             if conf_type != "none":
-                curve["lower"], curve["upper"] = _confint(curve["surv"], curve["std_err"], conf_type, conf_level)
+                curve["lower"], curve["upper"] = _confint(curve["surv"], curve["se_log"], conf_type, conf_level)
             self.curves.append((names[k] if names else None, curve))
 
 
@@ -449,6 +658,8 @@ class SurvivalDifference(_Fit):
     def __init__(self, spec, frame, data, rho):
         super().__init__(spec.formula, None, frame, data, "survdiff")
         y = _response(frame, spec, "survdiff")
+        if y.kind == "censored":
+            raise ValueError("survdiff(): Right censored data only")
         if y.counting:
             raise ValueError("survdiff(): not defined for counting process data")
         if np.any(frame.weights != 1):
@@ -748,6 +959,8 @@ class CoxModel(_Fit):
         super().__init__(spec.formula, design, frame, data, "coxph")
         self.spec, self.method = spec, ties
         self.y = _response(frame, spec, "coxph")
+        if self.y.kind == "censored":
+            raise ValueError(f'coxph(): Cox model doesn\'t support "{_r_type(spec)}" survival data')
         w = frame.weights
         if np.any(w <= 0):
             raise ValueError("coxph(): invalid weights, must be > 0")
@@ -1312,6 +1525,60 @@ def _pieces(base, z, exact):
     return ll, g1, g2
 
 
+def _density(base, z):
+    """R's survreg.distributions density matrix: F, S = 1 - F, f, f'/f and
+    f''/f at z, for the standard extreme value, logistic or normal."""
+    s = _special()
+    with np.errstate(over="ignore", invalid="ignore"):
+        if base == "extreme":
+            w = np.exp(z)
+            ww = np.exp(-w)
+            return 1 - ww, ww, w * ww, 1 - w, w * (w - 3) + 1
+        if base == "logistic":
+            w = np.exp(z)
+            return w / (1 + w), 1 / (1 + w), w / (1 + w) ** 2, (1 - w) / (1 + w), (w * (w - 4) + 1) / (1 + w) ** 2
+        return s.ndtr(z), s.ndtr(-z), np.exp(-z * z / 2) / math.sqrt(2 * math.pi), -z, z * z - 1
+
+
+def _derfun(base, code, y1, y2, eta, sigma):
+    """R's survreg.fit derfun: the first and second derivatives in the linear
+    predictor that start the fit, for every kind of censoring."""
+    z = (y1 - eta) / sigma
+    F, S, f, f1, f2 = _density(base, z)
+    interval = code == 3
+    z2 = np.where(interval, (y2 - eta) / sigma, 0.0)
+    F2, S2, g, g1, _ = _density(base, z2)
+    denom = np.select([code == 0, code == 1, code == 2, interval],
+                      [S, np.ones_like(z), F, np.where(z > 0, S - S2, F2 - F)])
+    denom = 1 / (denom * sigma)
+    dtemp = f * f1
+    dg = -denom * np.select([code == 0, code == 1, code == 2, interval], [-f, f1, f, g - f])
+    ddg = (denom / sigma) * np.select([code == 0, code == 1, code == 2, interval], [-dtemp, f2, dtemp, g * g1 - dtemp])
+    return dg, ddg - dg ** 2
+
+
+def _censored_terms(base, z, z2, code, sigma):
+    """Log-likelihood terms of left- (code 2) and interval-censored (code 3)
+    rows, log A with A = F(z) or the probability between z and z2, and their
+    derivatives in the linear predictor eta and in s = log(scale)."""
+    F, S, f, f1, _ = _density(base, z)
+    F2, S2, g, g1, _ = _density(base, z2)
+    fp, gp = f * f1, g * g1  # f'(z), f'(z2)
+    left = code == 2
+    # A = F(z) for left-censoring; for an interval the more accurate of
+    # S(z) - S(z2) and F(z2) - F(z), as R chooses.
+    A = np.where(left, F, np.where(z > 0, S - S2, F2 - F))
+    # dA/d eta = sum_k c_k f(z_k) dz_k/d eta, with dz/d eta = -1/sigma and dz/ds = -z
+    A_e = np.where(left, -f, f - g) / sigma
+    A_ee = np.where(left, fp, gp - fp) / sigma ** 2
+    A_s = np.where(left, -z * f, z * f - z2 * g)
+    A_es = np.where(left, z * fp + f, (z2 * gp + g) - (z * fp + f)) / sigma
+    A_ss = np.where(left, z * f + z * z * fp, (z2 * g + z2 * z2 * gp) - (z * f + z * z * fp))
+    ll = np.log(A)
+    d_e, d_s = A_e / A, A_s / A
+    return ll, d_e, A_ee / A - d_e ** 2, d_s, A_es / A - d_e * d_s, A_ss / A - d_s ** 2
+
+
 def _init(base, y, w):
     mean = np.sum(y * w) / np.sum(w)
     var = np.sum(w * (y - mean) ** 2) / np.sum(w)
@@ -1324,27 +1591,41 @@ def _survreg_p(stat, df):
 
 
 class _Survreg:
-    """R's survreg6: Newton-Raphson on (beta, log scale), with step halving."""
+    """R's survreg6: Newton-Raphson on (beta, log scale), with step halving.
+    ``code`` is R's status (0 right, 1 exact, 2 left, 3 interval) and ``y2``
+    an interval's upper end; right-censored data need neither."""
 
-    def __init__(self, base, y, status, x, w, offset, scale):
-        self.base, self.y, self.exact, self.x, self.w, self.offset, self.scale = base, y, status == 1, x, w, offset, scale
+    def __init__(self, base, y, status, x, w, offset, scale, code=None, y2=None):
+        self.base, self.y, self.x, self.w, self.offset, self.scale = base, y, x, w, offset, scale
+        self.code = np.where(status == 1, 1, 0) if code is None else code
+        self.exact = self.code == 1
+        self.y2 = np.zeros(len(y)) if y2 is None else y2
+        self.other = self.code >= 2  # left- and interval-censored rows
 
     def derivatives(self, theta):
         p = self.x.shape[1]
         beta = theta[:p]
         s = math.log(self.scale) if self.scale else theta[p]
         sigma = math.exp(s)
-        z = (self.y - self.x @ beta - self.offset) / sigma
+        eta = self.x @ beta + self.offset
+        z = (self.y - eta) / sigma
         ll, g1, g2 = _pieces(self.base, z, self.exact)
         w = self.w
-        loglik = float(np.sum(w * (ll - self.exact * s)))
+        ll = ll - self.exact * s
         d_eta, dd_eta = -g1 / sigma, g2 / sigma ** 2
+        d_s = -z * g1 - self.exact
+        d_es = (z * g2 + g1) / sigma
+        d_ss = z * g1 + z * z * g2
+        if self.other.any():
+            k = self.other
+            z2 = (self.y2[k] - eta[k]) / sigma
+            ll_k, e_k, ee_k, s_k, es_k, ss_k = _censored_terms(self.base, z[k], z2, self.code[k], sigma)
+            ll, d_eta, dd_eta, d_s, d_es, d_ss = (np.array(a, dtype=float) for a in (ll, d_eta, dd_eta, d_s, d_es, d_ss))
+            ll[k], d_eta[k], dd_eta[k], d_s[k], d_es[k], d_ss[k] = ll_k, e_k, ee_k, s_k, es_k, ss_k
+        loglik = float(np.sum(w * ll))
         u = self.x.T @ (w * d_eta)
         h = (self.x * (w * dd_eta)[:, None]).T @ self.x
         if not self.scale:
-            d_s = -z * g1 - self.exact
-            d_es = (z * g2 + g1) / sigma
-            d_ss = z * g1 + z * z * g2
             u = np.r_[u, np.sum(w * d_s)]
             cross = self.x.T @ (w * d_es)
             h = np.block([[h, cross[:, None]], [cross[None, :], np.array([[np.sum(w * d_ss)]])]])
@@ -1406,15 +1687,18 @@ class SurvregModel(_Fit):
         if np.any(w <= 0):
             raise ValueError("survreg(): invalid weights, must be > 0")
         time = y.stop
-        exact = y.status == 1
+        code = y.code if y.code is not None else np.where(y.status == 1, 1, 0)
+        upper = y.upper if y.upper is not None else np.ones(n)
+        exact = code == 1
+        interval = code == 3
         if self.logged:
-            if np.any(time <= 0):
+            if np.any(time <= 0) or np.any(interval & (upper <= 0)):
                 raise ValueError("survreg(): invalid survival times for this distribution")
             logcorrect = -float(np.sum(w[exact] * np.log(time[exact])))
-            ty = np.log(time)
+            ty, ty2 = np.log(time), np.where(interval, np.log(np.where(interval, upper, 1.0)), 0.0)
         else:
-            logcorrect, ty = 0.0, time.astype(float)
-        self.time, self.status, self.prior_weights, self.n = time, y.status, w, n
+            logcorrect, ty, ty2 = 0.0, time.astype(float), np.where(interval, upper, 0.0)
+        self.time, self.status, self.code, self.prior_weights, self.n = time, y.status, code, w, n
         x = design.matrix
         from stats3.models import _qr
 
@@ -1422,27 +1706,28 @@ class SurvregModel(_Fit):
         if len(self.qr.kept) < x.shape[1]:
             raise ValueError("survreg(): X matrix is singular")
         offset = frame.offset
-        mean0, var0 = _init(self.base, ty, w)
+        # R starts from yy: the time, or an interval's midpoint.
+        yy = np.where(interval, (ty + ty2) / 2, ty)
+        mean0, var0 = _init(self.base, yy, w)
         vars_ = math.log(scale) if scale else math.log(4 * var0) / 2
         meanonly = x.shape[1] == 1 and np.all(x == 1)
 
         def start_eta(sigma):
-            _, g1, g2 = _pieces(self.base, np.zeros(n), exact)
-            return -g1 / sigma, g2 / sigma ** 2
+            return _derfun(self.base, code, ty, ty2, yy, sigma)
 
         if not meanonly:
             dg, ddg = start_eta(math.exp(vars_))
             wt = -ddg * w
-            c0 = np.sum(w * dg + wt * (ty - offset)) / np.sum(wt)
-            null = _Survreg(self.base, ty, y.status, np.ones((n, 1)), w, offset, scale)
+            c0 = np.sum(w * dg + wt * (yy - offset)) / np.sum(wt)
+            null = _Survreg(self.base, ty, y.status, np.ones((n, 1)), w, offset, scale, code, ty2)
             fit0 = null.fit(np.r_[c0, [] if scale else [vars_]], 20, eps)
             if not np.all(np.isfinite(fit0["theta"])):
                 raise ValueError("survreg(): initial iteration failed")
             vars_ = math.log(scale) if scale else fit0["theta"][1]
         dg, ddg = start_eta(math.exp(vars_))
         wt = -ddg * w
-        coef = np.linalg.solve(x.T @ (wt[:, None] * x), x.T @ (wt * (ty - offset) + w * dg))
-        model = _Survreg(self.base, ty, y.status, x, w, offset, scale)
+        coef = np.linalg.solve(x.T @ (wt[:, None] * x), x.T @ (wt * (yy - offset) + w * dg))
+        model = _Survreg(self.base, ty, y.status, x, w, offset, scale, code, ty2)
         fit = model.fit(np.r_[coef, [] if scale else [vars_]], maxit, eps)
         if not fit["converged"]:
             _warn("survreg(): ran out of iterations and did not converge")
@@ -1595,8 +1880,11 @@ def survreg(formula: str, *, dist: str = "weibull", scale: float = 0, weights: A
     scale, with ``Log(scale)`` estimated unless ``scale=`` fixes it.
     ``tidy`` and ``glance`` follow broom; ``predict`` takes
     ``type="response"`` (default), ``"lp"``, ``"quantile"`` or
-    ``"uquantile"`` (with ``p=``) and ``se_fit=``. Right-censored data
-    only; strata (separate scales) and robust variances are not supported.
+    ``"uquantile"`` (with ``p=``) and ``se_fit=``. Left- and
+    interval-censored responses (``Surv(..., type="left")``,
+    ``type="interval2"`` or ``"interval"``) contribute F(t) and the
+    probability of their interval, as R's survreg. Strata (separate scales)
+    and robust variances are not supported.
     """
     if dist not in _DISTRIBUTIONS:
         raise ValueError(f"survreg(): dist must be one of {sorted(_DISTRIBUTIONS)}")

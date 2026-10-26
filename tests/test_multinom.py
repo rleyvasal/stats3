@@ -228,8 +228,6 @@ def test_unsupported_inference():
         tidy(fit, vcov='HC3')
     with pytest.raises(TypeError, match='single multinom'):
         anova(fit)
-    with pytest.raises(TypeError, match='multinomial marginal'):
-        emmeans(fit, 'sex')
     with pytest.raises(ValueError, match="'class' or 'probs'"):
         predict(fit, type='link')
     with pytest.raises(TypeError, match='multinom fits'):

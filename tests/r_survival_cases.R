@@ -13,6 +13,15 @@ survival_cases <- function() {
   lung$w <- (i %% 3) + 1
   lung$wf <- 0.5 + (i %% 4) / 4
   lung$off <- ((i %% 7) - 3) / 10
+  # Interval-censored deaths: each known only to a 30-day interval, early
+  # ones only to be before its end; censored times stay right-censored.
+  dead <- lung$status == 2
+  lung$lo <- ifelse(dead, floor(lung$time / 30) * 30, lung$time)
+  lung$hi <- ifelse(dead, lung$lo + 30, NA)
+  lung$lo[dead & (lung$time < 60 | lung$lo == 0)] <- NA
+  lung$ev <- ifelse(is.na(lung$hi), 0, ifelse(is.na(lung$lo), 2, 3))
+  lung$t1 <- ifelse(is.na(lung$lo), lung$hi, lung$lo)
+  lung$t2 <- ifelse(is.na(lung$hi), lung$t1, lung$hi)
   vet <- read.csv("tests/data/veteran.csv")
   vet$celltype <- factor(vet$celltype, levels=c("squamous", "smallcell", "adeno", "large"))
   out <- list()
@@ -163,6 +172,14 @@ survival_cases <- function() {
   out$reg_offset <- reg_tables(survreg(Surv(time, status) ~ age + sex + offset(off), lung), newl)
   out$reg_scale <- reg_tables(survreg(Surv(time, status) ~ age + sex, lung, scale=1.5), newl)
   out$reg_intercept <- reg_tables(survreg(Surv(time, status) ~ 1, lung, dist="lognormal"), newl)
+  for (d in c("weibull", "lognormal", "loglogistic"))
+    out[[paste0("reg_interval_", d)]] <- reg_tables(survreg(Surv(lo, hi, type="interval2") ~ age + sex, lung, dist=d), newl)
+  out$reg_interval_scale <- reg_tables(survreg(Surv(lo, hi, type="interval2") ~ age, lung, dist="gaussian", scale=200), newl)
+  out$reg_interval_codes <- reg_tables(survreg(Surv(t1, t2, ev, type="interval") ~ age + sex, lung), newl)
+  out$reg_left <- reg_tables(survreg(Surv(time, status == 2, type="left") ~ age + sex, lung), newl)
+  out$km_interval <- km(survfit(Surv(lo, hi, type="interval2") ~ sex, lung))
+  out$km_left <- km(survfit(Surv(time, status == 2, type="left") ~ 1, lung))
+  out$km_fweights <- km(survfit(Surv(time, status) ~ sex, lung, weights=wf))
   gr <- lapply(c(1, 2), function(g) {
     f <- survreg(Surv(time, status) ~ age, lung[lung$sex == g, ])
     list(tidy=cbind(sex=g, snake(tidy(f))), glance=cbind(sex=g, snake(glance(f))))

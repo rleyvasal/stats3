@@ -180,7 +180,7 @@ def test_unsupported_inference_and_invalid_responses():
         emmeans(fit,'Infl',mode='cum.prob')
     with pytest.raises(ValueError,match='not a variable'):
         emmeans(fit,'Infl',by='Sat')
-    with pytest.raises(ValueError,match='for polr fits'):
+    with pytest.raises(ValueError,match='is for polr and multinom fits'):
         emmeans(lm(housing(),'Freq ~ Infl'),'Infl',mode='prob')
     with pytest.raises(TypeError,match='single polr'):
         anova(fit)

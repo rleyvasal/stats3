@@ -11,8 +11,16 @@ from oracle import BACKENDS, DATA, R_COMMAND, _oracle, as_input, as_polars, asse
 def lung():
     frame = pl.read_csv(DATA / "lung.csv", null_values="NA").rename({"ph.ecog": "ecog"})
     i = pl.int_range(1, pl.len() + 1)
-    return frame.with_columns(entry=pl.min_horizontal(pl.col("time") - 1, (i % 5) * 20.0),
-                              w=(i % 3) + 1.0, wf=.5 + (i % 4) / 4, off=((i % 7) - 3) / 10)
+    frame = frame.with_columns(entry=pl.min_horizontal(pl.col("time") - 1, (i % 5) * 20.0),
+                               w=(i % 3) + 1.0, wf=.5 + (i % 4) / 4, off=((i % 7) - 3) / 10)
+    # Interval-censored deaths, as tests/r_survival_cases.R makes them.
+    dead = pl.col("status") == 2
+    frame = frame.with_columns(lo=pl.when(dead).then((pl.col("time") // 30) * 30.0).otherwise(pl.col("time").cast(pl.Float64)))
+    frame = frame.with_columns(hi=pl.when(dead).then(pl.col("lo") + 30))
+    frame = frame.with_columns(lo=pl.when(dead & ((pl.col("time") < 60) | (pl.col("lo") == 0))).then(None).otherwise(pl.col("lo")))
+    return frame.with_columns(
+        ev=pl.when(pl.col("hi").is_null()).then(0).when(pl.col("lo").is_null()).then(2).otherwise(3),
+        t1=pl.coalesce("lo", "hi"), t2=pl.coalesce("hi", "lo"))
 
 
 def veteran():
@@ -126,6 +134,14 @@ CASES = {
     "reg_offset": (lung, reg(f"{S} ~ age + sex + offset(off)", NEW_LUNG)),
     "reg_scale": (lung, reg(f"{S} ~ age + sex", NEW_LUNG, scale=1.5)),
     "reg_intercept": (lung, reg(f"{S} ~ 1", NEW_LUNG, dist="lognormal")),
+    **{f"reg_interval_{d}": (lung, reg('Surv(lo, hi, type="interval2") ~ age + sex', NEW_LUNG, dist=d))
+       for d in ("weibull", "lognormal", "loglogistic")},
+    "reg_interval_scale": (lung, reg('Surv(lo, hi, type="interval2") ~ age', NEW_LUNG, dist="gaussian", scale=200)),
+    "reg_interval_codes": (lung, reg('Surv(t1, t2, ev, type="interval") ~ age + sex', NEW_LUNG)),
+    "reg_left": (lung, reg('Surv(time, status == 2, type="left") ~ age + sex', NEW_LUNG)),
+    "km_interval": (lung, km('Surv(lo, hi, type="interval2") ~ sex')),
+    "km_left": (lung, km('Surv(time, status == 2, type="left") ~ 1')),
+    "km_fweights": (lung, km(f"{S} ~ sex", weights="wf")),
 }
 
 
@@ -141,9 +157,18 @@ def test_matches_r(name, backend):
     tables = make(source)
     assert set(expected) == set(tables)
     module = {"lazy": "polars"}.get(backend, backend)
+    loose = {}
+    if name in ("km_interval", "km_left"):
+        # Turnbull's counts are sums of fractional weights: once the
+        # remaining weight is rounding residue (1e-15), only its absolute size
+        # means anything; compare on the scale of the number of records.
+        records = complete(lung()).height if name == "km_interval" else lung().height
+        loose = {c: (1e-9, 1e-9 * records) for c in ("n_risk", "n_event", "n_censor")}
+        # and survival at the tail is that residue's product (3e-17 in both).
+        loose.update({c: (1e-9, 1e-12) for c in ("estimate", "std_error", "conf_low", "conf_high")})
     for table, result in tables.items():
         assert type(result).__module__.split(".")[0] == module, (table, type(result))
-        assert_matches_r(result, expected[table])
+        assert_matches_r(result, expected[table], loose=loose)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -201,10 +226,26 @@ def test_surv_forms_and_errors():
         survdiff(data, "Surv(entry, time, status) ~ sex")
     with pytest.raises(ValueError, match="conf_type"):
         survfit(data, f"{S} ~ sex", conf_type="wide")
-    with pytest.raises(ValueError, match="non-integer"):
-        survfit(data, f"{S} ~ sex", weights="wf")
     with pytest.raises(ValueError, match="interaction"):
         coxph(data, f"{S} ~ age:strata(sex)")
+    interval = 'Surv(lo, hi, type="interval2")'
+    with pytest.raises(ValueError, match='Cox model doesn\'t support "interval" survival data'):
+        coxph(data, f"{interval} ~ age")
+    with pytest.raises(ValueError, match='Cox model doesn\'t support "left" survival data'):
+        coxph(data, 'Surv(time, status == 2, type="left") ~ age')
+    with pytest.raises(ValueError, match="Right censored data only"):
+        survdiff(data, f"{interval} ~ sex")
+    with pytest.raises(ValueError, match="type must be one of"):
+        survreg(data, 'Surv(time, status, type="sideways") ~ age')
+    with pytest.raises(ValueError, match="takes 3 arguments"):
+        survreg(data, 'Surv(time, status, type="interval") ~ age')
+    with pytest.raises(ValueError, match="start > stop"):
+        survreg(data.with_columns(hi=pl.col("lo") - 1), f"{interval} ~ age")
+    with pytest.raises(ValueError, match="needs both times"):
+        survreg(data.with_columns(t2=pl.lit(None, pl.Float64)), 'Surv(t1, t2, ev, type="interval") ~ age')
+    # Rows missing both bounds are missing rows, as in R.
+    both = data.with_columns(lo=pl.when(pl.col("hi").is_null()).then(None).otherwise(pl.col("lo")))
+    assert survreg(both, f"{interval} ~ age").n == both.filter(~(pl.col("lo").is_null() & pl.col("hi").is_null())).height
     with pytest.raises(ValueError, match="robust"):
         anova(coxph(data, f"{S} ~ age + cluster(inst)"))
     with pytest.raises(TypeError):

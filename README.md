@@ -460,6 +460,8 @@ cox_zph(fit)                                        # proportional-hazards test
 survfit(fit, newdata=new_rows)                      # predicted survival curves
 
 survreg(lung, "Surv(time, status) ~ age + sex", dist="weibull")
+survreg(lung, 'Surv(lower, upper, type="interval2") ~ age')  # interval-censored
+survfit(lung, 'Surv(lower, upper, type="interval2") ~ sex')  # Turnbull's estimator
 ```
 
 These follow R's survival package. The response is `Surv(time, status)`
@@ -476,11 +478,22 @@ loglogistic, gaussian, logistic and extreme-value models; `predict` gives
 the response, linear predictor and quantiles. `by=` fits one model per
 group, and `na_action="exclude"` lines predictions up with the data.
 
-Not included yet: left- and interval-censored data, multi-state models,
-`tt()` terms, frailty, `survreg` strata and robust variances, `survfit`
-on a stratified Cox model with new data, and Kaplan-Meier curves with
-non-integer weights (R's robust variance). Times are compared exactly
-(R's `timefix` rounding is not applied).
+Left- and interval-censored data take R's `Surv` forms:
+`Surv(time, status, type="left")`, `Surv(lower, upper, type="interval2")`
+(a missing bound is unbounded; both missing is a missing row) and
+`Surv(time, time2, event, type="interval")` (event 0 right-censored, 1
+exact, 2 left-censored, 3 interval-censored). `survreg` fits them by R's
+likelihood, starting values and Newton steps, so its coefficients and
+iteration counts are R's; `survfit` gives Turnbull's estimator by R's
+self-consistency iteration (with its Aitken acceleration and stopping rule,
+so the curve is R's, short of the limit as R's is). `coxph` and `survdiff`
+refuse them, as R does. Kaplan-Meier curves with non-integer weights use
+R's robust (infinitesimal jackknife) variance, with R's `std.err` on the
+survival scale.
+
+Not included yet: multi-state models, `tt()` terms, frailty, `survreg`
+strata and robust variances, and `survfit` on a stratified Cox model with
+new data. Times are compared exactly (R's `timefix` rounding is not applied).
 
 ### Generalized additive models
 
