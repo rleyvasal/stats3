@@ -4,6 +4,12 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- Faster on large data, with the same results: `coxph`'s concordance is a sweep with vectorized prefix counts instead of comparing every event with every row (200k rows: 397 s to 1.6 s); `arima` evaluates its likelihood past the Kalman filter's steady state with one linear filter while optimizing (10k points: 27.5 s to 0.75 s); `gam`'s thin-plate basis takes its largest eigenpairs by Lanczos iteration, as mgcv does, and its search takes smoothing parameters drifting to infinity to their limit (10k rows: 12.7 s to 0.46 s); `glmnet` reuses the Gaussian Hessian along the lambda path (0.44 s to 0.19 s).
+
 ## 0.4.0 — 2026-10-26
 
 Closing gaps in the models already here: correlated random effects in lmer, weight decay, count responses and marginal means for multinom, left- and interval-censored survival data with Turnbull's estimator, and Kaplan-Meier curves with non-integer weights.
