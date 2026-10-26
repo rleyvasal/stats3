@@ -25,6 +25,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from stats3._fast import compiled
 from stats3._data import Data, Step, expression, is_frame, step
 from stats3.checks import _group_values
 from stats3.core import _check_conf_level, _column, _warn
@@ -550,12 +551,35 @@ def _arima_like(y: np.ndarray, mod: dict[str, Any], fast: bool = False) -> tuple
     nu = 0
     resid = np.full(len(y), np.nan, dtype=np.result_type(t, y))
     raw = np.zeros(len(y), dtype=resid.dtype)  # innovations before scaling
+    after = warm = 0
     if fast:
         missing = np.flatnonzero(np.isnan(np.real(y)))
         after = int(missing[-1]) + 1 if len(missing) else 0
         b_poly = np.convolve(np.r_[1.0, -mod["phi"]], np.r_[1.0, -mod["Delta"]])
         a_poly = np.r_[1.0, mod["theta"]]
         warm = max(len(b_poly), len(a_poly))
+
+    def shortcut(i, gain):
+        zi = lfiltic(b_poly, a_poly, raw[i - 1::-1][:len(a_poly) - 1], y[i - 1::-1][:len(b_poly) - 1])
+        tail = lfilter(b_poly, a_poly, y[i:], zi=zi)[0]
+        count = len(tail)
+        resid[i:] = tail / np.sqrt(gain)
+        return ssq + np.sum(tail * tail) / gain, sumlog + count * np.log(gain), nu + count, resid
+
+    kernel = compiled("arima_filter") if len(y) else None
+    if kernel is not None:
+        # The compiled loop: the same steps, agreeing with the NumPy loop to rounding.
+        dtype = np.result_type(resid.dtype, v, z)
+        y_, t_, v_, z_ = (np.ascontiguousarray(u, dtype=dtype) for u in (y, t, v, z))
+        a, p, pnew = (np.ascontiguousarray(u, dtype=dtype) for u in (a, p, pnew))
+        if resid.dtype != dtype:
+            resid, raw = resid.astype(dtype), raw.astype(dtype)
+        ssq, sumlog, nu, stop, gain = kernel(y_, np.isnan(y_), t_, v_, z_, a, p, pnew, resid, raw,
+                                             bool(fast), int(after), int(warm), _FIXED_POINT)
+        if stop >= 0:
+            return shortcut(int(stop), gain)
+        mod["a"], mod["P"], mod["Pn"] = a, p, pnew
+        return ssq, sumlog, nu, resid
     previous = None
     for i, value in enumerate(y):
         anew = t @ a
@@ -565,14 +589,7 @@ def _arima_like(y: np.ndarray, mod: dict[str, Any], fast: bool = False) -> tuple
                 m = pnew @ z
                 gain = z @ m
                 if gain.real < 1e4:
-                    zi = lfiltic(b_poly, a_poly, raw[i - 1::-1][:len(a_poly) - 1], y[i - 1::-1][:len(b_poly) - 1])
-                    tail = lfilter(b_poly, a_poly, y[i:], zi=zi)[0]
-                    count = len(tail)
-                    nu += count
-                    ssq = ssq + np.sum(tail * tail) / gain
-                    sumlog = sumlog + count * np.log(gain)
-                    resid[i:] = tail / np.sqrt(gain)
-                    return ssq, sumlog, nu, resid
+                    return shortcut(i, gain)
             previous = pnew
         if not np.isnan(value):
             resid0 = value - z @ anew
@@ -907,13 +924,13 @@ class ArimaModel(_Fit):
                 coef = _undo_pars(coef, arma)
             else:
                 var = None if no_optim else np.linalg.inv(_optim_hess(real_objective, par, scale) * n_used)
-            # The reported value comes from the full filter (the shortcut is used
-            # for the search and the Hessian, where it agrees to rounding).
-            fast = False
-            value = real_objective(par)
+            # One full filter pass at the optimum gives the reported value
+            # (the shortcut served the search and the Hessian, where it
+            # agrees to rounding), the residuals and the state for forecasts.
             phi, theta = _trans_pars(coef, arma, False)
             mod = _make_arima(phi, theta, delta, kappa)
-            ssq, _, _, resid = _arima_like(regressed(coef), mod)
+            ssq, sumlog, nu, resid = _arima_like(regressed(coef), mod)
+            value = 0.5 * (np.log(ssq / nu) + sumlog / nu)
             sigma2 = float(np.real(ssq)) / n_used
         value = float(np.real(value))
         self.minus2loglik = 2 * n_used * value + n_used + n_used * math.log(2 * math.pi)

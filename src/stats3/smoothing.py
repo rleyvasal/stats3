@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from stats3._fast import compiled
 from stats3._data import Data, Step, step
 from stats3.core import _special, _warn
 from stats3.formula import _backtick, parse_formula, variable_expr
@@ -154,6 +155,44 @@ class _Tree:
                 p = self.lo[p]
             else:
                 p = self.lo[p] if z[self.a[p]] <= self.xi[p] else self.hi[p]
+
+    def cells(self, z: np.ndarray) -> np.ndarray:
+        """ehg128's descent for every row of ``z`` at once: the leaf cell
+        holding each point."""
+        a, xi, lo, hi = (np.asarray(v) for v in (self.a, self.xi, self.lo, self.hi))
+        cell = np.zeros(len(z), dtype=int)
+        active = np.flatnonzero(a[cell] >= 0)
+        while len(active):
+            j = cell[active]
+            k = a[j]
+            cell[active] = np.where(z[active, k] <= xi[j], lo[j], hi[j])
+            active = active[a[cell[active]] >= 0]
+        return cell
+
+    def weights(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """With one predictor, ehg128 is the cubic Hermite blend of the two
+        vertices of each point's cell: their indices and the four weights
+        (value and slope at each), for every row of ``z`` at once."""
+        v = self.v
+        cell = self.cells(z)
+        corners = np.asarray(self.c)[cell]
+        ll, ur = corners[:, 0], corners[:, -1]
+        width = v[ur, 0] - v[ll, 0]
+        h = (z[:, 0] - v[ll, 0]) / width
+        for _ in np.flatnonzero(~((-.001 <= h) & (h <= 1.001))):
+            _warn("extrapolation not allowed with blending")
+        phi0, phi1, psi0, psi1 = (1 - h)**2 * (1 + 2 * h), h**2 * (3 - 2 * h), h * (1 - h)**2, h**2 * (h - 1)
+        return ll, ur, np.column_stack([phi0, phi1, psi0 * width, psi1 * width])
+
+    def interpolate_many(self, z: np.ndarray, vval: np.ndarray) -> np.ndarray:
+        """``interpolate`` at every row of ``z``: at once with one predictor
+        (where the blend has no edge corrections), else point by point."""
+        if self.d != 1 or not len(z):
+            return np.array([self.interpolate(z[i], vval) for i in range(len(z))])
+        ll, ur, w = self.weights(z)
+        shape = (len(z),) + (1,) * (vval.ndim - 2)
+        return (w[:, 0].reshape(shape) * vval[ll, 0] + w[:, 1].reshape(shape) * vval[ur, 0]
+                + w[:, 2].reshape(shape) * vval[ll, 1] + w[:, 3].reshape(shape) * vval[ur, 1])
 
     def interpolate(self, z, vval: np.ndarray) -> np.ndarray:
         """ehg128: the surface at ``z`` from vertex values and slopes
@@ -411,18 +450,25 @@ class _Raw:
         if opts["surface"] == "interpolate":
             self.lv = self.local.vertex_operators(tree)
             self.vval = self.lv @ y
-            self.fitted = np.array([tree.interpolate(x[i], self.vval) for i in range(n)])
+            self.fitted = tree.interpolate_many(x, self.vval)
             if statistics == "1.approx":
                 member = np.zeros((len(tree.v), n), dtype=bool)
                 for vertex in range(len(tree.v)):
                     for leaf in tree.leaves(tree.v[vertex]):
                         member[vertex, tree.pi[tree.pl[leaf]:tree.pu[leaf] + 1]] = True
-                diag = [tree.interpolate(x[i], self.lv[:, :, i] * member[:, i, None]) for i in range(n)]
+                if d == 1:
+                    # Each row's own operator row, through the same blend weights.
+                    ll, ur, w = tree.weights(x)
+                    rows = np.arange(n)
+                    diag = (w[:, 0] * self.lv[ll, 0, rows] * member[ll, rows] + w[:, 1] * self.lv[ur, 0, rows] * member[ur, rows]
+                            + w[:, 2] * self.lv[ll, 1, rows] * member[ll, rows] + w[:, 3] * self.lv[ur, 1, rows] * member[ur, rows])
+                else:
+                    diag = [tree.interpolate(x[i], self.lv[:, :, i] * member[:, i, None]) for i in range(n)]
                 self.trace_hat = float(np.sum(diag))
             elif statistics == "2.approx":
                 self.trace_hat = _ehg196(tau, d, opts["span"])
             elif statistics == "exact":
-                L = np.array([tree.interpolate(x[i], self.lv) for i in range(n)])
+                L = tree.interpolate_many(x, self.lv)
                 self.trace_hat, self.one_delta, self.two_delta = _lowesc(L)
             if statistics in ("1.approx", "2.approx"):
                 self.one_delta, self.two_delta = _lowesa(self.trace_hat, n, d, tau, self.local.singular)
@@ -543,15 +589,13 @@ class LoessModel(_Fit):
         low, high = self.x.min(axis=0), self.x.max(axis=0)
         with np.errstate(invalid="ignore"):
             inside = np.all((z <= high) & (z >= low), axis=1)
-        vval = self._raw.vval
-        for i in np.flatnonzero(inside):
-            fit[i] = self.tree.interpolate(z[i], vval)
+        fit[inside] = self.tree.interpolate_many(z[inside], self._raw.vval)
         if se and inside.any():
             if self._interp_ops is None:  # loess_ise refits with the prior weights alone
                 same = self.opts["family"] == "gaussian"
                 self._interp_ops = self._raw.lv if same else _Local(
                     self.x, w, self.opts["span"], self.opts["degree"]).vertex_operators(self.tree)
-            L = np.array([self.tree.interpolate(z[i], self._interp_ops) for i in np.flatnonzero(inside)])
+            L = self.tree.interpolate_many(z[inside], self._interp_ops)
             se_fit[inside] = self.sigma * np.sqrt(np.sum(L**2 / w, axis=1))
         return fit, se_fit
 
@@ -1065,61 +1109,67 @@ def _sgram(tb, nb):
 
 
 def _dpbfa(abd, n, m):
+    """LINPACK dpbfa: the Cholesky factor of a banded matrix, in place
+    (``abd[1..m+1, 1..n]``). Returns 0, or the column that was not positive."""
     for j in range(1, n + 1):
         s = 0.0
         ik, jk, mu = m + 1, max(j - m, 1), max(m + 2 - j, 1)
         for k in range(mu, m + 1):
             dot = 0.0
             for q in range(k - mu):
-                dot += abd[ik + q][jk] * abd[mu + q][j]
-            t = (abd[k][j] - dot) / abd[m + 1][jk]
-            abd[k][j] = t
+                dot += abd[ik + q, jk] * abd[mu + q, j]
+            t = (abd[k, j] - dot) / abd[m + 1, jk]
+            abd[k, j] = t
             s += t * t
             ik -= 1
             jk += 1
-        s = abd[m + 1][j] - s
+        s = abd[m + 1, j] - s
         if s <= 0:
             return j
-        abd[m + 1][j] = math.sqrt(s)
+        abd[m + 1, j] = math.sqrt(s)
     return 0
 
 
 def _dpbsl(abd, n, m, b):
+    """LINPACK dpbsl: solve with the factor from ``_dpbfa``, in place in ``b[1..n]``."""
     for k in range(1, n + 1):
         lm = min(k - 1, m)
         la, lb = m + 1 - lm, k - lm
         t = 0.0
         for q in range(lm):
-            t += abd[la + q][k] * b[lb + q]
-        b[k] = (b[k] - t) / abd[m + 1][k]
+            t += abd[la + q, k] * b[lb + q]
+        b[k] = (b[k] - t) / abd[m + 1, k]
     for kb in range(1, n + 1):
         k = n + 1 - kb
         lm = min(k - 1, m)
         la, lb = m + 1 - lm, k - lm
-        b[k] = b[k] / abd[m + 1][k]
+        b[k] = b[k] / abd[m + 1, k]
         t = -b[k]
         for q in range(lm):
-            b[lb + q] += t * abd[la + q][k]
+            b[lb + q] += t * abd[la + q, k]
 
 
 def _sinerp(abd, nk):
-    """Inner products of the columns of R^{-1}, within the band (pass 1)."""
-    p1 = [[0.0] * (nk + 1) for _ in range(5)]
-    wjm3, wjm2, wjm1 = [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0]
+    """Inner products of the columns of R^{-1}, within the band (pass 1):
+    ``p1[1..4, 1..nk]``."""
+    p1 = np.zeros((5, nk + 1))
+    wjm3 = np.zeros(4)
+    wjm2 = np.zeros(3)
+    wjm1 = np.zeros(2)
     for i in range(1, nk + 1):
         j = nk - i + 1
-        c0 = 1.0 / abd[4][j]
-        c1 = abd[1][j + 3] * c0 if j <= nk - 3 else 0.0
-        c2 = abd[2][j + 2] * c0 if j <= nk - 2 else 0.0
-        c3 = abd[3][j + 1] * c0 if j <= nk - 1 else 0.0
-        p1[1][j] = 0.0 - (c1 * wjm3[1] + c2 * wjm3[2] + c3 * wjm3[3])
-        p1[2][j] = 0.0 - (c1 * wjm3[2] + c2 * wjm2[1] + c3 * wjm2[2])
-        p1[3][j] = 0.0 - (c1 * wjm3[3] + c2 * wjm2[2] + c3 * wjm1[1])
-        p1[4][j] = (c0**2 + c1**2 * wjm3[1] + 2. * c1 * c2 * wjm3[2] + 2. * c1 * c3 * wjm3[3]
+        c0 = 1.0 / abd[4, j]
+        c1 = abd[1, j + 3] * c0 if j <= nk - 3 else 0.0
+        c2 = abd[2, j + 2] * c0 if j <= nk - 2 else 0.0
+        c3 = abd[3, j + 1] * c0 if j <= nk - 1 else 0.0
+        p1[1, j] = 0.0 - (c1 * wjm3[1] + c2 * wjm3[2] + c3 * wjm3[3])
+        p1[2, j] = 0.0 - (c1 * wjm3[2] + c2 * wjm2[1] + c3 * wjm2[2])
+        p1[3, j] = 0.0 - (c1 * wjm3[3] + c2 * wjm2[2] + c3 * wjm1[1])
+        p1[4, j] = (c0**2 + c1**2 * wjm3[1] + 2. * c1 * c2 * wjm3[2] + 2. * c1 * c3 * wjm3[3]
                     + c2**2 * wjm2[1] + 2. * c2 * c3 * wjm2[2] + c3**2 * wjm1[1])
-        wjm3[1], wjm3[2], wjm3[3] = wjm2[1], wjm2[2], p1[2][j]
-        wjm2[1], wjm2[2] = wjm1[1], p1[3][j]
-        wjm1[1] = p1[4][j]
+        wjm3[1], wjm3[2], wjm3[3] = wjm2[1], wjm2[2], p1[2, j]
+        wjm2[1], wjm2[2] = wjm1[1], p1[3, j]
+        wjm1[1] = p1[4, j]
     return p1
 
 
@@ -1134,8 +1184,9 @@ class _Sbart:
         self.w = [0.0] + [math.sqrt(v) if v > 0 else v for v in ws]
         self.ssw, self.penalty, self.dofoff, self.icrit = ssw, penalty, dofoff, icrit
         t, n = self.knot, self.n
-        self.sg = _sgram(t, nk)
+        self.sg = np.array(_sgram(t, nk))
         knot0 = np.asarray(knot, dtype=float)
+        self._knot = knot0
         x, y, w = (np.asarray(v, dtype=float) for v in (xs, ys, self.w[1:]))
         self._x, self._y, self._w = x, y, w
         # stxwx: x is sorted, so R's break past the last knot leaves out the
@@ -1158,7 +1209,7 @@ class _Sbart:
             hs[off] = np.bincount(j[:, qs - 1].ravel(), weights.ravel(), minlength=nk + 1)
         self.xwy, self.hs = xwy, hs
         t1 = _sequential_sum(hs[0][3:nk - 2])
-        t2 = _sequential_sum(np.asarray(self.sg[0])[3:nk - 2])
+        t2 = _sequential_sum(self.sg[0, 3:nk - 2])
         self.ratio = t1 / t2
         # The leverage basis does not depend on lambda.
         ileft, mflag = _intervals(knot0, nk + 1, x)
@@ -1169,25 +1220,23 @@ class _Sbart:
     def solve(self, lam):
         """sslvrg(): coefficients, fit, leverages and criterion at lambda."""
         nk, hs, sg = self.nk, self.hs, self.sg
-        abd = [[0.0] * (nk + 1) for _ in range(5)]
-        coef = list(self.xwy)
-        for i in range(1, nk + 1):
-            abd[4][i] = hs[0][i] + lam * sg[0][i]
-        for i in range(1, nk):
-            abd[3][i + 1] = hs[1][i] + lam * sg[1][i]
-        for i in range(1, nk - 1):
-            abd[2][i + 2] = hs[2][i] + lam * sg[2][i]
-        for i in range(1, nk - 2):
-            abd[1][i + 3] = hs[3][i] + lam * sg[3][i]
-        info = _dpbfa(abd, nk, 3)
+        abd = np.zeros((5, nk + 1))
+        coef = np.array(self.xwy, dtype=float)
+        abd[4, 1:nk + 1] = hs[0][1:nk + 1] + lam * sg[0, 1:nk + 1]
+        abd[3, 2:nk + 1] = hs[1][1:nk] + lam * sg[1, 1:nk]
+        abd[2, 3:nk + 1] = hs[2][1:nk - 1] + lam * sg[2, 1:nk - 1]
+        abd[1, 4:nk + 1] = hs[3][1:nk - 2] + lam * sg[3, 1:nk - 2]
+        dpbfa, dpbsl, sinerp = (compiled(name) or fallback for name, fallback in
+                                (("dpbfa", _dpbfa), ("dpbsl", _dpbsl), ("sinerp", _sinerp)))
+        info = dpbfa(abd, nk, 3)
         if info:
             return dict(ier=info, coef=coef[1:], sz=None, lev=None, crit=float("nan"))
-        _dpbsl(abd, nk, 3, coef)
+        dpbsl(abd, nk, 3, coef)
         n, w, x, y = self.n, self._w, self._x, self._y
-        sz = _bvalues(np.asarray(self.knot[1:]), np.asarray(coef[1:]), nk, x, 0)
+        sz = _bvalues(self._knot, coef[1:], nk, x, 0)
         lev, crit = None, float("nan")
         if self.icrit >= 1:
-            p1 = np.asarray(_sinerp(abd, nk))
+            p1 = sinerp(abd, nk)
             j, b = self.basis_j, self.basis
             b0, b1, b2, b3 = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
             lev = (p1[4][j] * b0**2 + 2. * p1[3][j] * b0 * b1 + 2. * p1[2][j] * b0 * b2
@@ -1204,8 +1253,7 @@ class _Sbart:
             else:
                 df = _sequential_sum(lev)
                 crit = 3 + (self.dofoff - df)**2
-            lev = lev.tolist()
-        return dict(ier=0, coef=coef[1:], sz=sz.tolist(), lev=lev, crit=crit)
+        return dict(ier=0, coef=coef[1:], sz=sz, lev=lev, crit=crit)
 
     def lam(self, spar, is_lambda):
         return spar if is_lambda else self.ratio * 16.0**(spar * 6. - 2.)
@@ -1400,7 +1448,7 @@ class SmoothingSpline(_Fit):
             if small:
                 raise ValueError(f"smooth_spline(): {message}")
             _warn(message + "\nsetting df = 1  __use with care!__")
-            ty = [float(np.mean(y))] * nx
+            ty = np.full(nx, float(np.mean(y)))
         ty = np.asarray(ty)
         if cv is None:
             lev, dfit = None, float("nan")

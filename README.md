@@ -7,7 +7,7 @@ back as a table in the same kind of frame you passed in.
 ```bash
 pip install stats3              # Polars data
 pip install "stats3[pandas]"    # pandas data too
-pip install "stats3[fast]"      # Numba: compiled k-means, hclust, dist and concordance, at R's speed on large data
+pip install "stats3[fast]"      # Numba: compiled k-means, hclust, dist, concordance, ARIMA and spline loops
 ```
 
 stats3 needs Python 3.12+, Polars and SciPy 1.18+ (the first SciPy whose
@@ -737,7 +737,8 @@ nearest-neighbour chain of `hclust`, distances, the concordance sweep) run
 in NumPy, and compiled when `stats3[fast]` (Numba) is installed: the
 kernels do the same operations in the same order, with the fused
 multiply-add R's compiled code uses on ARM, so the results are the same
-bits either way and only the speed differs. `pytest` checks the two paths
+bits either way (the ARIMA filter's and the smoothing spline's agree to
+rounding) and only the speed differs. `pytest` checks the two paths
 against each other.
 
 ```bash

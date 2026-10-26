@@ -523,3 +523,66 @@ def sweep_sums(order, dense, weight, is_query, qindex, gstart, gend, size):  # p
                 tree[i] += weight[idx]
                 i += i & (-i)
     return lower, equal, total
+
+
+# ARIMA: the Kalman filter loop ------------------------------------------------------------
+
+
+@nb.njit(cache=True, nogil=True)
+def arima_filter(y, missing, t, v, z, a, p, pnew, resid, raw, fast, after, warm, fixed_point):  # pragma: no cover
+    """The loop of ``timeseries._arima_like`` on arrays of one dtype (real,
+    or complex for the complex-step gradient): a, p and pnew are updated in
+    place. Returns (ssq, sumlog, nu, stop, gain): ``stop`` is -1 when the
+    series was filtered to its end, else the step at which the prediction
+    covariance had converged (``fast``), where the caller takes over."""
+    n = len(y)
+    r = len(a)
+    ssq = np.zeros_like(resid[:1])  # accumulators of the arrays' dtype
+    sumlog = np.zeros_like(resid[:1])
+    nu = 0
+    previous = np.empty_like(p)
+    have_previous = False
+    gain = ssq[0]
+    for i in range(n):
+        anew = np.dot(t, a)
+        if i > 0:
+            pnew[:, :] = np.dot(np.dot(t, p), t.T) + v
+            if fast and i >= after + warm and have_previous:
+                biggest = 0.0
+                change = 0.0
+                for j in range(r):
+                    for k in range(r):
+                        biggest = max(biggest, abs(pnew[j, k].real))
+                        change = max(change, abs((pnew[j, k] - previous[j, k]).real))
+                if change <= fixed_point * biggest:
+                    m = np.dot(pnew, z)
+                    gain = np.dot(z, m)
+                    if gain.real < 1e4:
+                        return ssq[0], sumlog[0], nu, i, gain
+            previous[:, :] = pnew
+            have_previous = True
+        if not missing[i]:
+            resid0 = y[i] - np.dot(z, anew)
+            m = np.dot(pnew, z)
+            gain = np.dot(z, m)
+            if gain.real < 1e4:
+                nu += 1
+                ssq[0] = ssq[0] + resid0 * resid0 / gain
+                sumlog[0] = sumlog[0] + np.log(gain)
+            resid[i] = resid0 / np.sqrt(gain)
+            raw[i] = resid0
+            a[:] = anew + m * (resid0 / gain)
+            p[:, :] = pnew - np.outer(m, m) / gain
+        else:
+            a[:] = anew
+            p[:, :] = pnew
+    return ssq[0], sumlog[0], nu, -1, gain
+
+
+# smooth.spline: LINPACK's banded Cholesky and the leverage inner products ---------------
+
+from stats3 import smoothing as _smoothing  # noqa: E402
+
+dpbfa = nb.njit(cache=True, nogil=True)(_smoothing._dpbfa)
+dpbsl = nb.njit(cache=True, nogil=True)(_smoothing._dpbsl)
+sinerp = nb.njit(cache=True, nogil=True)(_smoothing._sinerp)

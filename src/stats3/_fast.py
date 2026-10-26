@@ -5,8 +5,10 @@ last (k-means transfers, the nearest-neighbour chain of hclust), or sums
 that must be rounded as R's compiled code rounds them (fused multiply-adds
 on ARM). stats3 runs them in NumPy, and, when Numba is installed, through
 ``stats3._compiled``, whose kernels do the same operations in the same
-order and give the same bits. ``COMPILED = False`` keeps everything in
-NumPy, for checking the two paths against each other.
+order and give the same bits (the ARIMA filter and the smoothing spline's
+banded solves, whose NumPy forms go through BLAS, agree to rounding).
+``COMPILED = False`` keeps everything in NumPy, for checking the two paths
+against each other.
 """
 
 from __future__ import annotations

@@ -1070,16 +1070,32 @@ def _sweep_sums(item_seq, item_key, item_w, query_seq, query_key, nbits):
                 _equal_earlier(item_seq, item_key, item_w, query_seq, query_key),
                 _equal_earlier(item_seq, item_gkey, item_w, query_seq, gkey))
     n_items = len(item_seq)
-    keys = np.r_[item_key, query_key]
-    unique, dense = np.unique(keys, return_inverse=True)
-    dense = dense.reshape(-1).astype(np.int64)
+    keys = np.r_[item_key, query_key].astype(np.int64)
+    group_end = gkey + (1 << nbits)
+    span = int(max(keys.max(), group_end.max())) + 1 if len(keys) else 1
+    lead = np.zeros(n_items, dtype=np.int64)
+    if span <= 4 * len(keys):
+        # The keys themselves index the tree: no sort to make them dense.
+        dense, size = keys, span
+        gstart, gend = np.r_[lead, gkey], np.r_[lead, group_end]
+    else:
+        unique, dense = np.unique(keys, return_inverse=True)
+        dense, size = dense.reshape(-1).astype(np.int64), len(unique)
+        gstart = np.searchsorted(unique, np.r_[lead, gkey], "left").astype(np.int64)
+        gend = np.searchsorted(unique, np.r_[lead, gkey + (1 << nbits)], "left").astype(np.int64)
     is_query = np.r_[np.zeros(n_items, dtype=bool), np.ones(len(query_seq), dtype=bool)]
-    qindex = np.r_[np.zeros(n_items, dtype=np.int64), np.arange(len(query_seq), dtype=np.int64)]
-    gstart = np.searchsorted(unique, np.r_[np.zeros(n_items, dtype=np.int64), gkey], "left").astype(np.int64)
-    gend = np.searchsorted(unique, np.r_[np.zeros(n_items, dtype=np.int64), gkey + (1 << nbits)], "left").astype(np.int64)
-    order = np.argsort(np.r_[item_seq, query_seq], kind="stable").astype(np.int64)
+    qindex = np.r_[lead, np.arange(len(query_seq), dtype=np.int64)]
+    # Sweep order by counting: the seqs are distinct small integers, except
+    # the queries after everything (_SEQ_END), which may come in any order.
+    seq = np.r_[item_seq, query_seq].astype(np.int64)
+    at_end = seq == _SEQ_END
+    slots = np.where(at_end, int(seq[~at_end].max() if (~at_end).any() else -1) + 1 + np.cumsum(at_end) - 1, seq)
+    order = np.full(int(slots.max()) + 1, -1, dtype=np.int64)
+    order[slots] = np.arange(len(seq))
+    order = order[order >= 0]
     weight = np.r_[np.asarray(item_w, dtype=float), np.zeros(len(query_seq))]
-    return kernel(order, dense, weight, is_query, qindex, gstart, gend, len(unique))
+    return kernel(order, dense, weight, is_query, qindex, np.asarray(gstart, dtype=np.int64),
+                  np.asarray(gend, dtype=np.int64), size)
 
 
 def _compact(keys):
@@ -1178,8 +1194,9 @@ def _concordance(y: _Response, lp, strata, w, cluster):
     influence[:, 2] += d_equal
     # Events tied in time (same stratum): pairs tied in the predictor or not.
     if event.any():
-        tk = np.unique(np.c_[group[ev], y.stop[ev]], axis=0, return_inverse=True)[1].ravel()
-        xk = np.unique(np.c_[tk, rank[ev]], axis=0, return_inverse=True)[1].ravel()
+        trank = np.unique(y.stop[ev], return_inverse=True)[1].reshape(-1)
+        tk = np.unique(group[ev] * (int(trank.max()) + 1) + trank, return_inverse=True)[1].reshape(-1)
+        xk = np.unique(tk * (int(rank.max()) + 1) + rank[ev], return_inverse=True)[1].reshape(-1)
 
         def pairs(k):
             s, s2 = np.bincount(k, w[ev]), np.bincount(k, w[ev] ** 2)

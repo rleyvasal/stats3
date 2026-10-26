@@ -4,6 +4,12 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- Faster, with the same results: `arima` makes one full Kalman pass at the optimum (for the reported likelihood, the residuals and the forecast state) instead of two, and with `stats3[fast]` the filter loop runs compiled (10k points: 0.24 s to 0.10 s); `loess` with one predictor interpolates every point at once through the blend's vertex weights (5k rows: 0.07 s to 0.007 s); `coxph`'s concordance sweep indexes its tree by the predictor ranks and counts its sweep order instead of sorting (200k rows with `glance`: 0.5 s to 0.3 s); `smooth_spline`'s banded Cholesky and leverage inner products run compiled with `stats3[fast]` (10k rows: 0.025 s to 0.014 s); `lm` leverages multiply X by R^-1 once; the models' infinite-value checks are one Polars query over all columns.
+
 ## 0.5.0 — 2026-10-26
 
 The slowest functions brought to R's speed: an optional compiled path for k-means, hclust, dist and the concordance sweep, ports of R's studentized range and Fisher odds-ratio searches, and vectorized survdiff, smooth_spline, Shapiro-Wilk and type II/III anova.

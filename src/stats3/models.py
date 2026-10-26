@@ -264,8 +264,8 @@ class _QR:
             return np.zeros(self._a.shape[0])
         if self._q is not None:
             return np.sum(self._q**2, axis=1)
-        rinv = _solve_upper(self.r, np.eye(len(self.kept)))
-        return np.einsum("ij,ij->i", self._a @ rinv, self._a @ rinv)
+        xr = self._a @ _solve_upper(self.r, np.eye(len(self.kept)))
+        return np.einsum("ij,ij->i", xr, xr)
 
 
 def _solve_upper(r: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -404,9 +404,12 @@ def _model_frames(
     dropped = frame.height < height
     if na_action == "fail" and dropped:
         raise ValueError(f"{verb}(): missing values in the model's variables (na_action='fail')")
-    for name in exprs:
-        if frame.schema[name].is_float() and frame.select(pl.col(name).is_infinite().any()).item():
-            raise ValueError(f"{verb}(): infinite values in {name.removeprefix('__')!r}")
+    floats = [name for name in exprs if frame.schema[name].is_float()]
+    if floats:  # one query for every column
+        infinite = frame.select([pl.col(name).is_infinite().any() for name in floats]).row(0)
+        for name, bad in zip(floats, infinite):
+            if bad:
+                raise ValueError(f"{verb}(): infinite values in {name.removeprefix('__')!r}")
     if groups:
         keys = _sorted_keys(data, frame.select(groups).unique(maintain_order=True), groups)
         parts = frame.partition_by(groups, as_dict=True, maintain_order=True)
