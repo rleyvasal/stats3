@@ -15,8 +15,9 @@ Random-effects terms: ``(1 | g)`` for intercepts, ``(0 + x | g)`` for a
 slope on its own, ``(x || g)`` for independent intercepts and slopes,
 ``(1 | g1) + (1 | g2)`` for crossed factors, ``(1 | g1:g2)`` for an
 interaction of factors and ``(1 | g1/g2)`` for nesting (``g1`` and
-``g2:g1``, as lme4 expands it). A term whose columns would be correlated,
-``(1 + x | g)``, is not implemented and raises with that message.
+``g2:g1``, as lme4 expands it). A term with several columns, ``(1 + x | g)``,
+has correlated effects: its block of ``Lambda`` is lower triangular, with
+lme4's parameters (the triangle's elements, column by column).
 """
 
 from __future__ import annotations
@@ -172,20 +173,40 @@ def _unique_names(names: list[str]) -> list[str]:
 
 @dataclass
 class _RandomTerm:
-    """One scalar random-effects term: a column of ``Z`` per group level."""
+    """One random-effects term: ``k`` columns of ``Z`` per group level, kept
+    together level by level (lme4's order), and correlated when ``k > 1``."""
 
     expr: str
     columns: list[str]
     formula: Formula
-    name: str  # the column's name, (Intercept) or the slope's
+    names: list[str]  # the columns' names: (Intercept), or the slopes'
     group: str  # island, or island:species
     levels: list[str]
     codes: np.ndarray
-    values: np.ndarray
+    values: np.ndarray  # n x k
+
+    @property
+    def k(self) -> int:
+        return len(self.names)
+
+    @property
+    def size(self) -> int:
+        """The number of columns of ``Z`` (and of random effects)."""
+        return len(self.levels) * self.k
+
+    @property
+    def n_theta(self) -> int:
+        return self.k * (self.k + 1) // 2
 
     @property
     def text(self) -> str:
         return f"({self.expr} | {self.group})"
+
+
+def _triangle(k: int) -> list[tuple[int, int]]:
+    """The lower triangle of a k x k matrix, column by column: lme4's order
+    of a term's theta, diagonal elements first in each column."""
+    return [(r, c) for c in range(k) for r in range(c, k)]
 
 
 def _group_levels(rows: pl.DataFrame, columns: list[str], data: Data) -> tuple[list[str], list[str]]:
@@ -226,28 +247,49 @@ class _Parts:
     Zty: np.ndarray
     XtX: np.ndarray
     Xty: np.ndarray
-    block: np.ndarray  # theta index per column of Z
+    block: np.ndarray  # theta index per column of Z, when Lambda is diagonal
     log_weights: float  # sum of the log prior weights, in lme4's criteria
+    pattern: Any = None  # Lambda's sparsity (CSC), when some term is correlated
+    lind: Any = None  # theta index of each stored element of pattern
+
+    @property
+    def diagonal(self) -> bool:
+        return self.pattern is None
+
+    def lambda_matrix(self, theta: np.ndarray):
+        """``Lambda`` for this theta: block diagonal, one lower triangle per
+        level of each correlated term."""
+        lam = self.pattern.copy()
+        lam.data = theta[self.lind]
+        return lam
 
 
 class _Factor:
     """A factorization of ``A = Lambda' Z' W Z Lambda + I``: its log
-    determinant and solves, by dense Cholesky or sparse LU."""
+    determinant and solves, by dense Cholesky or sparse LU. ``lam`` is the
+    diagonal of ``Lambda`` as a vector, or ``Lambda`` itself (sparse)."""
 
-    def __init__(self, ztz, lam: np.ndarray):
+    def __init__(self, ztz, lam):
         from scipy import sparse
         from scipy.linalg import cho_factor
 
+        general = sparse.issparse(lam)
+        q = lam.shape[0]
         if sparse.issparse(ztz):
             from scipy.sparse.linalg import splu
 
-            scale = sparse.diags(lam)
-            a = (scale @ ztz @ scale + sparse.identity(len(lam))).tocsc()
+            scale = lam if general else sparse.diags(lam)
+            a = (scale.T @ ztz @ scale + sparse.identity(q)).tocsc()
             self._lu = splu(a)
             self.logdet = float(np.sum(np.log(np.abs(self._lu.U.diagonal()))))
             self._dense = None
         else:
-            a = ztz * np.outer(lam, lam)
+            if general:
+                left = np.asarray(lam.T @ ztz)  # Lambda' Z'WZ
+                a = np.asarray(lam.T @ left.T)  # Lambda' (Z'WZ Lambda)
+                a = (a + a.T) / 2
+            else:
+                a = ztz * np.outer(lam, lam)
             a[np.diag_indices_from(a)] += 1
             self._dense = cho_factor(a, lower=True)
             self.logdet = 2 * float(np.sum(np.log(np.diag(self._dense[0]))))
@@ -263,7 +305,7 @@ class _Factor:
 @dataclass
 class _Solution:
     theta: np.ndarray
-    lam: np.ndarray
+    lam: Any  # Lambda's diagonal (a vector), or Lambda (sparse)
     factor: _Factor
     LX: np.ndarray
     M: np.ndarray  # Lambda' Z' W X
@@ -287,11 +329,11 @@ def _solve(parts: _Parts, theta: np.ndarray) -> _Solution:
     from scipy.linalg import cholesky, solve_triangular
 
     n, p = parts.n, parts.p
-    lam = theta[parts.block]
+    lam = theta[parts.block] if parts.diagonal else parts.lambda_matrix(theta)
     factor = _Factor(parts.ZtZ, lam)
-    m = lam[:, None] * parts.ZtX
-    v = lam * parts.Zty
-    s_ = factor.solve(m) if p else np.zeros((len(lam), 0))
+    m = _scale_left(lam, parts.ZtX)
+    v = _scale_left(lam, parts.Zty)
+    s_ = factor.solve(m) if p else np.zeros((lam.shape[0], 0))
     av = factor.solve(v)
     if p:
         LX = cholesky(parts.XtX - m.T @ s_, lower=True)
@@ -300,7 +342,7 @@ def _solve(parts: _Parts, theta: np.ndarray) -> _Solution:
     else:
         LX, beta = np.zeros((0, 0)), np.zeros(0)
     u = av - s_ @ beta
-    b = lam * u
+    b = lam * u if parts.diagonal else np.asarray(lam @ u)
     resid = parts.yw - parts.Xw @ beta - parts.Zw @ b
     wrss = float(resid @ resid)
     pwrss = wrss + float(u @ u)
@@ -309,6 +351,13 @@ def _solve(parts: _Parts, theta: np.ndarray) -> _Solution:
     deviance = ldL2 + n * (1 + math.log(2 * math.pi * pwrss / n)) - parts.log_weights
     reml = ldL2 + ldRX2 + (n - p) * (1 + math.log(2 * math.pi * pwrss / (n - p))) - parts.log_weights
     return _Solution(theta, lam, factor, LX, m, s_, beta, u, b, wrss, pwrss, ldL2, ldRX2, deviance, reml)
+
+
+def _scale_left(lam, x: np.ndarray) -> np.ndarray:
+    """``Lambda' x`` for a vector or matrix ``x``."""
+    if isinstance(lam, np.ndarray):
+        return lam[:, None] * x if x.ndim == 2 else lam * x
+    return np.asarray(lam.T @ x)
 
 
 def _derivatives(objective, theta: np.ndarray, value: float) -> tuple[np.ndarray, np.ndarray, int]:
@@ -332,14 +381,16 @@ def _derivatives(objective, theta: np.ndarray, value: float) -> tuple[np.ndarray
     return gradient, hessian, used
 
 
-def _optimize(objective, k: int) -> tuple[np.ndarray, int]:
-    """Minimize the profiled criterion from lme4's start of ones (theta = 1).
+def _optimize(objective, start: np.ndarray, canonical) -> tuple[np.ndarray, int]:
+    """Minimize the profiled criterion from lme4's start (each term's
+    triangle the identity).
 
-    The criterion is an even function of each element of theta (changing a
-    block's sign changes nothing in the Cholesky factors), so it is minimized
-    without lme4's bounds and the absolute values are returned: at theta = 0
-    with negative curvature, where a bounded search can stall, an unbounded
-    one passes through. A quasi-Newton search first, then Newton steps on
+    The criterion is unchanged by flipping the sign of a column of a term's
+    triangle (``Lambda Lambda'`` stays the same), so it is minimized without
+    lme4's bounds on the diagonal and ``canonical`` then flips any column
+    whose diagonal is negative (for scalar terms, the absolute value): at
+    theta = 0 with negative curvature, where a bounded search can stall, an
+    unbounded one passes through. A quasi-Newton search first, then Newton steps on
     central differences until the step is below 1e-10. The criterion is flat
     near its optimum (a step of 1e-7 in theta changes it by less than its
     rounding), so the last steps are judged by the derivatives, not by the
@@ -347,7 +398,7 @@ def _optimize(objective, k: int) -> tuple[np.ndarray, int]:
     optimizer, which stops on the value."""
     from scipy.optimize import minimize
 
-    result = minimize(objective, np.ones(k), method="L-BFGS-B",
+    result = minimize(objective, np.asarray(start, dtype=float), method="L-BFGS-B",
                       options={"ftol": 1e-15, "gtol": 1e-10, "maxiter": 1000, "maxfun": 20000})
     theta, value = np.asarray(result.x, dtype=float), float(result.fun)
     evaluations = int(result.nfev)
@@ -379,7 +430,7 @@ def _optimize(objective, k: int) -> tuple[np.ndarray, int]:
         theta, value = candidate, new
         if change < 1e-10:
             break
-    return np.abs(theta), evaluations
+    return canonical(theta), evaluations
 
 
 # the model ----------------------------------------------------------------------------
@@ -429,16 +480,13 @@ class LinearMixedModel(_Fit):
             parsed = parse_formula(f"~ {expr}", "lmer")
             design = build_design(parsed, frame.variables, n)
             group = ":".join(columns)
-            if design.matrix.shape[1] != 1:
-                hint = f"; use ({expr} || {group}) for independent effects" if parsed.intercept and design.matrix.shape[1] > 1 else ""
-                raise ValueError(
-                    f"lmer(): correlated random effects ({expr} | {group}) are not implemented yet "
-                    f"({design.matrix.shape[1]} columns per level){hint}")
+            if design.matrix.shape[1] == 0:
+                raise ValueError(f"lmer(): the random-effects term ({expr} | {group}) has no columns")
             labels, levels = _group_levels(frame.rows, columns, data)
             index = {lv: i for i, lv in enumerate(levels)}
             codes = np.array([index[lb] for lb in labels], dtype=np.int64)
-            terms.append(_RandomTerm(expr, columns, parsed, design.names[0], group, levels, codes,
-                                     design.matrix[:, 0].astype(float)))
+            terms.append(_RandomTerm(expr, columns, parsed, list(design.names), group, levels, codes,
+                                     design.matrix.astype(float)))
         # lme4 orders the terms by decreasing number of levels, stably.
         terms.sort(key=lambda t: -len(t.levels))
         return terms
@@ -451,6 +499,12 @@ class LinearMixedModel(_Fit):
         if many:
             raise ValueError("lmer(): number of levels of each grouping factor must be < number of observations "
                              f"(problems: {', '.join(many)})")
+        # lme4's check.nobs.vs.nRE: as many random effects as observations
+        # leaves the residual variance unidentified.
+        crowded = [t.text for t in self.terms if t.size >= self.n]
+        if crowded:
+            raise ValueError("lmer(): number of observations must be > number of random effects "
+                             f"(problems: {', '.join(crowded)})")
 
     @staticmethod
     def _z_matrix(terms: list[_RandomTerm], n: int):
@@ -458,29 +512,83 @@ class LinearMixedModel(_Fit):
 
         rows, cols, values, offset = [], [], [], 0
         for term in terms:
-            rows.append(np.arange(n))
-            cols.append(term.codes + offset)
-            values.append(term.values)
-            offset += len(term.levels)
+            for j in range(term.k):
+                rows.append(np.arange(n))
+                cols.append(offset + term.codes * term.k + j)
+                values.append(term.values[:, j])
+            offset += term.size
         return csr_matrix((np.concatenate(values), (np.concatenate(rows), np.concatenate(cols))), shape=(n, offset))
 
+    def _theta_offsets(self) -> list[int]:
+        return list(np.cumsum([0] + [t.n_theta for t in self.terms]))
+
     def _make_parts(self, z, x, y, w) -> _Parts:
+        from scipy.sparse import coo_matrix
+
         sw = np.sqrt(w)
         xw, yw = x * sw[:, None], y * sw
         zw = z.multiply(sw[:, None]).tocsr()
-        block = np.concatenate([np.full(len(t.levels), i) for i, t in enumerate(self.terms)])
         ztz = (zw.T @ zw).tocsr()
         if ztz.shape[0] < SPARSE_FROM:
             ztz = ztz.toarray()
+        diagonal = all(t.k == 1 for t in self.terms)
+        block = np.concatenate([np.full(t.size, i) for i, t in enumerate(self.terms)])
+        pattern = lind = None
+        if not diagonal:
+            # One lower triangle per level, its elements numbered as theta.
+            rows, cols, index = [], [], []
+            column, offsets = 0, self._theta_offsets()
+            for i, term in enumerate(self.terms):
+                cells = _triangle(term.k)
+                base = column + term.k * np.arange(len(term.levels))
+                for e, (r, c) in enumerate(cells):
+                    rows.append(base + r)
+                    cols.append(base + c)
+                    index.append(np.full(len(term.levels), offsets[i] + e))
+                column += term.size
+            q = column
+            numbered = np.concatenate(index).astype(float) + 1  # +1: no stored zeros
+            pattern = coo_matrix((numbered, (np.concatenate(rows), np.concatenate(cols))), shape=(q, q)).tocsc()
+            lind = pattern.data.astype(np.int64) - 1
         return _Parts(len(y), x.shape[1], xw, yw, zw, ztz, np.asarray(zw.T @ xw), np.asarray(zw.T @ yw),
-                      xw.T @ xw, xw.T @ yw, block, float(np.sum(np.log(w))))
+                      xw.T @ xw, xw.T @ yw, block, float(np.sum(np.log(w))), pattern, lind)
+
+    def _start(self) -> np.ndarray:
+        """lme4's start: each term's triangle is the identity."""
+        return np.concatenate([[1.0 if r == c else 0.0 for r, c in _triangle(t.k)] for t in self.terms])
+
+    def _diagonal_mask(self) -> np.ndarray:
+        """Which elements of theta are diagonals (lme4's lower bound 0)."""
+        return np.concatenate([[r == c for r, c in _triangle(t.k)] for t in self.terms]).astype(bool)
+
+    def _canonical(self, theta: np.ndarray) -> np.ndarray:
+        """Flip each column of each triangle whose diagonal is negative."""
+        theta = np.array(theta, dtype=float)
+        for term, offset in zip(self.terms, self._theta_offsets()):
+            cells = _triangle(term.k)
+            for c in range(term.k):
+                members = [offset + e for e, (_, col) in enumerate(cells) if col == c]
+                if theta[members[0]] < 0:
+                    theta[members] = -theta[members]
+        return theta
+
+    def _triangles(self, theta: np.ndarray | None = None) -> list[np.ndarray]:
+        """Each term's lower triangle T (its block of Lambda), from theta."""
+        theta = self.theta if theta is None else theta
+        out = []
+        for term, offset in zip(self.terms, self._theta_offsets()):
+            tri = np.zeros((term.k, term.k))
+            for e, (r, c) in enumerate(_triangle(term.k)):
+                tri[r, c] = theta[offset + e]
+            out.append(tri)
+        return out
 
     def _criterion(self, theta: np.ndarray) -> float:
         solution = _solve(self._parts, np.asarray(theta, dtype=float))
         return solution.reml if self.reml else solution.deviance
 
     def _fit(self) -> None:
-        theta, self.evaluations = _optimize(self._criterion, len(self.terms))
+        theta, self.evaluations = _optimize(self._criterion, self._start(), self._canonical)
         self._finish(theta)
 
     def _finish(self, theta: np.ndarray) -> None:
@@ -501,9 +609,10 @@ class LinearMixedModel(_Fit):
         self.fixed = self.x @ self.coef + self.frame.offset
         self.fitted = self.fixed + self.z @ self.b
         self.residuals = self.y - self.fitted
-        self.npar = p + len(self.terms) + 1
+        self.npar = p + len(theta) + 1
         self.df_residual = float(n - self.npar)
-        self.singular = bool(np.any(np.abs(theta) < 1e-4))
+        # lme4's isSingular: a diagonal element of a triangle (lower bound 0) at its bound.
+        self.singular = bool(np.any(np.abs(theta[self._diagonal_mask()]) < 1e-4))
         if self.singular:
             _warn("boundary (singular) fit: see lme4's isSingular")
 
@@ -527,11 +636,28 @@ class LinearMixedModel(_Fit):
         return list(dict.fromkeys(t.group for t in self.terms))
 
     def var_corr(self) -> pl.DataFrame:
-        """lme4's ``VarCorr``: one row per random-effect term, then the residual."""
-        groups = _unique_names([t.group for t in self.terms]) + ["Residual"]
-        names = [t.name for t in self.terms] + [None]
-        sds = [abs(float(th)) * self.sigma for th in self.theta] + [self.sigma]
-        return pl.DataFrame({"group": groups, "term": names, "variance": [sd**2 for sd in sds], "sd": sds})
+        """lme4's ``VarCorr`` as ``as.data.frame`` gives it: for each term, a
+        row per column (``term``, its variance and standard deviation), then
+        a row per pair of columns (``term`` and ``term2``, their covariance
+        and correlation); then the residual."""
+        rows: dict[str, list[Any]] = {"group": [], "term": [], "term2": [], "variance": [], "sd": []}
+
+        def add(group, a, b, variance, sd):
+            for key, value in zip(rows, (group, a, b, variance, sd)):
+                rows[key].append(value)
+
+        groups = _unique_names([t.group for t in self.terms])
+        for term, group, tri in zip(self.terms, groups, self._triangles()):
+            cov = self.sigma**2 * tri @ tri.T
+            sd = np.sqrt(np.diag(cov))
+            for j, name in enumerate(term.names):
+                add(group, name, None, float(cov[j, j]), float(sd[j]))
+            for a, b in itertools.combinations(range(term.k), 2):
+                denom = sd[a] * sd[b]
+                add(group, term.names[a], term.names[b], float(cov[a, b]),
+                    float(cov[a, b] / denom) if denom > 0 else math.nan)
+        add("Residual", None, None, self.sigma**2, self.sigma)
+        return pl.DataFrame(rows, schema_overrides={"term2": pl.String})
 
     def log_lik(self) -> float:
         return -self.criterion / 2
@@ -562,8 +688,10 @@ class LinearMixedModel(_Fit):
                               "statistic": self.coef / se, "p_value": [None] * len(self.names)},
                              schema_overrides={"group": pl.String, "p_value": pl.Float64})
         vc = self.var_corr()
+        labels = [f"cor__{a}.{b}" if b is not None else "sd__" + (a or "Observation")
+                  for a, b in zip(vc["term"], vc["term2"])]
         random = pl.DataFrame({"effect": ["ran_pars"] * vc.height, "group": vc["group"],
-                               "term": ["sd__" + (t or "Observation") for t in vc["term"]],
+                               "term": labels,
                                "estimate": vc["sd"], "std_error": [None] * vc.height,
                                "statistic": [None] * vc.height, "p_value": [None] * vc.height},
                               schema_overrides={"std_error": pl.Float64, "statistic": pl.Float64, "p_value": pl.Float64})
@@ -583,29 +711,42 @@ class LinearMixedModel(_Fit):
         """lme4's ``ranef(condVar=TRUE)`` as a table: group, term, level, the
         conditional mode and its conditional standard deviation
         (``sigma^2 Lambda A^-1 Lambda``, ignoring the fixed effects' uncertainty)."""
-        s = self._solution
-        q = len(s.lam)
-        diagonal = np.empty(q)
-        chunk = max(1, int(2e6 // q))
-        for start in range(0, q, chunk):
-            stop = min(q, start + chunk)
-            columns = np.zeros((q, stop - start))
-            columns[np.arange(start, stop), np.arange(stop - start)] = 1
-            diagonal[start:stop] = s.factor.solve(columns)[np.arange(start, stop), np.arange(stop - start)]
-        conditional = self.sigma * np.abs(s.lam) * np.sqrt(diagonal)
-        offsets = np.cumsum([0] + [len(t.levels) for t in self.terms])
+        conditional = self.sigma * np.sqrt(np.maximum(self._conditional_diagonal(), 0))
+        offsets = np.cumsum([0] + [t.size for t in self.terms])
         rows = {"group": [], "term": [], "level": [], "estimate": [], "std_error": []}
         for group in self.groups_unique:
             for i, term in enumerate(self.terms):
                 if term.group != group:
                     continue
-                start, stop = offsets[i], offsets[i + 1]
-                rows["group"].extend([group] * len(term.levels))
-                rows["term"].extend([term.name] * len(term.levels))
-                rows["level"].extend(term.levels)
-                rows["estimate"].extend(self.b[start:stop].tolist())
-                rows["std_error"].extend(conditional[start:stop].tolist())
+                for j, name in enumerate(term.names):
+                    positions = offsets[i] + term.k * np.arange(len(term.levels)) + j
+                    rows["group"].extend([group] * len(term.levels))
+                    rows["term"].extend([name] * len(term.levels))
+                    rows["level"].extend(term.levels)
+                    rows["estimate"].extend(self.b[positions].tolist())
+                    rows["std_error"].extend(conditional[positions].tolist())
         return pl.DataFrame(rows)
+
+    def _conditional_diagonal(self) -> np.ndarray:
+        """The diagonal of ``Lambda A^-1 Lambda'``, in chunks of columns."""
+        s = self._solution
+        q = s.lam.shape[0]
+        out = np.empty(q)
+        chunk = max(1, int(2e6 // q))
+        if self._parts.diagonal:
+            for start in range(0, q, chunk):
+                stop = min(q, start + chunk)
+                columns = np.zeros((q, stop - start))
+                columns[np.arange(start, stop), np.arange(stop - start)] = 1
+                out[start:stop] = s.factor.solve(columns)[np.arange(start, stop), np.arange(stop - start)]
+            return s.lam**2 * out
+        lam_t = s.lam.T.tocsc()
+        lam = s.lam.tocsr()
+        for start in range(0, q, chunk):
+            stop = min(q, start + chunk)
+            solved = s.factor.solve(lam_t[:, start:stop].toarray())  # A^-1 Lambda'[:, chunk]
+            out[start:stop] = np.asarray(lam[start:stop].multiply(solved.T).sum(axis=1)).ravel()
+        return out
 
     def ranef(self) -> pl.DataFrame:
         return self._with_key(self.ranef_table())
@@ -637,7 +778,8 @@ class LinearMixedModel(_Fit):
         chunk = max(1, int(2e6 // max(1, parts.Zw.shape[1])))
         for start in range(0, self.n, chunk):
             stop = min(self.n, start + chunk)
-            zc = (parts.Zw[start:stop].toarray() * s.lam).T  # q x m
+            zc = ((parts.Zw[start:stop].toarray() * s.lam) if parts.diagonal
+                  else np.asarray((parts.Zw[start:stop] @ s.lam).todense())).T  # q x m
             t1 = s.factor.solve(zc)
             h = np.sum(zc * t1, axis=0)
             if parts.p:
@@ -707,23 +849,24 @@ class LinearMixedModel(_Fit):
         if self.formula.offset_arg is not None:
             fit = fit + frame["__offset_arg"].to_numpy()
         if not population:
-            offsets = np.cumsum([0] + [len(t.levels) for t in self.terms])
+            offsets = np.cumsum([0] + [t.size for t in self.terms])
             for i, term in enumerate(self.terms):
-                values = build_design(term.formula, variables, n).matrix[:, 0]
+                values = build_design(term.formula, variables, n).matrix
                 index = {lv: j for j, lv in enumerate(term.levels)}
-                effect = np.zeros(n)
+                effect = np.zeros((n, term.k))
                 unknown = []
                 for row, label in enumerate(_labels(frame, term.columns)):
                     j = index.get(label)
                     if j is None:
                         unknown.append(label)
                     else:
-                        effect[row] = self.b[offsets[i] + j]
+                        start = offsets[i] + term.k * j
+                        effect[row] = self.b[start:start + term.k]
                 if unknown and not allow_new_levels:
                     shown = ", ".join(sorted(set(unknown)))
                     raise ValueError(f"predict(): new levels detected in newdata for {term.group!r}: {shown}; "
                                      "use allow_new_levels=True or re_form='population'")
-                fit = fit + values * effect
+                fit = fit + np.sum(values * effect, axis=1)
         return fit, data._lf.collect(), data
 
     # -- anova -----------------------------------------------------------------------------
@@ -781,8 +924,9 @@ def lmer(formula: str, *, reml: bool = True, weights: Any = None, offset: Any = 
     ``data >> lmer(...)``; ``by=`` fits one model per group. Random effects:
     ``(1 | g)``, ``(0 + x | g)``, ``(x || g)`` (independent intercept and
     slope), crossed ``(1 | g1) + (1 | g2)``, ``(1 | g1:g2)`` and nested
-    ``(1 | g1/g2)``. Correlated random effects, ``(1 + x | g)``, are not
-    implemented yet and raise. ``reml=False`` fits by maximum likelihood.
+    ``(1 | g1/g2)``, and correlated effects ``(1 + x | g)`` (an intercept and
+    slope with their correlation, as lme4 fits them, for any number of
+    columns). ``reml=False`` fits by maximum likelihood.
     Weights (positive), offsets, contrasts and ``na_action`` work as in
     ``lm``. Print the fit for a summary; ``tidy`` (fixed effects and
     variance components), ``glance``, ``augment``, ``ranef``, ``vcov``,

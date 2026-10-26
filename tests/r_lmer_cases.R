@@ -10,9 +10,22 @@ lmer_cases <- function() {
   suppressPackageStartupMessages(library(lme4))
   s <- read.csv("tests/data/sleepstudy.csv")
   s$w <- 1 + seq_len(nrow(s)) %% 3
+  s$x2 <- (seq_len(nrow(s)) %% 5) / 2
   p <- read.csv("tests/data/penguins.csv", na.strings="NA")
   p$w <- 1 + seq_len(nrow(p)) %% 3
-  polish <- function(devfun, theta) {
+  # Flipping a column of a term's triangle (its diagonal and the elements
+  # below) leaves the criterion unchanged; lme4 keeps diagonals >= 0. Theta
+  # lists each triangle column by column, so a column runs from a diagonal
+  # (lower bound 0) to the next one.
+  canonical <- function(theta, lower) {
+    starts <- which(lower == 0)
+    ends <- c(starts[-1] - 1, length(theta))
+    for (i in seq_along(starts)) if (theta[starts[i]] < 0) {
+      theta[starts[i]:ends[i]] <- -theta[starts[i]:ends[i]]
+    }
+    theta
+  }
+  polish <- function(devfun, theta, lower) {
     k <- length(theta)
     value <- devfun(theta)
     for (iteration in 1:20) {
@@ -35,8 +48,8 @@ lmer_cases <- function() {
       }
       if (any(eigen(hessian, symmetric=TRUE, only.values=TRUE)$values <= 0)) break
       step <- -solve(hessian, gradient)
-      # The criterion is even in each element of theta, so the step is unbounded.
-      candidate <- abs(theta + step)
+      # The step is unbounded; signs are then made lme4's.
+      candidate <- canonical(theta + step, lower)
       new <- devfun(candidate)
       if (new > value + 1e-9 * abs(value)) break
       theta <- candidate
@@ -52,7 +65,7 @@ lmer_cases <- function() {
     lmod <- lFormula(formula, data, REML=REML, weights=.w, offset=.off, na.action=na.action)
     devfun <- do.call(mkLmerDevfun, lmod)
     opt <- optimizeLmer(devfun, optimizer="bobyqa", control=list(rhoend=1e-12, maxfun=1e5))
-    polished <- polish(devfun, opt$par)
+    polished <- polish(devfun, opt$par, lmod$reTrms$lower)
     opt$par <- polished$par
     opt$fval <- polished$fval
     devfun(polished$par)
@@ -77,7 +90,13 @@ lmer_cases <- function() {
     interaction_group=make(body_mass_g ~ flipper_length_mm + sex + (1 | species:island), p),
     nested=make(body_mass_g ~ flipper_length_mm + sex + (1 | species/sex), p),
     island_slopes=make(body_mass_g ~ sex + (bill_depth_mm || island), p),
-    species_slope=make(bill_length_mm ~ sex + (0 + bill_depth_mm | species), p)
+    species_slope=make(bill_length_mm ~ sex + (0 + bill_depth_mm | species), p),
+    correlated=make(Reaction ~ Days + (Days | Subject), s),
+    correlated_ml=make(Reaction ~ Days + (Days | Subject), s, REML=FALSE),
+    correlated_weighted=make(Reaction ~ Days + (Days | Subject), s, weights=s$w),
+    correlated_three=make(Reaction ~ Days + (Days + x2 | Subject), s),
+    correlated_factor=make(body_mass_g ~ flipper_length_mm + (0 + sex | species), p),
+    correlated_crossed=make(body_mass_g ~ sex + (bill_depth_mm | island) + (1 | species), p)
   )
   tidy_fit <- function(f) {
     co <- summary(f)$coefficients
@@ -87,7 +106,8 @@ lmer_cases <- function() {
       estimate=unname(co[, 1]), std_error=unname(co[, 2]), statistic=unname(co[, 3]),
       p_value=NA_real_, conf_low=unname(co[, 1] - z * co[, 2]), conf_high=unname(co[, 1] + z * co[, 2]))
     random <- data.frame(effect="ran_pars", group=as.character(vc$grp),
-      term=paste0("sd__", ifelse(is.na(vc$var1), "Observation", vc$var1)),
+      term=ifelse(is.na(vc$var2), paste0("sd__", ifelse(is.na(vc$var1), "Observation", vc$var1)),
+                  paste0("cor__", vc$var1, ".", vc$var2)),
       estimate=vc$sdcor, std_error=NA_real_, statistic=NA_real_, p_value=NA_real_,
       conf_low=NA_real_, conf_high=NA_real_)
     rbind(fixed, random)
@@ -129,6 +149,9 @@ lmer_cases <- function() {
   out$predict_population <- data.frame(fit=unname(predict(f, new, re.form=NA)))
   out$predict_random <- data.frame(fit=unname(predict(f, known)))
   out$predict_new_levels <- data.frame(fit=unname(predict(f, new, allow.new.levels=TRUE)))
+  cf <- fits$correlated$tight
+  out$predict_correlated <- data.frame(fit=unname(predict(cf, known)))
+  out$predict_correlated_new <- data.frame(fit=unname(predict(cf, new, allow.new.levels=TRUE)))
   rows <- p[c(1, 2, 3, 153, 277), ]
   out$predict_factors <- data.frame(fit=unname(predict(fits$factors$tight, rows)))
   out$predict_crossed <- data.frame(fit=unname(predict(fits$crossed$tight, rows)))
@@ -141,6 +164,8 @@ lmer_cases <- function() {
   ml1 <- make(Reaction ~ Days + (1 | Subject), s, REML=FALSE)$tight
   out$compare_ml <- compare(anova(ml1, fits$ml$tight),
                             c("Reaction ~ Days + (1 | Subject)", "Reaction ~ Days + (Days || Subject)"))
+  out$compare_correlated <- compare(suppressMessages(anova(fits$correlated$default, fits$slopes$default)),
+    c("Reaction ~ Days + (Days || Subject)", "Reaction ~ Days + (Days | Subject)"))
   out$compare_three <- compare(suppressMessages(anova(fits$intercept$default, fits$slopes$default, fits$slope_only$default)),
     c("Reaction ~ Days + (1 | Subject)", "Reaction ~ Days + (0 + Days | Subject)", "Reaction ~ Days + (Days || Subject)"))
   out$grouped <- p |> group_by(sex) |>

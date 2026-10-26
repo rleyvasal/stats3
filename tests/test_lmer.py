@@ -13,8 +13,9 @@ from oracle import BACKENDS, DATA, R_COMMAND, _oracle, as_input, as_polars, asse
 
 
 def sleep():
-    # lme4's sleepstudy, with a weights column of 1, 2, 3.
-    return pl.read_csv(DATA / "sleepstudy.csv").with_row_index("i", offset=1).with_columns(w=1 + pl.col("i") % 3)
+    # lme4's sleepstudy, with a weights column of 1, 2, 3 and a second slope variable.
+    return pl.read_csv(DATA / "sleepstudy.csv").with_row_index("i", offset=1).with_columns(
+        w=1 + pl.col("i") % 3, x2=(pl.col("i") % 5) / 2)
 
 
 def penguins():
@@ -42,6 +43,12 @@ FITS = {
     "nested": (penguins, "body_mass_g ~ flipper_length_mm + sex + (1 | species/sex)", {}),
     "island_slopes": (penguins, "body_mass_g ~ sex + (bill_depth_mm || island)", {}),
     "species_slope": (penguins, "bill_length_mm ~ sex + (0 + bill_depth_mm | species)", {}),
+    "correlated": (sleep, "Reaction ~ Days + (Days | Subject)", {}),
+    "correlated_ml": (sleep, "Reaction ~ Days + (Days | Subject)", {"reml": False}),
+    "correlated_weighted": (sleep, "Reaction ~ Days + (Days | Subject)", {"weights": "w"}),
+    "correlated_three": (sleep, "Reaction ~ Days + (Days + x2 | Subject)", {}),
+    "correlated_factor": (penguins, "body_mass_g ~ flipper_length_mm + (0 + sex | species)", {}),
+    "correlated_crossed": (penguins, "body_mass_g ~ sex + (bill_depth_mm | island) + (1 | species)", {}),
 }
 TABLES = {
     "tidy": lambda f: tidy(f, conf_int=True), "glance": glance,
@@ -100,7 +107,18 @@ def test_tables_match_lme4(name, which, backend, r_lmer):
         result = as_polars(result).select(pl.col(r"^\..*$"))
     # The reference is lme4's own deviance function minimized to 1e-9 in theta
     # (its modular interface with Newton steps; see tests/r_lmer_cases.R).
-    assert_matches_r(result, r_lmer[f"{name}__{which}__tight"], rel=1e-7, loose=LOOSE_TIGHT)
+    expected = r_lmer[f"{name}__{which}__tight"]
+    loose = dict(LOOSE_TIGHT)
+    if which == "theta":
+        # Elements at a boundary (a variance or correlation at zero) are
+        # zero to about 1e-12 in both; compare them on theta's own scale.
+        loose["theta"] = scaled(expected, 1e-7)["theta"]
+    assert_matches_r(result, expected, rel=1e-7, loose=loose)
+
+
+def _criterion(glance_table, reml):
+    columns = dict(zip(glance_table["columns"], glance_table["data"]))
+    return columns["REMLcrit"][0] if reml else columns["deviance"][0]
 
 
 @pytest.mark.parametrize("name", sorted(FITS))
@@ -112,6 +130,15 @@ def test_tables_match_default_lmer(name, which, r_lmer):
     # three levels), and fitted values, conditional modes and Cook's
     # distances inherit that. The minimized criterion itself agrees to 1e-11
     # (the ML deviance at a REML fit is not minimized, and moves with theta).
+    reml = FITS[name][2].get("reml", True)
+    default, tight = (_criterion(r_lmer[f"{name}__glance{suffix}"], reml) for suffix in ("", "__tight"))
+    if (default - tight) / abs(tight) > 1e-10:
+        # lme4's default optimizer stopped measurably above the minimum (on
+        # weakly identified correlated terms, by up to 3e-3 in the criterion):
+        # stats3 reaches the minimum, as the tight reference does.
+        ours = fit(name)
+        assert (ours.criterion - default) / abs(default) < 1e-12
+        pytest.skip(f"lme4's default optimizer stopped {default - tight:.2g} above the minimum for {name}")
     expected = r_lmer[f"{name}__{which}"]
     loose = scaled(expected, 5e-4)
     for exact in ("logLik", "AIC", "BIC", "REMLcrit"):
@@ -146,6 +173,9 @@ def test_predict_matches_lme4(backend, r_lmer):
         assert_matches_r(result, r_lmer[key], rel=1e-7)
     with pytest.raises(ValueError, match="new levels detected in newdata for 'Subject': 999"):
         predict(slopes, new)
+    correlated = fit("correlated", data)
+    assert_matches_r(predict(correlated, known), r_lmer["predict_correlated"], rel=1e-7)
+    assert_matches_r(predict(correlated, new, allow_new_levels=True), r_lmer["predict_correlated_new"], rel=1e-7)
     rows, _ = as_input(penguins()[[0, 1, 2, 152, 276]], backend, [])
     data, _ = as_input(penguins(), backend, [])
     for name in ("factors", "crossed", "nested"):
@@ -161,6 +191,9 @@ def test_model_comparisons_match_lme4(r_lmer):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         assert_matches_r(anova(intercept, slopes, slope_only), r_lmer["compare_three"], rel=1e-6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        assert_matches_r(anova(fit("correlated"), slopes), r_lmer["compare_correlated"], rel=1e-6)
     ml1 = lmer(sleep(), "Reaction ~ Days + (1 | Subject)", reml=False)
     assert_matches_r(anova(ml1, fit("ml")), r_lmer["compare_ml"], rel=1e-7)
     assert fit("ml").refit_ml() is fit("ml") or not fit("ml").reml
@@ -249,10 +282,6 @@ def test_thousands_of_levels_use_the_sparse_path():
 
 def test_invalid_models_and_arguments():
     data = sleep()
-    with pytest.raises(ValueError, match=r"correlated random effects \(1 \+ Days \| Subject\).*use \(1 \+ Days \|\| Subject\)"):
-        lmer(data, "Reaction ~ Days + (1 + Days | Subject)")
-    with pytest.raises(ValueError, match="correlated random effects"):
-        lmer(penguins(), "body_mass_g ~ 1 + (0 + sex | species)")
     with pytest.raises(ValueError, match="no random effects"):
         lmer(data, "Reaction ~ Days")
     with pytest.raises(ValueError, match="cannot be subtracted"):

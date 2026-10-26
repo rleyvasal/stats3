@@ -396,12 +396,13 @@ predict(fit, new_rows, allow_new_levels=True)
 anova(lmer(sleep, "Reaction ~ Days + (1 | Subject)"), fit)   # likelihood ratio, refitted with ML
 ```
 
-Random effects are `(1 | g)`, `(0 + x | g)`, `(x || g)` for an independent
-intercept and slope, crossed `(1 | g1) + (1 | g2)`, `(1 | g1:g2)` and nested
-`(1 | g1/g2)`. Correlated random effects, `(1 + x | g)`, are not implemented
-yet and raise with that message. `tidy(fit)` is broom.mixed's table: fixed
+Random effects are `(1 | g)`, `(0 + x | g)`, `(1 + x | g)` for a correlated
+intercept and slope (any number of columns, factors included), `(x || g)`
+for an independent intercept and slope, crossed `(1 | g1) + (1 | g2)`,
+`(1 | g1:g2)` and nested `(1 | g1/g2)`. `tidy(fit)` is broom.mixed's table: fixed
 terms (`effect="fixed"`, t statistics without p-values or degrees of freedom,
-as `summary.merMod`) and the standard deviations as `effect="ran_pars"` rows;
+as `summary.merMod`) and the standard deviations and correlations as
+`effect="ran_pars"` rows (`sd__Days`, `cor__(Intercept).Days`);
 `effects="ran_vals"` gives the conditional modes. `glance` has `logLik`,
 `AIC`, `BIC`, `REMLcrit`, `deviance` and `sigma`; `augment` adds `.fitted`,
 `.resid`, `.hat`, `.cooksd` and `.fixed`; `vcov` is the fixed effects'
@@ -629,7 +630,7 @@ values follow `na_action` as in R: `"fail"` by default, or `"pass"`,
 | MASS | `glm_nb("y ~ x")`, `glm("y ~ x", family=negative_binomial(theta))` |
 | MASS::polr | `polr("y ~ x", method="logistic")` |
 | nnet::multinom | `multinom("y ~ x")` |
-| lme4::lmer | `lmer("y ~ x + (x \|\| g)")`, `ranef(fit)`, `predict(fit, re_form=...)` |
+| lme4::lmer | `lmer("y ~ x + (x \| g)")`, `(x \|\| g)`, `ranef(fit)`, `predict(fit, re_form=...)` |
 | MASS::rlm | `rlm("y ~ x", psi="huber")` |
 | quantreg::rq | `rq("y ~ x", tau=0.5, se="rank")` |
 | `prcomp`, `princomp`, `factanal` | `prcomp("~ a + b", scale_=True)`, `princomp(cols, cor=True)`, `factanal(cols, 2, rotation="promax")`; `varimax`, `promax` |
@@ -680,8 +681,7 @@ WAIC and exact Gaussian model evidence. `bayes_binom_test` and
 
 This is a first Bayesian implementation. Custom likelihoods,
 survival/time-series models and general model-evidence estimation remain
-outside its scope. Of the tier 2 models, correlated random effects in
-`lmer` are still pending.
+outside its scope.
 
 ## How it works, and how it is checked
 

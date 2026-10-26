@@ -4,6 +4,12 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- `lmer` fits correlated random effects: `(1 + x | g)` estimates a correlated intercept and slope, for any number of columns (factors included), with lme4's parameterization (each term's lower-triangular block of the relative covariance factor) and its column-sign convention. `tidy` adds broom.mixed's `cor__` rows, `fit.var_corr()` gives `as.data.frame(VarCorr)`'s table with covariances and correlations, and `ranef`'s conditional standard deviations, hat values, predictions and model comparisons cover them. Above 1,500 random-effect columns the block-triangular factor is used sparsely, so 2,000 groups with a correlated intercept and slope fit in about half a second. Checked against lme4 on all four backends, with weights, ML, three correlated columns, a factor's columns and a crossed term.
+
 ## 0.3.0 — 2026-10-25
 
 Most of R's remaining modelling toolkit: mixed models, generalized additive models, survival analysis, penalized and multinomial regression, nonlinear least squares, smoothers, time series, multivariate methods and multivariate linear models, multi-factor ANOVA, four more base R tests, and completed polr, rlm, rq and Bayesian varying effects. The `bayes` extra moves to PyMC 6.
