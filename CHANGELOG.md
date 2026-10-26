@@ -8,7 +8,7 @@ under **Changed**.
 
 ### Changed
 
-- Faster on large data, with the same results: `coxph`'s concordance is a sweep with vectorized prefix counts instead of comparing every event with every row (200k rows: 397 s to 1.6 s); `arima` evaluates its likelihood past the Kalman filter's steady state with one linear filter while optimizing (10k points: 27.5 s to 0.75 s); `gam`'s thin-plate basis takes its largest eigenpairs by Lanczos iteration, as mgcv does, and its search takes smoothing parameters drifting to infinity to their limit (10k rows: 12.7 s to 0.46 s); `glmnet` reuses the Gaussian Hessian along the lambda path (0.44 s to 0.19 s).
+- Faster on large data, with the same results: `coxph`'s information matrix is a weighted cross product over the rows (each row weighted by its risk score and cumulative hazard) instead of n x p x p risk-set sums, its concordance is a sweep with vectorized prefix counts instead of comparing every event with every row, and is computed on first use (`glance`) rather than at every fit (200k rows: 397 s to 0.2 s for the fit, 0.8 s with `glance`); `arima` evaluates its likelihood past the Kalman filter's steady state with one linear filter while optimizing (10k points: 27.5 s to 0.24 s); `gam`'s thin-plate basis takes its largest eigenpairs by Lanczos iteration, as mgcv does, and its search takes smoothing parameters drifting to infinity to their limit (10k rows: 12.7 s to 0.47 s); `glmnet`'s Gaussian path runs in glmnet's covariance mode, on the cross products from one pass over the rows (100k x 50: 0.44 s to 0.07 s).
 
 ## 0.4.0 — 2026-10-26
 
