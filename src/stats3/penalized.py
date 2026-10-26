@@ -350,7 +350,11 @@ class _Path:
     def __init__(self, x, y, family, weights, offset, alpha, nlambda, lambda_min_ratio, lambda_,
                  standardize, intercept, thresh, dfmax, exclude, penalty_factor, lower, upper,
                  maxit, ties):
-        x = np.asarray(x, dtype=float)
+        # One memory layout whatever the caller passes (a formula's design
+        # minus its intercept is a strided view): BLAS may round strided and
+        # contiguous reductions differently, and the path starts from x's
+        # column means and scales, so both interfaces must give the same bits.
+        x = np.ascontiguousarray(x, dtype=float)
         n, p = x.shape
         if p < 2:
             raise ValueError("glmnet(): x should be a matrix with 2 or more columns")
