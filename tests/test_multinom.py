@@ -30,7 +30,18 @@ CASES = dict(main=('species ~ mass + sex', {}), flipper=('species ~ flipper', {}
     sum_contrasts=('species ~ mass + sex + factor(year)', {'contrasts': 'sum'}),
     aliased=('species ~ mass + mass2 + sex', {}), reference=('species ~ mass + sex', {}),
     offset_matrix=('species ~ mass', {'offset': ['oa', 'ob', 'oc']}),
-    binary=('sex ~ mass + species', {}), binary_offset=('sex ~ mass + species + offset(off)', {}))
+    binary=('sex ~ mass + species', {}), binary_offset=('sex ~ mass + species + offset(off)', {}),
+    decay=('species ~ mass + sex', {'decay': 0.5}), decay_aliased=('species ~ mass + mass2 + sex', {'decay': 0.5}),
+    counts=('cbind(Adelie, Chinstrap, Gentoo) ~ factor(year) + sex', {}),
+    counts_weighted=('cbind(Adelie, Chinstrap, Gentoo) ~ factor(year) + sex', {'weights': 'cw'}))
+
+
+def counts():
+    """Counts of each species by year and sex, in R's aggregate() order (sex varying slowest)."""
+    return (data().drop_nulls('sex')
+            .group_by('year', 'sex').agg(**{s: (pl.col('species') == s).sum() for s in SPECIES})
+            .sort('sex', 'year')
+            .with_row_index('j', offset=1).with_columns(cw=1 + pl.col('j') % 2))
 
 
 @pytest.fixture(scope='module', params=BACKENDS)
@@ -39,7 +50,9 @@ def fits(request):
     source, _ = as_input(data(), backend, [])
     gentoo, _ = as_input(data().with_columns(pl.col('species').cast(pl.String).cast(
         pl.Enum(['Gentoo', 'Adelie', 'Chinstrap']))), backend, [])
-    result = {name: multinom(gentoo if name == 'reference' else source, formula, **kwargs)
+    tallies, _ = as_input(counts(), backend, [])
+    sources = {'reference': gentoo, 'counts': tallies, 'counts_weighted': tallies}
+    result = {name: multinom(sources.get(name, source), formula, **kwargs)
               for name, (formula, kwargs) in CASES.items()}
     return backend, result
 
@@ -89,6 +102,13 @@ def test_tables_match_r(fits, table):
         loose = dict(LOOSE)
         if table == 'vcov':
             loose.update({n: (2e-5, 1e-9) for n in fit.parameter_names})
+        if table == 'tidy':
+            # nnet's accuracy is relative to the coefficient vector's size, not
+            # each element's: a coefficient near zero is only that close.
+            columns = dict(zip(expected[table]['columns'], expected[table]['data']))
+            for c in ('estimate', 'statistic', 'conf_low', 'conf_high'):
+                largest = max(abs(v) for v in columns[c] if v is not None)
+                loose[c] = (LOOSE[c][0], max(LOOSE[c][1], LOOSE[c][0] * largest))
         if gap > STOPPED_SHORT and table not in ('glance', 'class', 'new_class'):
             loose = {c: SHORT_LOOSE for c in expected[table]['columns']}
         assert_matches_r(actual, expected[table], loose=loose)
@@ -216,3 +236,34 @@ def test_unsupported_inference():
         anova(fit, lm(data(), 'mass ~ flipper'))
     with pytest.raises(ValueError, match='same size'):
         anova(fit, multinom(data(), 'species ~ mass + sex'))
+
+
+def test_counts_match_the_same_fit_on_rows():
+    """A cbind() count response is the row-level fit with each row counted:
+    the same coefficients, deviance and standard errors."""
+    tallies = counts()
+    rows = data().drop_nulls('sex')
+    by_counts = multinom(tallies, 'cbind(Adelie, Chinstrap, Gentoo) ~ factor(year) + sex')
+    by_rows = multinom(rows, 'species ~ factor(year) + sex')
+    assert by_counts.response_levels == SPECIES
+    assert by_counts.coef == pytest.approx(by_rows.coef, rel=1e-9, abs=1e-12)
+    assert by_counts.deviance == pytest.approx(by_rows.deviance, rel=1e-12)
+    assert tidy(by_counts)['std_error'].to_list() == pytest.approx(tidy(by_rows)['std_error'].to_list(), rel=1e-9)
+    assert glance(by_counts)['nobs'][0] == tallies.height
+
+
+def test_decay_penalizes_every_coefficient():
+    fit = multinom(data(), 'species ~ mass + sex', decay=0.5)
+    plain = multinom(data(), 'species ~ mass + sex')
+    used = data().drop_nulls(['mass', 'sex'])
+    x = np.column_stack([np.ones(used.height), used['mass'].to_numpy(), (used['sex'] == 'male').to_numpy()])
+    y = used['species'].to_physical().to_numpy()
+    unpenalized = _deviance(x, fit.coef, y, np.ones(used.height), np.zeros((used.height, 3)))
+    # nnet reports twice the penalized criterion, intercepts included in the penalty.
+    assert fit.deviance == pytest.approx(unpenalized + 2 * 0.5 * float(np.sum(fit.coef**2)), rel=1e-12)
+    assert np.sum(fit.coef**2) < np.sum(plain.coef**2)
+    for bad in (-1, True, 'a'):
+        with pytest.raises(ValueError, match='decay must be a nonnegative number'):
+            multinom(data(), 'species ~ mass', decay=bad)
+    with pytest.raises(ValueError, match='nonnegative'):
+        multinom(counts().with_columns(Adelie=-pl.col('Adelie').cast(pl.Int64)), 'cbind(Adelie, Chinstrap, Gentoo) ~ sex')

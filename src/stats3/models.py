@@ -314,7 +314,8 @@ class _Frame:
     all_index: np.ndarray | None = None
 
 
-def _response_parts(response: str) -> list[str]:
+def _response_parts(response: str, many: bool = False) -> list[str]:
+    """The response's columns: one, or a ``cbind()``'s two (``many``: two or more)."""
     if response.startswith("cbind(") and response.endswith(")"):
         inner = response[len("cbind("):-1]
         parts, depth, start = [], 0, 0
@@ -325,8 +326,8 @@ def _response_parts(response: str) -> list[str]:
                 parts.append(inner[start:i].strip())
                 start = i + 1
         parts.append(inner[start:].strip())
-        if len(parts) != 2:
-            raise ValueError(f"cbind() in a response takes two columns: {response!r}")
+        if (len(parts) < 2) if many else (len(parts) != 2):
+            raise ValueError(f"cbind() in a response takes {'two or more' if many else 'two'} columns: {response!r}")
         return parts
     return [response]
 
@@ -347,12 +348,13 @@ NA_ACTIONS = ("omit", "exclude", "fail")
 
 
 def _model_frames(
-    data: Data, formula: Formula, weights: Any, offset: Any, verb: str, na_action: str = "omit"
+    data: Data, formula: Formula, weights: Any, offset: Any, verb: str, na_action: str = "omit",
+    many_responses: bool = False,
 ) -> list[_Frame]:
     groups = list(data._groups)
     if formula.response is None:
         raise ValueError(f"{verb}(): the formula needs a response: 'y ~ ...'")
-    responses = _response_parts(formula.response)
+    responses = _response_parts(formula.response, many_responses)
     variables = formula.variables()
     exprs: dict[str, pl.Expr] = {}
     factor_vars: set[str] = set()
@@ -417,7 +419,7 @@ def _model_frames(
             response_levels = y_var.levels
             y = y_var.codes.astype(float)
         else:
-            y = np.column_stack([s.cast(pl.Float64).to_numpy() for s in ys]) if len(ys) == 2 else ys[0].cast(pl.Float64).to_numpy()
+            y = np.column_stack([s.cast(pl.Float64).to_numpy() for s in ys]) if len(ys) >= 2 else ys[0].cast(pl.Float64).to_numpy()
         encoded = {
             label_: encode(part, label_, label_ in factor_vars, _levels_for(data, label_))
             for label_ in variables
@@ -1411,7 +1413,7 @@ def _contrasts(contrasts: Any, parsed: Formula, verb: str) -> dict[str, str]:
 
 
 def _model(verb: str, build: Callable[[Formula, _Frame, Data], _Fit], formula: str, weights: Any, offset: Any,
-           contrasts: Any = None, na_action: str = "omit"):
+           contrasts: Any = None, na_action: str = "omit", many_responses: bool = False):
     if na_action not in NA_ACTIONS:
         raise ValueError(f"{verb}(): na_action must be one of {list(NA_ACTIONS)}, got {na_action!r}")
 
@@ -1419,7 +1421,7 @@ def _model(verb: str, build: Callable[[Formula, _Frame, Data], _Fit], formula: s
         parsed = parse_formula(formula, verb, data.columns)
         parsed.contrasts = _contrasts(contrasts, parsed, verb)
         parsed.offset_arg = offset
-        frames = _model_frames(data, parsed, weights, offset, verb, na_action)
+        frames = _model_frames(data, parsed, weights, offset, verb, na_action, many_responses)
         fits = [build(parsed, frame, data) for frame in frames]
         return Models(fits, data) if data._groups else fits[0]
 

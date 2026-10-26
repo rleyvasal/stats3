@@ -8,6 +8,10 @@ multinom_cases <- function() {
   p$w <- 1 + i %% 3; p$w[c(2, 30, 160, 250)] <- 0
   p$off <- (i %% 5)/10; p$oa <- 0; p$ob <- p$off; p$oc <- -p$off/2
   gentoo <- p; gentoo$species <- relevel(gentoo$species, "Gentoo")
+  # Counts of each species by year and sex (every cell has every species).
+  counts <- aggregate(cbind(Adelie = species == "Adelie", Chinstrap = species == "Chinstrap",
+                            Gentoo = species == "Gentoo") ~ year + sex, data = p, FUN = sum)
+  counts$cw <- 1 + seq_len(nrow(counts)) %% 2
   specs <- list(
     main=list(formula=species ~ mass + sex),
     flipper=list(formula=species ~ flipper),
@@ -20,7 +24,11 @@ multinom_cases <- function() {
     reference=list(formula=species ~ mass + sex, data=gentoo),
     offset_matrix=list(formula=species ~ mass + offset(cbind(oa, ob, oc))),
     binary=list(formula=sex ~ mass + species),
-    binary_offset=list(formula=sex ~ mass + species + offset(off)))
+    binary_offset=list(formula=sex ~ mass + species + offset(off)),
+    decay=list(formula=species ~ mass + sex, decay=0.5),
+    decay_aliased=list(formula=species ~ mass + mass2 + sex, decay=0.5),
+    counts=list(formula=cbind(Adelie, Chinstrap, Gentoo) ~ factor(year) + sex, data=counts),
+    counts_weighted=list(formula=cbind(Adelie, Chinstrap, Gentoo) ~ factor(year) + sex, data=counts, weights=quote(cw)))
   # nnet's BFGS stops at reltol 1e-8 after at most 100 iterations by default;
   # tighten both so the oracle is as close to the MLE as nnet can get.
   fit_one <- function(spec, data=p) {
@@ -46,7 +54,8 @@ multinom_cases <- function() {
     if (length(f$lev) == 2) y[, 2] else y
   }
   tables <- function(f) {
-    lev <- f$lev; binary <- length(lev) == 2
+    # A cbind() count response keeps its levels as the fitted values' column names.
+    lev <- if (is.null(f$lev)) colnames(fitted(f)) else f$lev; binary <- length(lev) == 2
     t <- as.data.frame(tidy(f, conf.int=TRUE))
     if (binary) t$y.level <- lev[2]
     names(t) <- gsub(".", "_", names(t), fixed=TRUE)

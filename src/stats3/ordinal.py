@@ -1,5 +1,7 @@
 """Cumulative-link ordinal regression, following MASS::polr conventions."""
 
+import math
+
 import numpy as np
 import polars as pl
 
@@ -289,8 +291,13 @@ class OrdinalModel(_Fit):
         return self._with_key(pl.DataFrame({"term": self.parameter_names,
             **{name: cov[:, j] for j, name in enumerate(self.parameter_names)}}))
 
+    EMM_MODES = EMM_MODES
+
     def _emm_parameters(self, vcov):
         return np.r_[self.coef, self.thresholds], self._covariance(vcov)
+
+    def _emm_df(self):
+        return math.inf
 
     def _emm_cells(self, grid, x, offset, weights, mode):
         """emmeans' polr basis on the reference grid: each cell's value and

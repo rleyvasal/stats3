@@ -9,6 +9,7 @@ under **Changed**.
 ### Added
 
 - `lmer` fits correlated random effects: `(1 + x | g)` estimates a correlated intercept and slope, for any number of columns (factors included), with lme4's parameterization (each term's lower-triangular block of the relative covariance factor) and its column-sign convention. `tidy` adds broom.mixed's `cor__` rows, `fit.var_corr()` gives `as.data.frame(VarCorr)`'s table with covariances and correlations, and `ranef`'s conditional standard deviations, hat values, predictions and model comparisons cover them. Above 1,500 random-effect columns the block-triangular factor is used sparsely, so 2,000 groups with a correlated intercept and slope fit in about half a second. Checked against lme4 on all four backends, with weights, ML, three correlated columns, a factor's columns and a crossed term.
+- `multinom` gains nnet's `decay=` weight decay (every coefficient penalized, intercepts included; the reported deviance includes the penalty and standard errors use the unpenalized Hessian, as nnet does), `cbind(n1, n2, ...)` count responses (the columns' names as levels, nobs the number of rows), and marginal means: `emmeans` gives emmeans' class probabilities (`mode="prob"`, the default) or centred log-odds (`mode="latent"`), with the fit's edf as degrees of freedom, and pairs and contrasts on them. Checked against nnet and emmeans on all four backends.
 
 ## 0.3.0 — 2026-10-25
 

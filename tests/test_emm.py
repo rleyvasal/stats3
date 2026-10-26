@@ -200,6 +200,52 @@ def test_polr_emmeans_matches_r(name, backend, r_emmeans):
     assert_matches_r(result, r_emmeans[name], loose=loose)
 
 
+def _multinom_data():
+    return (penguins().drop_nulls(["species", "body_mass_g", "sex"]).with_row_index("i", offset=1)
+            .with_columns(mass=pl.col("body_mass_g") / 1000, yf=pl.col("year").cast(pl.String),
+                          w=1 + pl.col("i") % 3))
+
+
+def _multinom(data, **kwargs):
+    from stats3 import multinom
+
+    return multinom(data, "species ~ mass + sex + yf", **kwargs)
+
+
+MULTINOM_CASES = {
+    "multinom_prob": lambda d: emmeans(_multinom(d), "species", by="sex"),
+    "multinom_prob_pairs": lambda d: pairs(emmeans(_multinom(d), "species", by="sex")),
+    "multinom_latent": lambda d: emmeans(_multinom(d), "species", by="sex", mode="latent"),
+    "multinom_species": lambda d: emmeans(_multinom(d), "species"),
+    "multinom_proportional": lambda d: emmeans(_multinom(d), "species", by="sex", weights="proportional"),
+    "multinom_weighted": lambda d: emmeans(_multinom(d, weights="w"), "species", by="sex"),
+}
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("name", sorted(MULTINOM_CASES))
+def test_multinom_emmeans_matches_r(name, backend, r_emmeans):
+    frame, _ = as_input(_multinom_data(), backend, [])
+    result = tidy(MULTINOM_CASES[name](frame))
+    assert type(result) is type(frame)
+    # nnet reaches the MLE to about 1e-5 (see test_multinom), so the means,
+    # which are smooth functions of the coefficients, agree to that accuracy.
+    loose = {c: (5e-5, 1e-6) for c in ("estimate", "std_error", "statistic", "conf_low", "conf_high")}
+    loose["p_value"] = (1e-4, 1e-9)
+    assert_matches_r(result, r_emmeans[name], loose=loose)
+
+
+def test_multinom_emmeans_modes():
+    fit = _multinom(_multinom_data())
+    with pytest.raises(ValueError, match=r"mode must be one of \['prob', 'latent'\]"):
+        emmeans(fit, "species", mode="mean.class")
+    with pytest.raises(ValueError, match="multinom fits choose their scale with mode="):
+        emmeans(fit, "species", type="response")
+    # Each sex's probabilities sum to one.
+    probs = tidy(emmeans(fit, "species", by="sex"))
+    assert probs.group_by("sex").agg(pl.col("estimate").sum())["estimate"].to_list() == pytest.approx([1, 1])
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_grouped_polr_emmeans_matches_r(backend, r_emmeans):
     frame, by = as_input(_housing(), backend, ["Cont"])

@@ -81,7 +81,31 @@ emm_cases <- function() {
   out$offset_pairs <- row(pairs(emmeans(pois, "gear", at=list(gear=c(3, 5)))), "contrast", TRUE)
   out$gamma <- row(emmeans(glm(mpg ~ wt + factor(cyl), Gamma(link="log"), m), "cyl", type="response"), "cyl")
   out$gaussian <- row(emmeans(glm(mpg ~ wt + factor(cyl), gaussian(link="log"), m), "cyl", type="response"), "cyl")
-  c(out, polr_emm_cases(row))
+  c(out, polr_emm_cases(row), multinom_emm_cases(row))
+}
+
+multinom_emm_cases <- function(row) {
+  suppressPackageStartupMessages(library(nnet))
+  d <- read.csv("tests/data/penguins.csv", na.strings="NA")
+  d <- d[complete.cases(d[, c("species", "body_mass_g", "sex")]), ]
+  d$species <- factor(d$species); d$sex <- factor(d$sex); d$yf <- factor(d$year)
+  d$mass <- d$body_mass_g / 1000
+  d$w <- 1 + seq_len(nrow(d)) %% 3
+  fit <- function(weights=NULL) {
+    # do.call embeds the data in the call, so emmeans can recover it.
+    do.call(multinom, list(species ~ mass + sex + yf, data=d, weights=weights, trace=FALSE,
+                           maxit=10000, reltol=1e-15))
+  }
+  f <- fit()
+  out <- list()
+  prob <- emmeans(f, ~ species | sex)
+  out$multinom_prob <- row(prob, c("sex", "species"))
+  out$multinom_prob_pairs <- row(pairs(prob), c("sex", "contrast"), TRUE)
+  out$multinom_latent <- row(emmeans(f, ~ species | sex, mode="latent"), c("sex", "species"))
+  out$multinom_species <- row(emmeans(f, "species"), "species")
+  out$multinom_proportional <- row(emmeans(f, ~ species | sex, weights="proportional"), c("sex", "species"))
+  out$multinom_weighted <- row(emmeans(fit(d$w), ~ species | sex), c("sex", "species"))
+  out
 }
 
 polr_emm_cases <- function(row) {

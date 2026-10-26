@@ -8,7 +8,7 @@ import polars as pl
 from stats3._data import Data, expression, step
 from stats3.core import _check_conf_level, _warn
 from stats3.formula import build_design
-from stats3.models import _Fit, _levels_for, _model, _qr, _table_text
+from stats3.models import _Fit, _levels_for, _model, _qr, _response_parts, _table_text
 
 
 def _log_probabilities(eta):
@@ -21,21 +21,33 @@ def _predictor(x, coef, offset):
     return np.column_stack((np.zeros(len(x)), x @ coef.T)) + offset
 
 
+def _counts(y, k):
+    """The response as an (n, K) matrix of counts: class codes become
+    indicators; a ``cbind()`` response is already counts."""
+    y = np.asarray(y)
+    return np.eye(k)[y.astype(int)] if y.ndim == 1 else y.astype(float)
+
+
 def _deviance(x, coef, y, weights, offset):
+    """-2 sum w y log p, as nnet's entropy fit (no saturated term)."""
     used = weights > 0
     logp = _log_probabilities(_predictor(x[used], coef, offset[used]))
-    return -2 * float(weights[used] @ logp[np.arange(used.sum()), y[used]])
+    counts = _counts(np.asarray(y)[used], logp.shape[1])
+    terms = np.where(counts > 0, counts * logp, 0.0)
+    return -2 * float(weights[used] @ terms.sum(axis=1))
 
 
 def _score(x, coef, y, weights, offset):
     """Gradient of the log-likelihood, class-major: level 2's terms, level 3's, ..."""
     p = np.exp(_log_probabilities(_predictor(x, coef, offset)))
-    indicator = np.eye(p.shape[1])[y]
-    return ((weights[:, None] * (indicator - p))[:, 1:].T @ x).ravel()
+    counts = _counts(y, p.shape[1])
+    total = counts.sum(axis=1, keepdims=True)
+    return ((weights[:, None] * (counts - total * p))[:, 1:].T @ x).ravel()
 
 
 def _information(x, probabilities, weights):
-    """The exact Hessian of minus the log-likelihood, as nnet's multinomHess."""
+    """The exact Hessian of minus the log-likelihood, as nnet's multinomHess.
+    For a count response, ``weights`` carries each row's total."""
     n, p = x.shape
     q = probabilities.shape[1] - 1
     info = np.empty((q * p, q * p))
@@ -58,16 +70,25 @@ def _ginv(a):
     return vt[positive].T @ (u[:, positive] / d[positive]).T
 
 
-def _newton(x, y, weights, offset, q, maxit):
-    """Maximum likelihood by Newton-Raphson with step halving, from zero (nnet's start)."""
+def _newton(x, y, weights, offset, q, maxit, decay=0.0):
+    """Maximum likelihood by Newton-Raphson with step halving, from zero
+    (nnet's start). ``decay`` adds nnet's penalty, decay times the sum of
+    squares of every coefficient, to minus the log-likelihood; the returned
+    deviance is then twice that penalized value, as nnet reports it."""
+    totals = weights * _counts(y, q + 1).sum(axis=1)
     coef = np.zeros((q, x.shape[1]))
-    deviance = _deviance(x, coef, y, weights, offset)
+
+    def objective(c):
+        return _deviance(x, c, y, weights, offset) + 2 * decay * float(np.sum(c**2))
+
+    deviance = objective(coef)
     for iteration in range(1, maxit + 1):
         probabilities = np.exp(_log_probabilities(_predictor(x, coef, offset)))
-        info = _information(x, probabilities, weights)
-        step = np.linalg.lstsq(info, _score(x, coef, y, weights, offset), rcond=None)[0].reshape(coef.shape)
+        info = _information(x, probabilities, totals) + 2 * decay * np.eye(coef.size)
+        score = _score(x, coef, y, weights, offset) - 2 * decay * coef.ravel()
+        step = np.linalg.lstsq(info, score, rcond=None)[0].reshape(coef.shape)
         for _ in range(60):
-            proposal = _deviance(x, coef + step, y, weights, offset)
+            proposal = objective(coef + step)
             if np.isfinite(proposal) and proposal <= deviance + 1e-12 * abs(deviance):
                 break
             step /= 2
@@ -88,10 +109,17 @@ class MultinomialModel(_Fit):
 
     kind = "multinomial"
 
-    def __init__(self, formula, frame, data, offset_columns, maxit):
+    def __init__(self, formula, frame, data, offset_columns, maxit, decay=0.0):
         design = build_design(formula, frame.variables, len(frame.weights))
         super().__init__(formula, design, frame, data, "multinom")
-        if frame.response_levels is None:
+        self.decay = float(decay)
+        self.counts = frame.y.ndim == 2
+        if self.counts:
+            # cbind(n1, n2, ...): counts per level, the columns' names as levels (R's colnames(Y)).
+            levels, codes = _response_parts(formula.response, True), frame.y
+            if np.any(codes < 0):
+                raise ValueError("multinom(): counts in a cbind() response must be nonnegative")
+        elif frame.response_levels is None:
             values = np.unique(frame.y)  # R's multinom treats any response as a factor
             levels, codes = [_level_label(float(v)) for v in values], np.searchsorted(values, frame.y)
         else:
@@ -100,8 +128,8 @@ class MultinomialModel(_Fit):
             present = list(frame.response_levels)
             levels = declared if declared and set(present) <= set(declared) else present
             codes = np.array([levels.index(lv) for lv in present])[frame.y.astype(int)]
-        counts = np.bincount(codes, minlength=len(levels))
-        if np.any(counts == 0):
+        counts = codes.sum(axis=0) if self.counts else np.bincount(codes, minlength=len(levels))
+        if np.any(counts == 0) and not self.counts:
             empty = [f"'{level}'" for level, count in zip(levels, counts) if count == 0]
             _warn(f"multinom(): group{'s' if len(empty) > 1 else ''} {' '.join(empty)} "
                   f"{'are' if len(empty) > 1 else 'is'} empty")
@@ -122,8 +150,11 @@ class MultinomialModel(_Fit):
         kept = _qr(self.x, 1e-7, np.zeros(self.n)).kept
         self.rank = len(kept)
         self.qr = SimpleNamespace(kept=list(range(p)))
+        if self.decay > 0:
+            # The penalty makes every coefficient identified: fit all columns.
+            kept = list(range(p))
         fitted, self.deviance, self.converged, self.iterations = _newton(
-            self.x[:, kept], self.y, self.prior_weights, self.offset, q, maxit)
+            self.x[:, kept], self.y, self.prior_weights, self.offset, q, maxit, self.decay)
         if not self.converged:
             _warn(f"multinom(): Newton iterations did not converge in {maxit} steps; "
                   "fitted probabilities may be 0 or 1")
@@ -133,7 +164,8 @@ class MultinomialModel(_Fit):
         else:
             self.coef = fitted
         self.fitted = np.exp(_log_probabilities(_predictor(self.x, self.coef, self.offset)))
-        self._cov = _ginv(_information(self.x, self.fitted, self.prior_weights))
+        totals = self.prior_weights * _counts(self.y, q + 1).sum(axis=1)
+        self._cov = _ginv(_information(self.x, self.fitted, totals))
         self.edf = q * self.rank
         self.aic = self.deviance + 2 * self.edf
         self.nobs = self.n
@@ -233,6 +265,48 @@ class MultinomialModel(_Fit):
         out = pl.concat([rows, classes.rename({"fit": ".fitted"}), probs], how="horizontal")
         return out if newdata is None else data.write(out)
 
+    # marginal means, as emmeans' multinom basis ----------------------------------------
+
+    EMM_MODES = ("prob", "latent")
+
+    def _emm_parameters(self, vcov):
+        self._check_vcov(vcov)
+        return self.coef.ravel(), self._cov
+
+    def _emm_df(self):
+        # emmeans gives multinom means the fit's edf as degrees of freedom.
+        return float(self.edf)
+
+    def _emm_cells(self, grid, x, offset, weights, mode):
+        """Each grid cell's class probabilities (``mode="prob"``) or centred
+        log-odds (``"latent"``, emmeans' clr scale), written as linear
+        functions of the coefficients by the delta method (gradient rows,
+        value minus gradient times coefficients as offset), with the
+        response as a grid factor, one row per level."""
+        if self._offset_columns is not None:
+            raise ValueError("emmeans(): multinom fits with an offset per level are not supported")
+        n, p = x.shape
+        k = len(self.response_levels)
+        q = k - 1
+        eta = _predictor(x, self.coef, self._offset_matrix(offset, None, "emmeans"))
+        indicator = np.eye(k)[:, 1:]  # d eta_c / d (eta of non-reference class j)
+        if mode == "latent":
+            values = eta - eta.mean(axis=1, keepdims=True)
+            weight = np.broadcast_to(indicator - 1 / k, (n, k, q))  # (n, class, j)
+        else:
+            values = np.exp(_log_probabilities(eta))
+            weight = values[:, :, None] * (indicator[None, :, :] - values[:, None, 1:])
+        gradient = (weight[:, :, :, None] * x[:, None, None, :]).reshape(n, k, q * p)
+        rows = gradient.reshape(n * k, q * p)
+        constant = values.reshape(-1) - rows @ self.coef.ravel()
+        response = "class" if self.counts else self.formula.response
+        if response in grid.columns:
+            raise ValueError(f"emmeans(): the response {response!r} is also a predictor")
+        labels = [str(level) for level in self.response_levels]
+        grid = grid.select(pl.all().gather(np.repeat(np.arange(n), k))).with_columns(
+            pl.Series(response, labels * n, dtype=pl.String))
+        return grid, rows, constant, np.repeat(weights, k)
+
     def anova_table(self, test=None):
         raise TypeError("anova(): anova is not implemented for a single multinom model; compare nested models")
 
@@ -245,7 +319,7 @@ class MultinomialModel(_Fit):
 
 
 @step
-def multinom(formula, *, weights=None, offset=None, contrasts=None, na_action="omit", maxit=100):
+def multinom(formula, *, weights=None, offset=None, contrasts=None, na_action="omit", maxit=100, decay=0.0):
     """Multinomial (baseline-category) logit regression, as nnet::multinom.
 
     log(P(Y = level k) / P(Y = first level)) = X beta_k, one coefficient
@@ -258,16 +332,24 @@ def multinom(formula, *, weights=None, offset=None, contrasts=None, na_action="o
     response, or a list of one column per level (R's ``offset(cbind(...))``).
     Weights, ``contrasts``, ``na_action`` and ``by=`` follow the other
     model functions; aliased columns share nnet's minimum-norm solution.
+    A ``cbind(n1, n2, ...)`` response gives counts per level, the columns'
+    names becoming the levels (the first the reference). ``decay`` is nnet's
+    weight decay: it adds decay times the sum of squared coefficients
+    (intercepts included) to minus the log-likelihood, and the reported
+    deviance, as nnet's, includes that penalty; standard errors still come
+    from the unpenalized Hessian, as ``summary.multinom``.
     """
     if isinstance(maxit, bool) or not isinstance(maxit, (int, np.integer)) or maxit < 1:
         raise ValueError("multinom(): maxit must be a positive integer")
+    if isinstance(decay, bool) or not isinstance(decay, (int, float, np.integer, np.floating)) or not decay >= 0:
+        raise ValueError("multinom(): decay must be a nonnegative number")
     columns = None
     if isinstance(offset, (list, tuple)):
         columns, offset = list(offset), sum((expression(c).cast(pl.Float64) * 0 for c in offset), pl.lit(0.0))
         if len(columns) < 2:
             raise ValueError("multinom(): a list offset needs one column per response level")
-    return _model("multinom", lambda f, fr, d: MultinomialModel(f, fr, d, columns, maxit),
-                  formula, weights, offset, contrasts, na_action)
+    return _model("multinom", lambda f, fr, d: MultinomialModel(f, fr, d, columns, maxit, decay),
+                  formula, weights, offset, contrasts, na_action, many_responses=True)
 
 
 def _anova_multinom(fits, test):

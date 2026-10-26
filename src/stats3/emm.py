@@ -137,7 +137,7 @@ class _Estimates:
 def _parameters(fit: Any, vcov: Any) -> tuple[np.ndarray, np.ndarray, list[int]]:
     """The parameters the grid's linear functions apply to, their covariance,
     and which columns of the linear functions they are."""
-    if _ordinal(fit):
+    if _class_scale(fit):
         b, v = fit._emm_parameters(vcov)
         return b, v, list(range(len(b)))
     if vcov is None:
@@ -153,11 +153,17 @@ def _ordinal(fit: Any) -> bool:
     return getattr(fit, "kind", None) == "ordinal"
 
 
+def _class_scale(fit: Any) -> bool:
+    """Models whose means are on a class scale (polr, multinom): they supply
+    their own parameters and linearize each grid cell themselves."""
+    return hasattr(fit, "_emm_cells")
+
+
 def _df(fit: Any) -> float:
     from stats3.models import GeneralizedLinearModel
 
-    if _ordinal(fit):
-        return math.inf
+    if _class_scale(fit):
+        return fit._emm_df()
     if isinstance(fit, GeneralizedLinearModel):
         # emmeans: the residual df for gaussian and Gamma glms, else asymptotic.
         return float(fit.df_residual) if fit.family.family in ("gaussian", "Gamma") else math.inf
@@ -166,7 +172,7 @@ def _df(fit: Any) -> float:
 
 def _estimable(fit: Any, lin: np.ndarray) -> np.ndarray:
     """estimability's check: is each row in the row space of the model matrix?"""
-    if _ordinal(fit) or len(fit.qr.kept) == lin.shape[1]:
+    if _class_scale(fit) or len(fit.qr.kept) == lin.shape[1]:
         return np.ones(lin.shape[0], dtype=bool)
     x = fit.design.matrix
     _, s, vt = np.linalg.svd(x, full_matrices=True)
@@ -501,7 +507,7 @@ def _one(fit: Any, specs: list[str], by: list[str], at: Mapping[str, Any], weigh
                 joint, on=other, how="left", nulls_equal=True).sort("__i")["len"].fill_null(0).cast(pl.Float64).to_numpy()
         else:
             w = np.ones(grid.height)
-    if _ordinal(fit):
+    if _class_scale(fit):
         grid, x, offset, w = fit._emm_cells(grid, x, offset, w, mode)
     for name in [*specs, *by]:
         if name not in grid.columns:
@@ -574,8 +580,11 @@ def emmeans(
     default; the linear predictor minus the mean threshold), ``"prob"``
     (each class's probability, with the response as a factor to put in
     ``specs`` or ``by``) or ``"mean.class"`` (the expected class number).
+    For ``multinom`` fits it is ``"prob"`` (the default) or ``"latent"``
+    (emmeans' clr scale: each class's linear predictor minus their mean),
+    with degrees of freedom the fit's edf, as emmeans.
     Probabilities are averaged over the grid on the probability scale, with
-    delta-method standard errors and asymptotic intervals, as emmeans.
+    delta-method standard errors, as emmeans.
 
     The result prints as a table; ``tidy(emm)`` gives it as a frame, and
     ``emm.pairs()`` / ``emm.contrast(...)`` (or ``pairs(emm)``,
@@ -585,18 +594,16 @@ def emmeans(
 
     if any(getattr(f, "kind", None) == "bayesian" for f in _fits(model)):
         raise TypeError("emmeans(): use bayes_emmeans() for posterior marginal means")
-    if any(getattr(f, "kind", None) == "multinomial" for f in _fits(model)):
-        raise TypeError("emmeans(): multinomial marginal means are not implemented; use predict(type='probs')")
-    if any(_ordinal(f) for f in _fits(model)):
-        from stats3.ordinal import EMM_MODES
-
-        mode = "latent" if mode is None else mode
-        if mode not in EMM_MODES:
-            raise ValueError(f"emmeans(): mode must be one of {list(EMM_MODES)}, got {mode!r}")
+    first = _fits(model)[0]
+    if _class_scale(first):
+        modes, verb = first.EMM_MODES, first.verb
+        mode = modes[0] if mode is None else mode
+        if mode not in modes:
+            raise ValueError(f"emmeans(): mode must be one of {list(modes)}, got {mode!r}")
         if type != "link":
-            raise ValueError("emmeans(): polr fits choose their scale with mode=, not type=")
+            raise ValueError(f"emmeans(): {verb} fits choose their scale with mode=, not type=")
     elif mode is not None:
-        raise ValueError("emmeans(): mode= is for polr fits")
+        raise ValueError("emmeans(): mode= is for polr and multinom fits")
 
     specs_ = [specs] if isinstance(specs, str) else list(specs)
     by_ = [] if by is None else ([by] if isinstance(by, str) else list(by))

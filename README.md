@@ -254,6 +254,7 @@ penguins = penguins.with_columns(mass=pl.col("body_mass_g") / 1000)
 fit = multinom(penguins, "species ~ mass + sex")
 tidy(fit, conf_int=True)             # one row per (y_level, term): Chinstrap and Gentoo against Adelie
 predict(fit, new_rows, type="probs") # one column per level; "class" (default)
+emmeans(fit, "species", by="sex")    # class probabilities averaged over the grid
 anova(smaller_fit, fit)              # likelihood ratio test of nested fits, as anova.multinom
 ```
 
@@ -267,7 +268,10 @@ with nnet to the precision nnet reaches (about 1e-5); standard errors come
 from the exact Hessian, as `summary.multinom`, and `tidy` gives broom's Wald z
 tests (`exponentiate=True` for odds ratios). Aliased columns share nnet's
 minimum-norm solution. `glance` gives `edf`, `deviance`, `AIC` and `nobs`.
-Weight decay, count-matrix responses and marginal means are not included yet.
+`decay=` is nnet's weight decay (the reported deviance, as nnet's, includes the
+penalty), a `cbind(n1, n2, ...)` response gives counts per level, and
+`emmeans(fit, "species", by="sex")` gives emmeans' class probabilities
+(`mode="latent"` for its centred log-odds), with pairs and contrasts.
 
 Several responses in `cbind()` make a multivariate linear model, R's `mlm`,
 and `manova` gives `summary.manova`'s table:
