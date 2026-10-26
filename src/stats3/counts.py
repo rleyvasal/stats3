@@ -2,8 +2,8 @@
 ``prop.trend.test`` and ``binom.test``.
 
 Contingency tables are counted in one grouped Polars query; each group's
-small table is then finished with ``scipy.special`` (and, for Fisher's exact
-test, ``scipy.stats``).
+small table is then finished with ``scipy.special``; Fisher's exact test on
+a 2 x 2 table follows R's ``fisher.test`` step by step.
 """
 
 from __future__ import annotations
@@ -188,7 +188,8 @@ def fisher_test(
     """Fisher's exact test, as R's ``fisher.test(x, y)``.
 
     For a 2 x 2 table, ``estimate`` is the conditional maximum likelihood
-    odds ratio with its exact confidence interval, as in R. For larger
+    odds ratio with its exact confidence interval, found as R finds them
+    (``uniroot`` at R's tolerance). For larger
     tables the two-sided p-value is exact (R's network algorithm: the tables
     with the same margins no more likely than the observed one), and the
     estimate and interval are missing, as in R. Columns: ``estimate``,
@@ -198,13 +199,9 @@ def fisher_test(
     _check_conf_level(conf_level)
 
     def _apply(tf: Any) -> Any:
-        from scipy.stats import fisher_exact
-        from scipy.stats.contingency import odds_ratio
-
         groups = list(tf._groups or [])
         names = [_column(tf, x, "x", "fisher_test"), _column(tf, y, "y", "fisher_test")]
         keys, tables = _tables(tf, groups, names)
-        side = "two-sided" if alternative == "two.sided" else alternative
         out: dict[str, list[Any]] = {"estimate": [], "p_value": [], "conf_low": [], "conf_high": [], "alternative": []}
         for label, table in zip(_labels(keys, groups), tables):
             cells = table["counts"]
@@ -219,12 +216,11 @@ def fisher_test(
                 out["conf_high"].append(None)
                 out["alternative"].append("two.sided")
                 continue
-            ratio = odds_ratio(counts, kind="conditional")
-            ci = ratio.confidence_interval(confidence_level=conf_level, alternative=side)
-            out["estimate"].append(float(ratio.statistic))
-            out["p_value"].append(float(fisher_exact(counts, alternative=side).pvalue))
-            out["conf_low"].append(float(ci.low))
-            out["conf_high"].append(float(ci.high))
+            estimate, p_value, low, high = _fisher_2x2(counts, alternative, conf_level)
+            out["estimate"].append(estimate)
+            out["p_value"].append(p_value)
+            out["conf_low"].append(low)
+            out["conf_high"].append(high)
             out["alternative"].append(alternative)
         columns = {k: pl.Series(v, dtype=pl.Float64) for k, v in out.items() if k != "alternative"}
         return _finish(tf, keys, groups, {
@@ -237,6 +233,101 @@ def fisher_test(
         })
 
     return Step(_apply, "fisher_test")
+
+
+def _fisher_2x2(counts: np.ndarray, alternative: str, conf_level: float) -> tuple[float, float, float, float]:
+    """R's ``fisher.test`` on a 2 x 2 table: the p-value from the
+    hypergeometric distribution of the first cell, the conditional maximum
+    likelihood odds ratio and its interval from the noncentral hypergeometric
+    distribution, each found with ``uniroot`` at R's tolerance
+    (``.Machine$double.eps^0.25``), as R does."""
+    from scipy.stats import hypergeom
+
+    from stats3.ranks import _zeroin
+
+    m, n = int(counts[:, 0].sum()), int(counts[:, 1].sum())
+    k, x = int(counts[0, :].sum()), int(counts[0, 0])
+    lo, hi = max(0, k - n), min(k, m)
+    support = np.arange(lo, hi + 1, dtype=float)
+    logdc = hypergeom.logpmf(support, m + n, m, k)
+    eps = float(np.finfo(float).eps)
+    tol = eps ** 0.25
+
+    def dnhyper(ncp: float) -> np.ndarray:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            d = logdc + np.log(ncp) * support
+        d = np.exp(d - d.max())
+        return d / d.sum()
+
+    def mnhyper(ncp: float) -> float:
+        if ncp == 0:
+            return float(lo)
+        if ncp == np.inf:
+            return float(hi)
+        return float(np.sum(support * dnhyper(ncp)))
+
+    def pnhyper(q: int, ncp: float = 1.0, upper_tail: bool = False) -> float:
+        if ncp == 1:
+            return float(hypergeom.sf(q - 1, m + n, m, k) if upper_tail else hypergeom.cdf(q, m + n, m, k))
+        if ncp == 0:
+            return float(q <= lo if upper_tail else q >= lo)
+        if ncp == np.inf:
+            return float(q <= hi if upper_tail else q >= hi)
+        d = dnhyper(ncp)
+        return float(np.sum(d[support >= q] if upper_tail else d[support <= q]))
+
+    def uniroot(f, a: float, b: float) -> float:
+        return _zeroin(f, a, b, f(a), f(b), tol)[0]
+
+    if alternative == "less":
+        p_value = pnhyper(x, 1.0)
+    elif alternative == "greater":
+        p_value = pnhyper(x, 1.0, True)
+    else:
+        d = dnhyper(1.0)
+        p_value = float(np.sum(d[d <= d[x - lo] * (1 + 1e-7)]))
+
+    if x == lo:
+        estimate = 0.0
+    elif x == hi:
+        estimate = np.inf
+    else:
+        mu = mnhyper(1.0)
+        if mu > x:
+            estimate = uniroot(lambda t: mnhyper(t) - x, 0.0, 1.0)
+        elif mu < x:
+            estimate = 1 / uniroot(lambda t: mnhyper(1 / t) - x, eps, 1.0)
+        else:
+            estimate = 1.0
+
+    def ncp_upper(alpha: float) -> float:
+        if x == hi:
+            return np.inf
+        p = pnhyper(x, 1.0)
+        if p < alpha:
+            return uniroot(lambda t: pnhyper(x, t) - alpha, 0.0, 1.0)
+        if p > alpha:
+            return 1 / uniroot(lambda t: pnhyper(x, 1 / t) - alpha, eps, 1.0)
+        return 1.0
+
+    def ncp_lower(alpha: float) -> float:
+        if x == lo:
+            return 0.0
+        p = pnhyper(x, 1.0, True)
+        if p > alpha:
+            return uniroot(lambda t: pnhyper(x, t, True) - alpha, 0.0, 1.0)
+        if p < alpha:
+            return 1 / uniroot(lambda t: pnhyper(x, 1 / t, True) - alpha, eps, 1.0)
+        return 1.0
+
+    if alternative == "less":
+        low, high = 0.0, ncp_upper(1 - conf_level)
+    elif alternative == "greater":
+        low, high = ncp_lower(1 - conf_level), np.inf
+    else:
+        alpha = (1 - conf_level) / 2
+        low, high = ncp_lower(alpha), ncp_upper(alpha)
+    return float(estimate), min(1.0, p_value), float(low), float(high)
 
 
 _FISHER_LIMIT = 5_000_000

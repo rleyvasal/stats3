@@ -7,6 +7,7 @@ back as a table in the same kind of frame you passed in.
 ```bash
 pip install stats3              # Polars data
 pip install "stats3[pandas]"    # pandas data too
+pip install "stats3[fast]"      # Numba: compiled k-means, hclust, dist and concordance, at R's speed on large data
 ```
 
 stats3 needs Python 3.12+, Polars and SciPy 1.18+ (the first SciPy whose
@@ -572,7 +573,11 @@ ports of R's own code (hclust.f, kmns.f, kmeans.c, distance.c), so the merge
 matrix, heights and leaf order of `hclust`, ties included, and k-means from
 given centres are R's exactly. Sums of squares round as R's build for the
 machine computes them (fused on 64-bit ARM, not on x86-64), since the last
-bit decides which tied merge comes first. Random k-means starts use NumPy's generator,
+bit decides which tied merge comes first. With `stats3[fast]` these run
+compiled (k-means on 100k rows of 50 columns in under a second, as R);
+without it, k-means compares rows on bounded fast distances and settles
+only ties with R's exact sum, and `dist` emulates the fused rounding in
+NumPy. Random k-means starts use NumPy's generator,
 so with `centers=k` only the objective is comparable with R. `factanal` is
 R's maximum-likelihood fit over the uniquenesses, run to full precision.
 Component signs come from the LAPACK routines R calls (dgesdd for `prcomp`,
@@ -717,12 +722,23 @@ Marginal means and contrasts are also checked against R's emmeans, and mixed
 models against lme4 (to 1e-7 against lme4's own deviance function minimized
 to 1e-9 in theta, and to the accuracy of lme4's default optimizer, about
 5e-4 on weakly identified variance components, against `lmer()` as called).
-Where R's own numerics are approximate (Tukey's distribution, Dunnett's
-quantile approximation, intervals
-found with `uniroot`, the noncentral t above ncp 37.62, the asymptotic
-Kolmogorov series, the exact Mantel-Haenszel odds ratio), stats3 computes to full precision and the test compares
-at R's accuracy, with the reason written next to the tolerance. Without R,
-the SciPy comparisons still run.
+Where R's own numerics are approximate, stats3 either follows R's
+algorithm (Tukey's distribution is a port of `ptukey` and `qtukey`, and
+`fisher.test`'s odds ratio and interval come from the same `uniroot`
+searches at R's tolerance, so both match R closely) or computes to full
+precision and the test compares at R's accuracy (Dunnett's quantile
+approximation, the Ansari-Bradley interval, the noncentral t above ncp
+37.62, the asymptotic Kolmogorov series, the exact Mantel-Haenszel odds
+ratio), with the reason written next to the tolerance. Without R, the
+SciPy comparisons still run.
+
+The algorithms that walk the rows one by one (k-means transfers, the
+nearest-neighbour chain of `hclust`, distances, the concordance sweep) run
+in NumPy, and compiled when `stats3[fast]` (Numba) is installed: the
+kernels do the same operations in the same order, with the fused
+multiply-add R's compiled code uses on ARM, so the results are the same
+bits either way and only the speed differs. `pytest` checks the two paths
+against each other.
 
 ```bash
 pip install -e ".[dev]"

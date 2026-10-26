@@ -258,7 +258,14 @@ class _QR:
         return rinv @ rinv.T
 
     def hat(self) -> np.ndarray:
-        return np.sum(self.q**2, axis=1) if self.kept else np.zeros(self._a.shape[0])
+        """Leverages: the squared row norms of Q, computed as those of
+        X R^-1 (the same matrix) without forming Q."""
+        if not self.kept:
+            return np.zeros(self._a.shape[0])
+        if self._q is not None:
+            return np.sum(self._q**2, axis=1)
+        rinv = _solve_upper(self.r, np.eye(len(self.kept)))
+        return np.einsum("ij,ij->i", self._a @ rinv, self._a @ rinv)
 
 
 def _solve_upper(r: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -801,8 +808,22 @@ class LinearModel(_Fit):
         return self._with_key(frame)
 
     def _rss_without(self, drop: list[int]) -> tuple[float, int]:
-        """Residual sum of squares and rank with some columns dropped."""
-        keep = [j for j in range(self.design.matrix.shape[1]) if j not in set(drop)]
+        """Residual sum of squares and rank with some columns dropped.
+
+        With every column of the full fit estimable, the smaller model's fit
+        comes from the full QR: its residual sum of squares is the full
+        one plus what the kept columns of R leave of Q'y, a p x p least
+        squares. Aliased columns can become estimable once the columns
+        they depend on go, so those designs are refitted."""
+        p = self.design.matrix.shape[1]
+        keep = [j for j in range(p) if j not in set(drop)]
+        if len(self.qr.kept) == p:
+            if not keep:
+                return float(np.sum(self.effects**2)) + self.rss, 0
+            r_keep = self.qr.r[:, keep]
+            q_small, r_small = np.linalg.qr(r_keep, mode="reduced")
+            left = self.effects - q_small @ (q_small.T @ self.effects)
+            return self.rss + float(np.sum(left**2)), len(keep)
         sw = np.sqrt(self.weights)
         yw = (self.y - self.frame.offset) * sw
         if not keep:

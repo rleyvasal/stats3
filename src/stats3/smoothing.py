@@ -980,6 +980,70 @@ def _bvalue(t, bcoef, n, k, x, jderiv):
     return aj[1]
 
 
+def _intervals(knot: np.ndarray, lxt: int, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``_interv`` for every x at once, on 0-based ``knot``: one-based left
+    knot positions and R's mflag (-1 below the knots, 1 at or past the last)."""
+    left = np.searchsorted(knot[:lxt], x, "right")
+    mflag = np.where(x < knot[0], -1, np.where(x >= knot[lxt - 1], 1, 0))
+    left = np.where(mflag == 1, lxt, left)
+    return left, mflag
+
+
+def _cubic_basis(knot: np.ndarray, x: np.ndarray, left: np.ndarray) -> np.ndarray:
+    """de Boor's bsplvb for the four cubic B-splines nonzero at each ``x``
+    (one-based ``left``), column ``q - 1`` holding ``biatx[q]``: the
+    recurrence of ``_Bsplvb`` on every point at once, in its order of
+    operations."""
+    t = np.r_[0.0, knot]  # one-based
+    biatx = [np.ones_like(x), None, None, None]
+    deltar, deltal = [None] * 4, [None] * 4
+    for j in range(1, 4):
+        deltar[j] = t[left + j] - x
+        deltal[j] = x - t[left + 1 - j]
+        saved = np.zeros_like(x)
+        for i in range(1, j + 1):
+            term = biatx[i - 1] / (deltar[i] + deltal[j + 1 - i])
+            biatx[i - 1] = saved + deltar[i] * term
+            saved = deltal[j + 1 - i] * term
+        biatx[j] = saved
+    return np.column_stack(biatx)
+
+
+def _bvalues(knot: np.ndarray, bcoef: np.ndarray, n: int, x: np.ndarray, jderiv: int) -> np.ndarray:
+    """``_bvalue`` with k = 4 at every ``x`` inside the knots (0-based
+    ``knot`` and ``bcoef``), where no boundary branch applies."""
+    k = 4
+    if jderiv >= k:
+        return np.zeros_like(x)
+    t = np.r_[0.0, knot]  # one-based
+    i, mflag = _intervals(knot, n + k, x)
+    at_end = (x == t[n + 1]) & (t[n + 1] == t[n + k])
+    i = np.where(at_end, n, i)
+    outside = ~at_end & (mflag != 0)
+    i = np.where(outside, k, i)  # a valid gather; the value is zeroed below
+    dm = [None] + [x - t[i + 1 - j] for j in range(1, k)]
+    dp = [None] + [t[i + j] - x for j in range(1, k)]
+    aj = [None] + [bcoef[i - k + jc - 1] for jc in range(1, k + 1)]
+    for j in range(1, jderiv + 1):
+        kmj = k - j
+        ilo = kmj
+        for jj in range(1, kmj + 1):
+            aj[jj] = ((aj[jj + 1] - aj[jj]) / (dm[ilo] + dp[jj])) * float(kmj)
+            ilo -= 1
+    for j in range(jderiv + 1, k):
+        kmj = k - j
+        ilo = kmj
+        for jj in range(1, kmj + 1):
+            aj[jj] = (aj[jj + 1] * dm[ilo] + aj[jj] * dp[jj]) / (dm[ilo] + dp[jj])
+            ilo -= 1
+    return np.where(outside, 0.0, aj[1])
+
+
+def _sequential_sum(values: np.ndarray) -> float:
+    """The values added first to last, as a Fortran loop adds them."""
+    return float(np.cumsum(values)[-1]) if len(values) else 0.0
+
+
 def _sgram(tb, nb):
     """The banded Gram matrix of B-spline second derivatives (with R's
     .3330 in place of 1/3)."""
@@ -1060,7 +1124,9 @@ def _sinerp(abd, nk):
 
 
 class _Sbart:
-    """sbart(): the penalized B-spline fit for one data set."""
+    """sbart(): the penalized B-spline fit for one data set. The sums over
+    the points (stxwx, the fit, leverages and criterion) run on arrays, in
+    the order R's loops add them."""
 
     def __init__(self, xs, ys, ws, ssw, knot, nk, penalty, dofoff, icrit):
         self.n, self.nk, self.knot = len(xs), nk, [0.0, *knot]
@@ -1069,36 +1135,36 @@ class _Sbart:
         self.ssw, self.penalty, self.dofoff, self.icrit = ssw, penalty, dofoff, icrit
         t, n = self.knot, self.n
         self.sg = _sgram(t, nk)
-        xwy, hs = [0.0] * (nk + 1), [[0.0] * (nk + 1) for _ in range(4)]
-        for i in range(1, n + 1):  # stxwx
-            ileft, mflag = _interv(t, nk + 1, self.x[i])
-            if mflag == 1:
-                if self.x[i] <= t[ileft] + .1e-9:
-                    ileft -= 1
-                else:
-                    break
-            v = _bsplvd(t, 4, self.x[i], ileft, 1)[1]
-            ww = self.w[i]**2
-            for q in range(1, 5):
-                j = ileft - 4 + q
-                xwy[j] += ww * self.y[i] * v[q]
-                for off in range(5 - q):
-                    hs[off][j] += ww * v[q] * v[q + off]
+        knot0 = np.asarray(knot, dtype=float)
+        x, y, w = (np.asarray(v, dtype=float) for v in (xs, ys, self.w[1:]))
+        self._x, self._y, self._w = x, y, w
+        # stxwx: x is sorted, so R's break past the last knot leaves out the
+        # points after it; a point at the last knot moves one interval back.
+        ileft, mflag = _intervals(knot0, nk + 1, x)
+        past = mflag == 1
+        back = past & (x <= np.r_[0.0, knot0][ileft] + .1e-9)
+        keep = ~past | back
+        ileft = np.where(back, ileft - 1, ileft)
+        v = _cubic_basis(knot0, x[keep], ileft[keep])
+        ww = w[keep] ** 2
+        yk, left_k = y[keep], ileft[keep]
+        # One running sum per bin in R's order: point by point, then the four splines.
+        j = (left_k[:, None] - 4 + np.arange(1, 5)[None, :])
+        xwy = np.bincount(j.ravel(), ((ww * yk)[:, None] * v).ravel(), minlength=nk + 1)
+        hs = [np.zeros(nk + 1) for _ in range(4)]
+        for off in range(4):
+            qs = np.arange(1, 5 - off)
+            weights = (ww[:, None] * v[:, qs - 1]) * v[:, qs - 1 + off]
+            hs[off] = np.bincount(j[:, qs - 1].ravel(), weights.ravel(), minlength=nk + 1)
         self.xwy, self.hs = xwy, hs
-        t1 = t2 = 0.0
-        for i in range(3, nk - 2):
-            t1 += hs[0][i]
-            t2 += self.sg[0][i]
+        t1 = _sequential_sum(hs[0][3:nk - 2])
+        t2 = _sequential_sum(np.asarray(self.sg[0])[3:nk - 2])
         self.ratio = t1 / t2
-        self.basis = []  # the leverage basis does not depend on lambda
-        for i in range(1, n + 1):
-            xv = self.x[i]
-            ileft, mflag = _interv(t, nk + 1, xv)
-            if mflag == -1:
-                ileft, xv = 4, t[4] + 1e-11
-            elif mflag == 1:
-                ileft, xv = nk, t[nk + 1] - 1e-11
-            self.basis.append((ileft - 3, _bsplvd(t, 4, xv, ileft, 1)[1]))
+        # The leverage basis does not depend on lambda.
+        ileft, mflag = _intervals(knot0, nk + 1, x)
+        xv = np.where(mflag == -1, t[4] + 1e-11, np.where(mflag == 1, t[nk + 1] - 1e-11, x))
+        ileft = np.where(mflag == -1, 4, np.where(mflag == 1, nk, ileft))
+        self.basis_j, self.basis = ileft - 3, _cubic_basis(knot0, xv, ileft)
 
     def solve(self, lam):
         """sslvrg(): coefficients, fit, leverages and criterion at lambda."""
@@ -1117,36 +1183,29 @@ class _Sbart:
         if info:
             return dict(ier=info, coef=coef[1:], sz=None, lev=None, crit=float("nan"))
         _dpbsl(abd, nk, 3, coef)
-        n, w = self.n, self.w
-        sz = [_bvalue(self.knot, coef, nk, 4, self.x[i], 0) for i in range(1, n + 1)]
+        n, w, x, y = self.n, self._w, self._x, self._y
+        sz = _bvalues(np.asarray(self.knot[1:]), np.asarray(coef[1:]), nk, x, 0)
         lev, crit = None, float("nan")
         if self.icrit >= 1:
-            p1 = _sinerp(abd, nk)
-            lev = []
-            for i, (j, b) in enumerate(self.basis, start=1):
-                b0, b1, b2, b3 = b[1], b[2], b[3], b[4]
-                lev.append((p1[4][j] * b0**2 + 2. * p1[3][j] * b0 * b1 + 2. * p1[2][j] * b0 * b2
-                            + 2. * p1[1][j] * b0 * b3 + p1[4][j + 1] * b1**2 + 2. * p1[3][j + 1] * b1 * b2
-                            + 2. * p1[2][j + 1] * b1 * b3 + p1[4][j + 2] * b2**2 + 2. * p1[3][j + 2] * b2 * b3
-                            + p1[4][j + 3] * b3**2) * w[i]**2)
-            df = 0.0
+            p1 = np.asarray(_sinerp(abd, nk))
+            j, b = self.basis_j, self.basis
+            b0, b1, b2, b3 = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
+            lev = (p1[4][j] * b0**2 + 2. * p1[3][j] * b0 * b1 + 2. * p1[2][j] * b0 * b2
+                   + 2. * p1[1][j] * b0 * b3 + p1[4][j + 1] * b1**2 + 2. * p1[3][j + 1] * b1 * b2
+                   + 2. * p1[2][j + 1] * b1 * b3 + p1[4][j + 2] * b2**2 + 2. * p1[3][j + 2] * b2 * b3
+                   + p1[4][j + 3] * b3**2) * w**2
             if self.icrit == 1:
-                rss, sumw = self.ssw, 0.0
-                for i in range(1, n + 1):
-                    rss += ((self.y[i] - sz[i - 1]) * w[i])**2
-                    df += lev[i - 1]
-                    sumw += w[i]**2
+                rss = self.ssw + _sequential_sum(((y - sz) * w)**2)
+                df = _sequential_sum(lev)
+                sumw = _sequential_sum(w**2)
                 crit = (rss / sumw) / ((1. - (self.dofoff + self.penalty * df) / sumw)**2)
             elif self.icrit == 2:
-                crit = 0.0
-                for i in range(1, n + 1):
-                    crit += (((self.y[i] - sz[i - 1]) * w[i]) / (1 - lev[i - 1]))**2
-                crit /= n
+                crit = _sequential_sum((((y - sz) * w) / (1 - lev))**2) / n
             else:
-                for v in lev:
-                    df += v
+                df = _sequential_sum(lev)
                 crit = 3 + (self.dofoff - df)**2
-        return dict(ier=0, coef=coef[1:], sz=sz, lev=lev, crit=crit)
+            lev = lev.tolist()
+        return dict(ier=0, coef=coef[1:], sz=sz.tolist(), lev=lev, crit=crit)
 
     def lam(self, spar, is_lambda):
         return spar if is_lambda else self.ratio * 16.0**(spar * 6. - 2.)
@@ -1265,16 +1324,13 @@ class SmoothingSpline(_Fit):
         if nx <= 3:
             raise ValueError("smooth_spline(): need at least four unique 'x' values")
         codes = np.searchsorted(xxs[first], xx)
-        wbar, sy, syy = np.zeros(nx), np.zeros(nx), np.zeros(nx)
-        for i in range(n):  # sequential group sums, as R's
-            wi = 1.0 if w is None else w[i]
-            wbar[codes[i]] += wi
-            sy[codes[i]] += wi * y[i]
-            syy[codes[i]] += wi * y[i]**2
+        wi = np.ones(n) if w is None else w
+        # bincount adds row by row, as R's sequential group sums do.
+        wbar = np.bincount(codes, wi, minlength=nx)
+        sy = np.bincount(codes, wi * y, minlength=nx)
+        syy = np.bincount(codes, wi * y**2, minlength=nx)
         ybar = sy / np.where(wbar > 0, wbar, 1)
-        yssw = 0.0
-        for v in syy - wbar * ybar**2:
-            yssw += v
+        yssw = _sequential_sum(syy - wbar * ybar**2)
         cv = opts["cv"]
         if cv and nx < n:
             _warn("cross-validation with non-unique 'x' values seems doubtful")
@@ -1377,11 +1433,10 @@ class SmoothingSpline(_Fit):
             raise ValueError("predict(): 'deriv' must be a non-negative integer")
         deriv = int(deriv)
         xs = (np.asarray(x, dtype=float) - self.min) / self.range
-        knot, coef = [0.0, *self.knot.tolist()], [0.0, *self.coef.tolist()]
         out = np.array(xs, dtype=float)
         inside = (xs >= 0) & (xs <= 1)
-        for i in np.flatnonzero(inside):
-            out[i] = _bvalue(knot, coef, self.nk, 4, xs[i], deriv)
+        out[inside] = _bvalues(np.asarray(self.knot, dtype=float), np.asarray(self.coef, dtype=float),
+                               self.nk, xs[inside], deriv)
         left, right = xs < 0, xs > 1
         if left.any() or right.any():
             ends = np.array([self.min, self.min + self.range])

@@ -515,15 +515,17 @@ def tukey_hsd(formula: str, *, which: Any = None, ordered: bool = False, conf_le
     check_strata(formula, "tukey_hsd")
 
     def _apply(tf: Any) -> Any:
-        from scipy.stats import studentized_range
+        from stats3._tukey import ptukey, qtukey
 
         if not _one_factor(tf, formula, which):
             return tukey_table(tf, formula, which, ordered, conf_level)
         table, groups, by = _one_way(tf, formula, "tukey_hsd")
-        out: dict[str, list[Any]] = {
-            k: [] for k in ("term", "contrast", "estimate", "conf_low", "conf_high", "adj_p_value")
-        }
+        out: dict[str, list[Any]] = {k: [] for k in ("term", "contrast", "estimate")}
         index: list[int] = []
+        # Every group's quantile and p-values come from one vectorized call.
+        q_args: list[tuple[int, float]] = []  # (k, df) per group
+        p_args: list[tuple[float, int, float]] = []  # (|estimate| / se, k, df) per pair
+        ses: list[float] = []
         for i, row in enumerate(table.iter_rows(named=True)):
             levels = [str(level) for level in row[by]]
             n = np.array(row["n"], dtype=float)
@@ -539,7 +541,7 @@ def tukey_hsd(formula: str, *, which: Any = None, ordered: bool = False, conf_le
                     f"tukey_hsd(): no residual degrees of freedom{_group_label(row, groups)}"
                 )
             mse = _within(n, v) / df
-            q_crit = float(studentized_range.ppf(conf_level, k, df))
+            q_args.append((k, df))
             for b in range(k):
                 for a in range(b + 1, k):
                     centre = m[a] - m[b]
@@ -547,16 +549,22 @@ def tukey_hsd(formula: str, *, which: Any = None, ordered: bool = False, conf_le
                     out["term"].append(by)
                     out["contrast"].append(f"{levels[a]}-{levels[b]}")
                     out["estimate"].append(centre)
-                    out["conf_low"].append(centre - q_crit * se)
-                    out["conf_high"].append(centre + q_crit * se)
-                    out["adj_p_value"].append(
-                        float(studentized_range.sf(abs(centre) / se, k, df))
-                    )
+                    p_args.append((abs(centre) / se, k, df))
+                    ses.append(se)
                     index.append(i)
+        q_crit = qtukey(conf_level, [k for k, _ in q_args], [d for _, d in q_args]) if q_args else np.empty(0)
+        half = q_crit[index] * np.array(ses) if index else np.empty(0)
+        estimate = np.array(out["estimate"], dtype=float)
+        adj_p = (ptukey([a[0] for a in p_args], [a[1] for a in p_args], [a[2] for a in p_args], lower_tail=False)
+                 if p_args else np.empty(0))
         keys = table[index] if index else table.clear()
         columns = {
-            name: pl.Series(name, values, dtype=pl.String if name in {"term", "contrast"} else pl.Float64)
-            for name, values in out.items()
+            "term": pl.Series("term", out["term"], dtype=pl.String),
+            "contrast": pl.Series("contrast", out["contrast"], dtype=pl.String),
+            "estimate": pl.Series("estimate", estimate, dtype=pl.Float64),
+            "conf_low": pl.Series("conf_low", estimate - half, dtype=pl.Float64),
+            "conf_high": pl.Series("conf_high", estimate + half, dtype=pl.Float64),
+            "adj_p_value": pl.Series("adj_p_value", adj_p, dtype=pl.Float64),
         }
         return _finish(tf, keys, groups, columns)
 

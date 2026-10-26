@@ -3,7 +3,9 @@
 ``prcomp``, ``princomp`` and ``factanal`` reduce numeric columns;
 ``dist``, ``hclust``, ``cutree`` and ``cmdscale`` work from distances;
 ``kmeans`` partitions rows. The ports keep R's algorithms step for step
-(hclust.f, kmns.f, kmeans.c, distance.c), so ties break as in R.
+(hclust.f, kmns.f, kmeans.c, distance.c), so ties break as in R; their
+row-by-row loops run compiled when ``stats3[fast]`` is installed
+(``_compiled``), and otherwise in NumPy with the same results.
 Eigen and singular vectors come from the same LAPACK routines R calls
 (dsyevr, dgesdd); their signs are LAPACK's, which R's reference LAPACK
 and the one NumPy links usually share but need not.
@@ -18,6 +20,7 @@ import numpy as np
 import polars as pl
 
 from stats3._data import Data, Step, is_frame, step
+from stats3._fast import compiled
 from stats3.core import _group_label, _sorted_keys, _warn
 from stats3.formula import variable_expr
 from stats3.models import Models, _Fit, _ModelStep, _table_text
@@ -26,15 +29,24 @@ from stats3.models import Models, _Fit, _ModelStep, _table_text
 # R's compiled sums of squares --------------------------------------------------------------
 
 try:
-    from math import fma as _fma
-except ImportError:  # Python 3.12
-    from fractions import Fraction
+    from math import fma as _fma  # Python 3.13
+except ImportError:  # Python 3.12: the C library's fma, else exact rational arithmetic
+    try:
+        import ctypes
+        import ctypes.util
 
-    def _fma(x: float, y: float, z: float) -> float:
-        """x * y + z rounded once."""
-        if not all(np.isfinite((x, y, z))):
-            return x * y + z
-        return float(Fraction(x) * Fraction(y) + Fraction(z))
+        _libm = ctypes.CDLL(ctypes.util.find_library("m"))
+        _libm.fma.restype = ctypes.c_double
+        _libm.fma.argtypes = [ctypes.c_double] * 3
+        _fma = _libm.fma
+    except (OSError, AttributeError, TypeError):
+        from fractions import Fraction
+
+        def _fma(x: float, y: float, z: float) -> float:
+            """x * y + z rounded once."""
+            if not all(np.isfinite((x, y, z))):
+                return x * y + z
+            return float(Fraction(x) * Fraction(y) + Fraction(z))
 
 # R's C and Fortran accumulate squared differences as ``sum += d * d``.
 # Compilers for 64-bit ARM fuse that into one rounding by default; R's
@@ -48,7 +60,52 @@ if not R_FUSES_MULTIPLY_ADD:
         """x * y + z rounded twice, as R's x86-64 builds compute it."""
         return x * y + z
 
-_fma_vector = np.frompyfunc(_fma, 3, 1)
+
+_SPLIT = 134217729.0  # 2**27 + 1, Veltkamp's splitting constant
+
+
+def _fma_array(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> np.ndarray:
+    """``_fma`` elementwise: x * y + z rounded once (or twice, as R's build
+    here), in NumPy.
+
+    The single rounding is emulated with Boldo and Melquiond's algorithm:
+    the exact product (Dekker) and the exact sum with z (Knuth) leave a
+    high part and two small terms; the small terms rounded to odd, then
+    added to the high part, round once. Values where that arithmetic could
+    overflow or underflow go through the scalar ``_fma``."""
+    x, y, z = np.broadcast_arrays(np.asarray(x, dtype=float), np.asarray(y, dtype=float), np.asarray(z, dtype=float))
+    if not R_FUSES_MULTIPLY_ADD:
+        return x * y + z
+    with np.errstate(all="ignore"):
+        ph = x * y
+        cx = _SPLIT * x
+        xh = cx - (cx - x)
+        xl = x - xh
+        cy = _SPLIT * y
+        yh = cy - (cy - y)
+        yl = y - yh
+        pl = ((xh * yh - ph) + xh * yl + xl * yh) + xl * yl
+        sh = z + ph
+        bb = sh - z
+        sl = (z - (sh - bb)) + (ph - bb)
+        v = sl + pl
+        bv = v - sl
+        err = (sl - (v - bv)) + (pl - bv)
+        odd = (v.view(np.int64) & 1) == 1
+        fix = (err != 0) & ~odd
+        v = np.where(fix, np.nextafter(v, np.where(err > 0, np.inf, -np.inf)), v)
+        out = sh + v
+        risky = ~(np.isfinite(out) & (np.abs(x) < 1e150) & (np.abs(y) < 1e150) & (np.abs(z) < 1e300)
+                  & ((np.abs(ph) > 1e-290) | (ph == 0)) & ((np.abs(sl) > 1e-290) | (sl == 0))
+                  & ((np.abs(pl) > 1e-290) | (pl == 0)))
+    if risky.any():
+        at = np.flatnonzero(risky)
+        flat = out.reshape(-1)
+        xs, ys, zs = x.reshape(-1), y.reshape(-1), z.reshape(-1)
+        for i in at:
+            flat[i] = _fma(float(xs[i]), float(ys[i]), float(zs[i]))
+        out = flat.reshape(out.shape)
+    return out
 
 
 # reading columns ------------------------------------------------------------------------
@@ -688,6 +745,10 @@ def _distances(x: np.ndarray, method: str, p: float) -> np.ndarray:
     """R's distance.c for every pair: columns missing in either row are
     skipped and the sum scaled up by their share."""
     n, nc = x.shape
+    if method == "euclidean":
+        kernel = compiled("euclidean")
+        if kernel is not None:
+            return kernel(np.ascontiguousarray(x, dtype=float), R_FUSES_MULTIPLY_ADD)
     out = np.zeros((n, n))
     for i in range(n):
         a = x[i]
@@ -734,7 +795,7 @@ def _distances(x: np.ndarray, method: str, p: float) -> np.ndarray:
                     d = np.zeros(len(b))
                     for j in range(nc):
                         if method == "euclidean":
-                            d = _fma_vector(vals[:, j], vals[:, j], d).astype(float)
+                            d = _fma_array(vals[:, j], vals[:, j], d)
                         else:
                             d = d + terms[:, j]
                 if method != "maximum":
@@ -753,7 +814,8 @@ def _dist_table(labels: list[Any], d: np.ndarray) -> pl.DataFrame:
     """broom's ``tidy.dist`` layout: the lower triangle, row by row."""
     n = len(labels)
     i, j = np.tril_indices(n, -1)
-    return pl.DataFrame({"item1": [labels[a] for a in i], "item2": [labels[b] for b in j],
+    items = pl.Series("item", labels)
+    return pl.DataFrame({"item1": items.gather(i), "item2": items.gather(j),
                          "distance": d[i, j]}, schema_overrides={"distance": pl.Float64})
 
 
@@ -799,18 +861,24 @@ def _read_dist(data: Data, verb: str) -> list[tuple[_Part, np.ndarray]]:
     frame = data._lf.collect()
     out = []
     for key, part in _split(frame, data, verb):
-        item1, item2 = part["item1"].to_list(), part["item2"].to_list()
         # broom's order: item 1 heads the first row's item2, items 2..n follow as item1.
-        labels = list(dict.fromkeys([*item2[:1], *item1]))
+        items = pl.concat([part["item2"].head(1), part["item1"]]).unique(maintain_order=True)
+        labels = items.to_list()
         n = len(labels)
         if part.height != n * (n - 1) // 2:
             raise ValueError(f"{verb}(): dissimilarities of improper length{_group_label(key, data._groups)}")
-        at = {v: i for i, v in enumerate(labels)}
-        if any(v not in at for v in item2) or len(set(zip(item1, item2))) != part.height:
+        index = pl.DataFrame({"item": items, "at": np.arange(n)})
+        codes = part.select("item1", "item2").join(index.rename({"item": "item1", "at": "a"}), on="item1", how="left") \
+            .join(index.rename({"item": "item2", "at": "b"}), on="item2", how="left")
+        if codes["b"].null_count():
+            raise ValueError(f"{verb}(): the distance table must hold each pair of items once")
+        a = codes["a"].to_numpy().astype(int)
+        b = codes["b"].to_numpy().astype(int)
+        seen = np.zeros((n, n), dtype=bool)
+        seen[a, b] = True
+        if int(seen.sum()) != part.height:
             raise ValueError(f"{verb}(): the distance table must hold each pair of items once")
         d = np.zeros((n, n))
-        a = np.array([at[v] for v in item1], dtype=int)
-        b = np.array([at[v] for v in item2], dtype=int)
         values = part["distance"].cast(pl.Float64).fill_null(np.nan).to_numpy()
         d[a, b] = values
         d[b, a] = values
@@ -829,6 +897,10 @@ def _hclust(d: np.ndarray, iopt: int, members: np.ndarray) -> tuple[np.ndarray, 
     """F. Murtagh's HCLUST and HCASS2, as R's hclust.f: nearest neighbours
     chained by the Lance-Williams update, with R's strict-inequality ties."""
     n = d.shape[0]
+    kernel = compiled("hclust")
+    if kernel is not None:
+        ia, ib, crit = kernel(np.ascontiguousarray(d, dtype=float), int(iopt), np.ascontiguousarray(members, dtype=float))
+        return _hcass2(n, ia + 1, ib + 1) + (crit,)
     inf = 1e300
     diss = d.copy()
     if iopt == 8:
@@ -889,33 +961,30 @@ def _hclust(d: np.ndarray, iopt: int, members: np.ndarray) -> tuple[np.ndarray, 
         nn[before[closer]] = i2
         membr[i2] = mi + mj
         disnn[i2], nn[i2] = dmin, jj
-        for i in range(n - 1):
-            if flag[i] and (nn[i] == i2 or nn[i] == j2):
-                dmin = inf
-                rest = np.flatnonzero(flag[i + 1:]) + i + 1
-                if len(rest):
-                    values = diss[i, rest]
-                    j = int(np.argmin(values))
-                    if values[j] < dmin:
-                        dmin, jj = values[j], int(rest[j])
-                nn[i], disnn[i] = jj, dmin
+        head = nn[:n - 1]
+        for i in np.flatnonzero(flag[:n - 1] & ((head == i2) | (head == j2))):
+            dmin = inf
+            rest = np.flatnonzero(flag[i + 1:]) + i + 1
+            if len(rest):
+                values = diss[i, rest]
+                j = int(np.argmin(values))
+                if values[j] < dmin:
+                    dmin, jj = values[j], int(rest[j])
+            nn[i], disnn[i] = jj, dmin
     return _hcass2(n, ia + 1, ib + 1) + (crit,)
 
 
 def _hcass2(n: int, ia: np.ndarray, ib: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """R's merge matrix (negative singletons, positive earlier merges) and
     the dendrogram's leaf order."""
-    iia, iib = ia.astype(int).tolist(), ib.astype(int).tolist()
-    ia, ib = list(iia), list(iib)
+    ia, ib = np.asarray(ia, dtype=int), np.asarray(ib, dtype=int)
+    iia, iib = ia.copy(), ib.copy()
     for i in range(n - 2):
         k = min(ia[i], ib[i])
-        for j in range(i + 1, n - 1):
-            if ia[j] == k:
-                iia[j] = -(i + 1)
-            if ib[j] == k:
-                iib[j] = -(i + 1)
-    iia = [-v for v in iia]
-    iib = [-v for v in iib]
+        tail = np.arange(i + 1, n - 1)
+        iia[tail[ia[i + 1:n - 1] == k]] = -(i + 1)
+        iib[tail[ib[i + 1:n - 1] == k]] = -(i + 1)
+    iia, iib = (-iia).tolist(), (-iib).tolist()
     for i in range(n - 1):
         if iia[i] > 0 and iib[i] < 0:
             iia[i], iib[i] = iib[i], iia[i]
@@ -923,11 +992,9 @@ def _hcass2(n: int, ia: np.ndarray, ib: np.ndarray) -> tuple[np.ndarray, np.ndar
             iia[i], iib[i] = min(iia[i], iib[i]), max(iia[i], iib[i])
     order = [iia[n - 2], iib[n - 2]]
     for i in range(n - 2, 0, -1):
-        for j in range(len(order)):
-            if order[j] == i:
-                order[j] = iia[i - 1]
-                order.insert(j + 1, iib[i - 1])
-                break
+        j = order.index(i)
+        order[j] = iia[i - 1]
+        order.insert(j + 1, iib[i - 1])
     return np.column_stack([iia, iib]), -np.array(order, dtype=int)
 
 
@@ -1088,74 +1155,7 @@ def cmdscale(k: int = 2, *, eig: bool = True) -> _ModelStep:
 
 
 _BIG = float(np.float32(1e30))  # kmns.f's REAL constant BIG /1.E30/
-
-
-def _hartigan_wong(a: np.ndarray, c: np.ndarray, iter_max: int):
-    """AS 136 as R's kmns.f: optimal-transfer and quick-transfer stages."""
-    m, n = a.shape
-    k = c.shape[0]
-    c = c.copy()
-    if k <= 1 or k >= m:
-        return None, None, None, None, 3
-    ic1 = np.zeros(m, dtype=int)
-    ic2 = np.zeros(m, dtype=int)
-    for i in range(m):
-        dt = [_sq(a[i], c[0]), _sq(a[i], c[1])]
-        ic1[i], ic2[i] = 0, 1
-        if dt[0] > dt[1]:
-            ic1[i], ic2[i] = 1, 0
-            dt = [dt[1], dt[0]]
-        for l_ in range(2, k):
-            db = _sq(a[i], c[l_], dt[1])
-            if db is None:
-                continue
-            if db >= dt[0]:
-                dt[1], ic2[i] = db, l_
-            else:
-                dt[1], ic2[i] = dt[0], ic1[i]
-                dt[0], ic1[i] = db, l_
-    nc = np.bincount(ic1, minlength=k)
-    if np.any(nc == 0):
-        return None, None, None, None, 1
-    c = np.zeros((k, n))
-    for i in range(m):
-        c[ic1[i]] += a[i]
-    c = c / nc[:, None].astype(float)
-    nc = nc.astype(int)
-    an2 = nc / (nc + 1.0)
-    an1 = np.where(nc > 1, nc / np.maximum(nc - 1.0, 1), _BIG)
-    itran = np.ones(k, dtype=int)
-    ncp = np.full(k, -1, dtype=int)
-    live = np.zeros(k, dtype=int)
-    d = np.zeros(m)
-    state = {"indx": 0, "maxqtr": int(min(2 ** 31 - 1, 50 * m))}
-    ifault = 0
-    iterations = iter_max + 1
-    for ij in range(1, iter_max + 1):
-        _optra(a, c, ic1, ic2, nc, an1, an2, ncp, d, itran, live, state)
-        if state["indx"] == m:
-            iterations = ij
-            break
-        _qtran(a, c, ic1, ic2, nc, an1, an2, ncp, d, itran, state)
-        if state["maxqtr"] < 0:
-            ifault, iterations = 4, ij
-            break
-        if k == 2:
-            iterations = ij
-            break
-        ncp[:] = 0
-    else:
-        ifault = 2
-    c = np.zeros((k, n))
-    for i in range(m):
-        c[ic1[i]] += a[i]
-    c = c / nc[:, None].astype(float)
-    wss = np.zeros(k)
-    for j in range(n):
-        for i in range(m):
-            da = a[i, j] - c[ic1[i], j]
-            wss[ic1[i]] = _fma(da, da, wss[ic1[i]])
-    return ic1, c, wss, iterations, ifault
+_U = 2.0 ** -53  # unit roundoff
 
 
 def _sq(x: np.ndarray, y: np.ndarray, stop: float | None = None) -> float | None:
@@ -1170,7 +1170,168 @@ def _sq(x: np.ndarray, y: np.ndarray, stop: float | None = None) -> float | None
     return total
 
 
-def _transfer(a, c, ic1, ic2, nc, an1, an2, i, l1, l2):
+class _Distances:
+    """Squared distances from the rows to the centres, fast, with bounds.
+
+    ``_sq`` adds the squared differences column by column, as R's code
+    does, and its last bit decides ties; that is a scalar loop over every
+    row and centre. So rows are compared on an estimate from the cross
+    products of the rows and centres (both centred on the column means),
+    a block of rows at a time, with a bound on how far it can be from
+    ``_sq``'s value: a comparison the bounds settle is R's; one they cannot
+    settle is repeated with ``_sq``. Centres move under the algorithms;
+    ``changed`` refreshes their part of the block."""
+
+    block = 2048
+
+    def __init__(self, a: np.ndarray, c: np.ndarray):
+        self.a, self.c = a, c
+        self.mu = a.mean(axis=0)
+        self.ac = a - self.mu
+        self.rn2 = np.einsum("ij,ij->i", self.ac, self.ac)
+        self.rn = np.sqrt(self.rn2)
+        # The cross products' roundings, the centring's, and _sq's own.
+        self.slack = (2 * a.shape[1] + 16) * _U
+        k = c.shape[0]
+        self.cc, self.cn2, self.cn = np.empty_like(c), np.empty(k), np.empty(k)
+        self.start = self.stop = 0
+        self.f = self.e = None
+        self.changed(range(k))
+
+    def _fill(self, rows: slice, which: Any) -> tuple[np.ndarray, np.ndarray]:
+        with np.errstate(all="ignore"):
+            f = self.rn2[rows, None] + self.cn2[which][None, :] - 2 * (self.ac[rows] @ self.cc[which].T)
+            e = self.slack * (self.rn[rows, None] + self.cn[which][None, :]) ** 2
+        return f, e
+
+    def changed(self, which: Any) -> None:
+        which = list(which)
+        if not which:
+            return
+        with np.errstate(all="ignore"):
+            self.cc[which] = self.c[which] - self.mu
+            self.cn2[which] = np.einsum("ij,ij->i", self.cc[which], self.cc[which])
+            self.cn[which] = np.sqrt(self.cn2[which])
+        if self.f is not None:
+            self.f[:, which], self.e[:, which] = self._fill(slice(self.start, self.stop), which)
+
+    def row(self, i: int) -> tuple[np.ndarray, np.ndarray]:
+        """Estimates and bounds for row ``i`` against every centre."""
+        if not self.start <= i < self.stop:
+            self.start, self.stop = i, min(i + self.block, self.a.shape[0])
+            self.f, self.e = self._fill(slice(self.start, self.stop), slice(None))
+        return self.f[i - self.start], self.e[i - self.start]
+
+    def all(self) -> tuple[np.ndarray, np.ndarray]:
+        """Estimates and bounds for every row."""
+        return self._fill(slice(None), slice(None))
+
+
+def _two_nearest(a: np.ndarray, c: np.ndarray, dist: _Distances) -> tuple[np.ndarray, np.ndarray]:
+    """kmns.f's first pass: each row's nearest and second nearest centre,
+    the lower index on ties, from the estimates where the bounds decide."""
+    f, e = dist.all()
+    m = a.shape[0]
+    with np.errstate(invalid="ignore"):
+        low, high = f - e, f + e
+    rows = np.arange(m)
+    first = np.nanargmin(np.where(np.isnan(f), np.inf, f), axis=1)
+    rest = f.copy()
+    rest[rows, first] = np.inf
+    second = np.argmin(np.where(np.isnan(rest), np.inf, rest), axis=1)
+    # Certain when the nearest is below every other's lower bound, and the
+    # second below the lower bound of every one but the nearest.
+    others = low.copy()
+    others[rows, first] = np.inf
+    sure = high[rows, first] < np.min(others, axis=1)
+    others[rows, second] = np.inf
+    sure &= high[rows, second] < np.min(others, axis=1)
+    for i in np.flatnonzero(~sure):
+        dt = [_sq(a[i], c[0]), _sq(a[i], c[1])]
+        first[i], second[i] = 0, 1
+        if dt[0] > dt[1]:
+            first[i], second[i] = 1, 0
+            dt = [dt[1], dt[0]]
+        for l_ in range(2, c.shape[0]):
+            db = _sq(a[i], c[l_], dt[1])
+            if db is None:
+                continue
+            if db >= dt[0]:
+                dt[1], second[i] = db, l_
+            else:
+                dt[1], second[i] = dt[0], first[i]
+                dt[0], first[i] = db, l_
+    return first, second
+
+
+def _cluster_means(a: np.ndarray, cl: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """Means of the rows of each cluster, added in row order, as kmns.f."""
+    nc = np.bincount(cl, minlength=k)
+    sums = np.column_stack([np.bincount(cl, a[:, j], minlength=k) for j in range(a.shape[1])])
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return sums / nc[:, None].astype(float), nc
+
+
+def _within(a: np.ndarray, c: np.ndarray, cl: np.ndarray) -> np.ndarray:
+    """Within-cluster sums of squares: each row's fused column-by-column
+    sum (``_sq``), the rows of a cluster added in row order, as R's Lloyd
+    and MacQueen code (kmns.f adds column by column across the rows, which
+    can differ in the last bits)."""
+    da = a - c[cl]
+    total = np.zeros(a.shape[0])
+    for j in range(a.shape[1]):
+        total = _fma_array(da[:, j], da[:, j], total)
+    wss = np.zeros(c.shape[0])
+    for l_ in range(c.shape[0]):
+        own = total[cl == l_]
+        if len(own):
+            wss[l_] = np.cumsum(own)[-1]
+    return wss
+
+
+def _hartigan_wong(a: np.ndarray, c: np.ndarray, iter_max: int):
+    """AS 136 as R's kmns.f: optimal-transfer and quick-transfer stages."""
+    m, n = a.shape
+    k = c.shape[0]
+    c = c.copy()
+    if k <= 1 or k >= m:
+        return None, None, None, None, 3
+    dist = _Distances(a, c)
+    ic1, ic2 = _two_nearest(a, c, dist)
+    c[:], nc = _cluster_means(a, ic1, k)
+    if np.any(nc == 0):
+        return None, None, None, None, 1
+    dist.changed(range(k))
+    nc = nc.astype(int)
+    an2 = nc / (nc + 1.0)
+    an1 = np.where(nc > 1, nc / np.maximum(nc - 1.0, 1), _BIG)
+    itran = np.ones(k, dtype=int)
+    ncp = np.full(k, -1, dtype=int)
+    live = np.zeros(k, dtype=int)
+    d, db = np.zeros(m), np.zeros(m)  # each row's d and the bound on it
+    state = {"indx": 0, "maxqtr": int(min(2 ** 31 - 1, 50 * m))}
+    ifault = 0
+    iterations = iter_max + 1
+    for ij in range(1, iter_max + 1):
+        _optra(a, c, ic1, ic2, nc, an1, an2, ncp, d, db, itran, live, state, dist)
+        if state["indx"] == m:
+            iterations = ij
+            break
+        _qtran(a, c, ic1, ic2, nc, an1, an2, ncp, d, db, itran, state, dist)
+        if state["maxqtr"] < 0:
+            ifault, iterations = 4, ij
+            break
+        if k == 2:
+            iterations = ij
+            break
+        ncp[:] = 0
+    else:
+        ifault = 2
+    c, _ = _cluster_means(a, ic1, k)
+    return ic1, c, _within(a, c, ic1), iterations, ifault
+
+
+def _transfer(a, c, ic1, ic2, nc, an1, an2, i, l1, l2, dist):
     al1 = float(nc[l1])
     alw = al1 - 1.0
     al2 = float(nc[l2])
@@ -1184,9 +1345,14 @@ def _transfer(a, c, ic1, ic2, nc, an1, an2, i, l1, l2):
     an1[l2] = alt / al2
     an2[l2] = alt / (alt + 1.0)
     ic1[i], ic2[i] = l2, l1
+    dist.changed([l1, l2])
 
 
-def _optra(a, c, ic1, ic2, nc, an1, an2, ncp, d, itran, live, state):
+def _optra(a, c, ic1, ic2, nc, an1, an2, ncp, d, db, itran, live, state, dist):
+    """The optimal-transfer stage. Every row's d is the distance to its own
+    centre as that centre now stands (kmns.f recomputes it whenever the
+    centre moved since), so a comparison the estimates cannot settle is
+    repeated exactly from the current centres."""
     m, k = a.shape[0], c.shape[0]
     for l_ in range(k):
         if itran[l_] == 1:
@@ -1197,18 +1363,39 @@ def _optra(a, c, ic1, ic2, nc, an1, an2, ncp, d, itran, live, state):
         l1, l2 = ic1[i], ic2[i]
         ll = l2
         if nc[l1] != 1:
+            f, e = dist.row(i)
             if ncp[l1] != 0:
-                d[i] = _sq(a[i], c[l1]) * an1[l1]
-            r2 = _sq(a[i], c[l2]) * an2[l2]
+                d[i], db[i] = f[l1] * an1[l1], e[l1] * an1[l1]
+            r2, r2b = f[l2] * an2[l2], e[l2] * an2[l2]
+            unsure = False
             for l_ in range(k):
                 if (pos >= live[l1] and pos >= live[l_]) or l_ == l1 or l_ == ll:
                     continue
-                rr = r2 / an2[l_]
-                dc = _sq(a[i], c[l_], rr)
-                if dc is None:
-                    continue
-                r2, l2 = dc * an2[l_], l_
-            if r2 >= d[i]:
+                rr, rrb = r2 / an2[l_], r2b / an2[l_]
+                if f[l_] + e[l_] < rr - rrb:
+                    r2, r2b, l2 = f[l_] * an2[l_], e[l_] * an2[l_], l_
+                elif not f[l_] - e[l_] >= rr + rrb:
+                    unsure = True
+                    break
+            if unsure:
+                d[i], db[i] = _sq(a[i], c[l1]) * an1[l1], 0.0
+                r2, l2 = _sq(a[i], c[ll]) * an2[ll], ll
+                for l_ in range(k):
+                    if (pos >= live[l1] and pos >= live[l_]) or l_ == l1 or l_ == ll:
+                        continue
+                    dc = _sq(a[i], c[l_], r2 / an2[l_])
+                    if dc is None:
+                        continue
+                    r2, l2 = dc * an2[l_], l_
+                move = r2 < d[i]
+            elif r2 - r2b >= d[i] + db[i]:
+                move = False
+            elif r2 + r2b < d[i] - db[i]:
+                move = True
+            else:
+                d[i], db[i] = _sq(a[i], c[l1]) * an1[l1], 0.0
+                move = _sq(a[i], c[l2]) * an2[l2] < d[i]
+            if not move:
                 ic2[i] = l2
             else:
                 state["indx"] = 0
@@ -1216,7 +1403,7 @@ def _optra(a, c, ic1, ic2, nc, an1, an2, ncp, d, itran, live, state):
                 live[l2] = m + pos
                 ncp[l1] = pos
                 ncp[l2] = pos
-                _transfer(a, c, ic1, ic2, nc, an1, an2, i, l1, l2)
+                _transfer(a, c, ic1, ic2, nc, an1, an2, i, l1, l2, dist)
         if state["indx"] == m:
             return
     for l_ in range(k):
@@ -1224,7 +1411,8 @@ def _optra(a, c, ic1, ic2, nc, an1, an2, ncp, d, itran, live, state):
         live[l_] -= m
 
 
-def _qtran(a, c, ic1, ic2, nc, an1, an2, ncp, d, itran, state):
+def _qtran(a, c, ic1, ic2, nc, an1, an2, ncp, d, db, itran, state, dist):
+    """The quick-transfer stage, on the estimates where they settle it."""
     m = a.shape[0]
     icoun = istep = 0
     while True:
@@ -1237,15 +1425,24 @@ def _qtran(a, c, ic1, ic2, nc, an1, an2, ncp, d, itran, state):
             l1, l2 = ic1[i], ic2[i]
             if nc[l1] != 1:
                 if istep <= ncp[l1]:
-                    d[i] = _sq(a[i], c[l1]) * an1[l1]
+                    f, e = dist.row(i)
+                    d[i], db[i] = f[l1] * an1[l1], e[l1] * an1[l1]
                 if istep < ncp[l1] or istep < ncp[l2]:
-                    r2 = d[i] / an2[l2]
-                    if _sq(a[i], c[l2], r2) is not None:
+                    f, e = dist.row(i)
+                    r2, r2b = d[i] / an2[l2], db[i] / an2[l2]
+                    if f[l2] + e[l2] < r2 - r2b:
+                        move = True
+                    elif f[l2] - e[l2] >= r2 + r2b:
+                        move = False
+                    else:
+                        d[i], db[i] = _sq(a[i], c[l1]) * an1[l1], 0.0
+                        move = _sq(a[i], c[l2], d[i] / an2[l2]) is not None
+                    if move:
                         icoun = 0
                         state["indx"] = 0
                         itran[l1] = itran[l2] = 1
                         ncp[l1] = ncp[l2] = istep + m
-                        _transfer(a, c, ic1, ic2, nc, an1, an2, i, l1, l2)
+                        _transfer(a, c, ic1, ic2, nc, an1, an2, i, l1, l2, dist)
             if icoun == m:
                 return
 
@@ -1259,81 +1456,107 @@ def _nearest(a: np.ndarray, c: np.ndarray, i: int, previous: int) -> int:
     return choice
 
 
-def _wss(a: np.ndarray, c: np.ndarray, cl: np.ndarray) -> np.ndarray:
-    wss = np.zeros(c.shape[0])
-    for i in range(a.shape[0]):
-        wss[cl[i]] += _sq(a[i], c[cl[i]])
-    return wss
+def _nearest_fast(a, c, i, previous, dist) -> int:
+    """``_nearest`` from the estimates, exact where they do not settle it."""
+    f, e = dist.row(i)
+    finite = ~np.isnan(f)
+    if not finite.any():
+        return previous
+    values = np.where(finite, f, np.inf)
+    j = int(np.argmin(values))
+    others = np.where(finite, f - e, np.inf)
+    others[j] = np.inf
+    if f[j] + e[j] < others.min():
+        return j
+    return _nearest(a, c, i, previous)
+
+
+def _nearest_all(a: np.ndarray, c: np.ndarray, dist: _Distances, previous: int) -> np.ndarray:
+    """``_nearest`` for every row in turn (a row with no finite distance
+    keeps the previous row's choice, as R's loop does)."""
+    f, e = dist.all()
+    m = a.shape[0]
+    finite = ~np.isnan(f)
+    values = np.where(finite, f, np.inf)
+    choice = np.argmin(values, axis=1)
+    rows = np.arange(m)
+    others = np.where(finite, f - e, np.inf)
+    others[rows, choice] = np.inf
+    sure = finite.any(axis=1) & (f[rows, choice] + e[rows, choice] < others.min(axis=1))
+    if sure.all():
+        return choice
+    out = choice.copy()
+    for i in range(m):
+        previous = out[i] if sure[i] else _nearest(a, c, i, previous)
+        out[i] = previous
+    return out
 
 
 def _lloyd(a: np.ndarray, c: np.ndarray, iter_max: int):
     """R's kmeans_Lloyd: reassign every point, then move every centre."""
     m, k = a.shape[0], c.shape[0]
     c = c.copy()
+    dist = _Distances(a, c)
     cl = np.full(m, -1)
     nc = np.zeros(k, dtype=int)
-    inew = 0
     iteration = 0
     for iteration in range(iter_max):
-        updated = False
-        for i in range(m):
-            inew = _nearest(a, c, i, inew)
-            if cl[i] != inew:
-                updated, cl[i] = True, inew
-        if not updated:
+        new = _nearest_all(a, c, dist, 0)
+        if np.array_equal(new, cl):
             break
-        nc = np.bincount(cl, minlength=k)
-        sums = np.zeros_like(c)
-        for i in range(m):
-            sums[cl[i]] += a[i]
-        with np.errstate(invalid="ignore", divide="ignore"):
-            c = sums / nc[:, None]
+        cl = new
+        c[:], nc = _cluster_means(a, cl, k)
+        dist.changed(range(k))
     else:
         iteration = iter_max
-    return cl, c, _wss(a, c, cl), iteration + 1, nc
+    return cl, c, _within(a, c, cl), iteration + 1, nc
 
 
 def _macqueen(a: np.ndarray, c: np.ndarray, iter_max: int):
     """R's kmeans_MacQueen: move the two centres after each reassignment."""
     m, k = a.shape[0], c.shape[0]
     c = c.copy()
-    cl = np.zeros(m, dtype=int)
+    dist = _Distances(a, c)
+    cl = _nearest_all(a, c, dist, 0)
+    c[:], nc = _cluster_means(a, cl, k)
+    dist.changed(range(k))
     inew = 0
-    for i in range(m):
-        inew = _nearest(a, c, i, inew)
-        cl[i] = inew
-    nc = np.bincount(cl, minlength=k)
-    sums = np.zeros_like(c)
-    for i in range(m):
-        sums[cl[i]] += a[i]
-    with np.errstate(invalid="ignore", divide="ignore"):
-        c = sums / nc[:, None]
     iteration = 0
     for iteration in range(iter_max):
         updated = False
         for i in range(m):
-            inew = _nearest(a, c, i, inew)
+            inew = _nearest_fast(a, c, i, inew, dist)
             old = cl[i]
             if old != inew:
                 updated = True
                 cl[i] = inew
                 nc[old] -= 1
                 nc[inew] += 1
-                c[old] += (c[old] - a[i]) / nc[old]
-                c[inew] += (a[i] - c[inew]) / nc[inew]
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    c[old] += (c[old] - a[i]) / nc[old]
+                    c[inew] += (a[i] - c[inew]) / nc[inew]
+                dist.changed([old, inew])
         if not updated:
             break
     else:
         iteration = iter_max
-    return cl, c, _wss(a, c, cl), iteration + 1, nc
+    return cl, c, _within(a, c, cl), iteration + 1, nc
 
 
 _KMEANS_ALGORITHMS = ("Hartigan-Wong", "Lloyd", "Forgy", "MacQueen")
 
 
 def _kmeans_once(a: np.ndarray, centers: np.ndarray, iter_max: int, method: int):
+    kernel = compiled({1: "hartigan_wong", 2: "lloyd", 3: "macqueen"}[method])
+    if kernel is not None:
+        a = np.ascontiguousarray(a, dtype=float)
+        centers = np.ascontiguousarray(centers, dtype=float)
     if method == 1:
-        cl, c, wss, iterations, ifault = _hartigan_wong(a, centers, iter_max)
+        k, m = centers.shape[0], a.shape[0]
+        if kernel is not None and 1 < k < m:
+            cl, c, wss, iterations, ifault = kernel(a, centers, int(iter_max), R_FUSES_MULTIPLY_ADD)
+        else:
+            cl, c, wss, iterations, ifault = _hartigan_wong(a, centers, iter_max)
         if ifault == 1:
             raise ValueError("kmeans(): empty cluster: try a better set of initial centers")
         if ifault == 3:
@@ -1343,6 +1566,9 @@ def _kmeans_once(a: np.ndarray, centers: np.ndarray, iter_max: int, method: int)
         if ifault == 4:
             _warn(f"kmeans(): Quick-TRANSfer stage steps exceeded maximum (= {min(2 ** 31 - 1, 50 * a.shape[0])})")
         nc = np.bincount(cl, minlength=centers.shape[0])
+    elif kernel is not None:
+        cl, c, wss, iterations, nc = kernel(a, centers, int(iter_max), R_FUSES_MULTIPLY_ADD)
+        ifault = 0
     else:
         cl, c, wss, iterations, nc = (_lloyd if method == 2 else _macqueen)(a, centers, iter_max)
         ifault = 0
@@ -1461,7 +1687,10 @@ def kmeans(columns: Any = "~ .", centers: Any = 2, *, iter_max: int = 10, nstart
     of squares) or the initial centres: a matrix, or a frame of centre
     rows, filtered by the grouping columns when it has them. With explicit
     centres the result is R's exactly; random starts use NumPy's generator
-    (``seed=``), not R's, so only the objective is comparable with R.
+    (``seed=``), not R's, so only the objective is comparable with R. With
+    ``stats3[fast]`` installed the transfers run compiled, at R's speed on
+    large data; without it, rows are compared on fast distances with error
+    bounds and only ties are settled by R's exact sum.
     ``tidy`` gives the centres with ``size``, ``withinss`` and ``cluster``;
     ``glance`` ``totss``, ``tot_withinss``, ``betweenss`` and ``iter``;
     ``augment`` the rows with ``.cluster``. Rows with missing values are dropped.

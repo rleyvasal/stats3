@@ -159,15 +159,14 @@ CASES = {
     "b_by_species": case(P, lambda: binom_test(MALE, p=0.45), "species"),
 }
 
-# Where R's own numerics are approximate, stats3 (through scipy) matches it to
-# R's accuracy: qtukey's iteration puts Tukey intervals within about 1e-7;
-# ptukey is off by up to 3e-5 (relative) at 6 residual df, where scipy agrees
-# with a 30-digit mpmath integration to 12 digits, and loses relative
-# accuracy below about 1e-9; fisher.test finds the conditional odds ratio and
-# its interval with uniroot (measured: 2e-6 and 3e-5).
+# Where R's own numerics are approximate, stats3 follows R's algorithms:
+# Tukey intervals and p-values come from ports of qtukey and ptukey, and the
+# conditional odds ratio and its interval from fisher.test's uniroot searches
+# at R's tolerance, so they match R's values closely; the small slack covers
+# the last bits R's own pnorm, exp and lgamma leave.
 LOOSE = {
-    "t_": {"conf_low": 1e-6, "conf_high": 1e-6, "adj_p_value": (5e-5, 1e-9)},
-    "f_": {"estimate": 1e-5, "conf_low": 1e-4, "conf_high": 1e-4},
+    "t_": {"conf_low": 1e-9, "conf_high": 1e-9, "adj_p_value": (1e-9, 1e-12)},
+    "f_": {"estimate": 1e-7, "conf_low": 1e-7, "conf_high": 1e-7},
 }
 
 

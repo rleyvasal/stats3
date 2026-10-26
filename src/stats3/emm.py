@@ -191,7 +191,7 @@ def _link(fit: Any) -> Any:
 def _critical(level: float, df: np.ndarray, adjust: str, n_contrasts: int, family: float,
               scheffe_rank: int | None = None) -> np.ndarray:
     """emmeans' ``.adj.critval`` for two-sided intervals."""
-    from scipy.stats import studentized_range
+    from stats3._tukey import qtukey
 
     special = _special()
     out = np.empty(len(df))
@@ -203,7 +203,7 @@ def _critical(level: float, df: np.ndarray, adjust: str, n_contrasts: int, famil
         elif adjust == "sidak":
             out[i] = -t((1 - level ** (1 / n_contrasts)) / 2)
         elif adjust == "tukey":
-            out[i] = float(studentized_range.ppf(level, family, d)) / math.sqrt(2)
+            out[i] = float(qtukey(level, family, d)) / math.sqrt(2)
         elif adjust == "scheffe":
             from scipy.stats import f as f_dist
 
@@ -218,22 +218,26 @@ def _critical(level: float, df: np.ndarray, adjust: str, n_contrasts: int, famil
 
 def _p_dunnettx(x: float, k: int, df: float) -> float:
     """emmeans' ``.pdunnx``: a Tukey-Sidak blend approximating Dunnett."""
-    from scipy.stats import f as f_dist, studentized_range
+    from scipy.stats import f as f_dist
+
+    from stats3._tukey import ptukey
 
     twt = (k - 1) / k
-    tukey = float(studentized_range.cdf(math.sqrt(2) * x, (1 + math.sqrt(1 + 8 * k)) / 2, df))
+    tukey = float(ptukey(math.sqrt(2) * x, (1 + math.sqrt(1 + 8 * k)) / 2, df))
     sidak = float(f_dist.cdf(x**2, 1, df)) ** k
     return twt * tukey + (1 - twt) * sidak
 
 
 def _q_dunnettx(p: float, k: int, df: float) -> float:
     from scipy.optimize import brentq
-    from scipy.stats import f as f_dist, studentized_range
+    from scipy.stats import f as f_dist
+
+    from stats3._tukey import qtukey
 
     special = _special()
     if k < 1.005:
         return float(special.ndtri(1 - 0.5 * (1 - p))) if math.isinf(df) else float(special.stdtrit(df, 1 - 0.5 * (1 - p)))
-    xtuk = float(studentized_range.ppf(p, (1 + math.sqrt(1 + 8 * k)) / 2, df)) / math.sqrt(2)
+    xtuk = float(qtukey(p, (1 + math.sqrt(1 + 8 * k)) / 2, df)) / math.sqrt(2)
     xsid = math.sqrt(float(f_dist.ppf(p ** (1 / k), 1, df)))
     if abs(xtuk - xsid) < 5e-4:
         return xtuk
@@ -243,7 +247,9 @@ def _q_dunnettx(p: float, k: int, df: float) -> float:
 def _p_values(stat: np.ndarray, df: np.ndarray, adjust: str, family: float,
               scheffe_rank: int | None = None) -> np.ndarray:
     """emmeans' ``.adj.p.value`` for two-sided tests within one family."""
-    from scipy.stats import f as f_dist, studentized_range
+    from scipy.stats import f as f_dist
+
+    from stats3._tukey import ptukey
 
     special = _special()
     df = np.where(np.isnan(df), math.inf, df)
@@ -257,7 +263,7 @@ def _p_values(stat: np.ndarray, df: np.ndarray, adjust: str, family: float,
     if adjust == "sidak":
         return 1 - (1 - p) ** n
     if adjust == "tukey":
-        return np.array([float(studentized_range.sf(math.sqrt(2) * abs(t), family, d)) for t, d in zip(stat, df)])
+        return ptukey(math.sqrt(2) * np.abs(stat), family, df, lower_tail=False)
     if adjust == "scheffe":
         rank = family - 1 if scheffe_rank is None else scheffe_rank
         return np.array([float(f_dist.sf(t**2 / rank, rank, d)) for t, d in zip(stat, df)])

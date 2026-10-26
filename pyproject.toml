@@ -32,6 +32,10 @@ dependencies = [
 
 [project.optional-dependencies]
 bayes = ["pymc>=6.3,<7", "arviz>=1.1,<2"]
+# Compiled kernels for R's row-by-row algorithms (k-means transfers, the
+# hclust chain, distances, concordance): the same results, at R's speed on
+# large data. 0.60 is the first Numba release for NumPy 2.
+fast = ["numba>=0.60"]
 # pandas frames in and out: Polars converts them through pyarrow (the
 # first releases built for NumPy 2, which scipy 1.18 needs).
 pandas = ["pandas>=2.2.2", "pyarrow>=16"]
@@ -41,6 +45,8 @@ dev = [
   "pyarrow>=16",
   # Only to test that tidy3 frames, groups and expressions work.
   "tidy3>=0.8.2",
+  # The compiled path is checked against the NumPy path.
+  "numba>=0.60",
   "ipython>=8.0",
 ]
 

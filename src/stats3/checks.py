@@ -3,8 +3,8 @@
 
 Variances and deviations come from grouped Polars queries. Shapiro-Wilk and
 the Kolmogorov-Smirnov statistics need each group's sorted values, so they
-run per group on the collected values: Shapiro-Wilk through scipy (Royston's
-algorithm, as R uses), and the exact Smirnov distribution, with ties as in
+run per group on the collected values: Shapiro-Wilk by Royston's algorithm
+(as R and scipy), on all groups of one size at once, and the exact Smirnov distribution, with ties as in
 R 4.6, by counting lattice paths here.
 """
 
@@ -67,31 +67,80 @@ def shapiro_test(x: Any) -> Step:
     """
 
     def _apply(tf: Any) -> Any:
-        from scipy.stats import shapiro
-
         groups = list(tf._groups or [])
         name = _column(tf, x, "x", "shapiro_test")
         table, rows = _group_values(
             tf, groups, {"x": pl.col(name).cast(pl.Float64)}, _present(tf._lf, name)
         )
-        statistic, p_value = [], []
+        sizes = []
         for row in rows:
-            values = np.sort(row["x"])
-            n = len(values)
+            n = len(row["x"])
             if not 3 <= n <= 5000:
                 raise ValueError(f"shapiro_test(): sample size must be between 3 and 5000{row['__label']}")
-            if values[-1] - values[0] < 1e-10:
-                raise ValueError(f"shapiro_test(): all 'x' values are identical{row['__label']}")
-            result = shapiro(values)
-            statistic.append(float(result.statistic))
-            p_value.append(float(result.pvalue))
+            sizes.append(n)
+        statistic, p_value = np.empty(len(rows)), np.empty(len(rows))
+        # Groups of one size share the coefficients: one batched call each.
+        for n in sorted(set(sizes)):
+            at = [i for i, m in enumerate(sizes) if m == n]
+            values = np.sort(np.array([rows[i]["x"] for i in at]), axis=1)
+            flat = np.flatnonzero(values[:, -1] - values[:, 0] < 1e-10)
+            if len(flat):
+                raise ValueError(f"shapiro_test(): all 'x' values are identical{rows[at[flat[0]]]['__label']}")
+            statistic[at], p_value[at] = _swilk(values)
         return _finish(tf, table, groups, {
-            "statistic": np.array(statistic),
-            "p_value": np.array(p_value),
+            "statistic": statistic,
+            "p_value": p_value,
             "method": "Shapiro-Wilk normality test",
         })
 
     return Step(_apply, "shapiro_test")
+
+
+def _swilk(y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Royston's (1992) Shapiro-Wilk W and p-value for each row of sorted
+    samples of one size: scipy's ``shapiro`` on a batch (its own
+    Python port of ``swilk``, with Royston's coefficients and p-value
+    approximations), without its per-call wrapping."""
+    special = _special()
+    n = y.shape[-1]
+    if n == 3:
+        c = math.sqrt(2) / 2
+        a = np.array([-c, 0, c])
+        w = np.clip(_swilk_w(y, a), 0.75, 1.0)
+        return w, np.clip(1.0 - 6 / np.pi * np.arccos(np.sqrt(w)), 0.0, 1.0)
+    i = np.arange(1, n + 1, dtype=float)
+    m = special.ndtri((i - 3 / 8) / (n + 1 / 4))
+    u = n ** (-0.5)
+    mtm = float(m @ m)
+    c = mtm ** (-0.5) * m
+    mnm1, mn = m[-2], m[-1]
+    cnm1, cn = c[-2], c[-1]
+    an = cn + 0.221157 * u - 0.147981 * u**2 - 2.071190 * u**3 + 4.434685 * u**4 - 2.706056 * u**5
+    anm1 = cnm1 + 0.042981 * u - 0.293762 * u**2 - 1.752461 * u**3 + 5.682633 * u**4 - 3.582633 * u**5
+    phi = ((mtm - 2 * mn**2) / (1 - 2 * an**2) if n <= 5
+           else (mtm - 2 * mn**2 - 2 * mnm1**2) / (1 - 2 * an**2 - 2 * anm1**2))
+    a = phi ** (-0.5) * m
+    if n > 5:
+        a[-2], a[1] = anm1, -anm1
+    a[-1], a[0] = an, -an
+    w = _swilk_w(y, a)
+    if n <= 11:
+        gamma = -2.273 + 0.459 * n
+        mu = 0.5440 - 0.39978 * n + 0.025054 * n**2 - 0.0006714 * n**3
+        sigma = math.exp(1.3822 - 0.77857 * n + 0.062767 * n**2 - 0.0020322 * n**3)
+        gw = -np.log(gamma - np.log(1 - w))
+    else:
+        ln = math.log(n)
+        mu = -1.5861 - 0.31082 * ln - 0.083751 * ln**2 + 0.0038915 * ln**3
+        sigma = math.exp(-0.4803 - 0.082676 * ln + 0.0030302 * ln**2)
+        gw = np.log(1 - w)
+    return w, special.ndtr(-(gw - mu) / sigma)
+
+
+def _swilk_w(y: np.ndarray, a: np.ndarray) -> np.ndarray:
+    num = (y @ a) ** 2
+    centred = y - y.mean(axis=-1, keepdims=True)
+    return num / np.sum(centred * centred, axis=-1)
 
 
 # variance tests --------------------------------------------------------------------

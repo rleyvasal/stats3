@@ -79,8 +79,7 @@ def _term_means(fit: Any, term: tuple[str, ...], q: np.ndarray, effects: np.ndar
 
 
 def tukey_table(data: Data, formula: str, which: Any, ordered: bool, conf_level: float) -> pl.DataFrame:
-    from scipy.stats import studentized_range
-
+    from stats3._tukey import ptukey, qtukey
     from stats3.core import _group_label
 
     frames = []
@@ -111,7 +110,7 @@ def tukey_table(data: Data, formula: str, which: Any, ordered: bool, conf_level:
                 order = np.argsort(np.where(np.isnan(means), np.inf, means), kind="stable")
                 means, n, cells = means[order], n[order], [cells[i] for i in order]
             k = len(means)
-            q_crit = float(studentized_range.ppf(conf_level, k, df)) if k > 1 else math.nan
+            q_crit = float(qtukey(conf_level, k, df)) if k > 1 else math.nan
             for b in range(k):
                 for a in range(b + 1, k):
                     centre = means[a] - means[b]
@@ -122,7 +121,7 @@ def tukey_table(data: Data, formula: str, which: Any, ordered: bool, conf_level:
                     out["estimate"].append(centre if known else None)
                     out["conf_low"].append(centre - q_crit * se if known else None)
                     out["conf_high"].append(centre + q_crit * se if known else None)
-                    out["adj_p_value"].append(float(studentized_range.sf(abs(centre) / se, k, df)) if known else None)
+                    out["adj_p_value"].append(float(ptukey(abs(centre) / se, k, df, lower_tail=False)) if known else None)
         frames.append(fit._with_key(pl.DataFrame(out, schema={
             name: pl.String if name in ("term", "contrast") else pl.Float64 for name in out
         })))

@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from stats3._fast import compiled
 from stats3._data import Data, Step, step
 from stats3.core import _check_conf_level, _special, _warn
 from stats3.formula import Formula, Variable, _compile, _level_name, _python, build_design, parse_formula, variable_expr
@@ -695,21 +696,28 @@ class SurvivalDifference(_Fit):
             keep = strata == s
             t, d, grp = y.stop[keep], y.status[keep], groups[keep]
             times = np.unique(t[d == 1])
-            km = 1.0
-            for time in times:
-                risk = t >= time
-                nrisk = risk.sum()
-                dead = (t == time) & (d == 1)
-                deaths = dead.sum()
-                wt = km ** rho
-                n_j = np.bincount(grp[risk], minlength=g)
-                d_j = np.bincount(grp[dead], minlength=g)
-                obs += wt * d_j
-                exp += wt * deaths * n_j / nrisk
-                if nrisk > 1:
-                    kt = wt * wt * deaths * (nrisk - deaths) / (nrisk * (nrisk - 1))
-                    var += kt * (np.diag(n_j) - np.outer(n_j, n_j) / nrisk)
-                km *= (nrisk - deaths) / nrisk
+            if not len(times):
+                continue
+            # Per event time: the risk set (stop >= t) and deaths, per group
+            # and in all, from one sort of the stops: survdiff2's sums without
+            # a pass over the rows at every time.
+            order = np.argsort(t, kind="stable")
+            ts, gs = t[order], grp[order]
+            nrisk = len(ts) - np.searchsorted(ts, times, "left")
+            at_risk = np.empty((len(times), g))
+            for j in range(g):
+                tj = ts[gs == j]
+                at_risk[:, j] = len(tj) - np.searchsorted(tj, times, "left")
+            pos = np.searchsorted(times, t[d == 1])
+            deaths_by = np.bincount(pos * g + grp[d == 1], minlength=len(times) * g).reshape(len(times), g).astype(float)
+            deaths = deaths_by.sum(axis=1)
+            km = np.r_[1.0, np.cumprod((nrisk - deaths) / nrisk)[:-1]]
+            wt = km ** rho
+            obs += wt @ deaths_by
+            exp += (wt * deaths / nrisk) @ at_risk
+            with np.errstate(invalid="ignore", divide="ignore"):
+                kt = np.where(nrisk > 1, wt * wt * deaths * (nrisk - deaths) / (nrisk * (nrisk - 1)), 0.0)
+            var += np.diag(kt @ at_risk) - (at_risk * (kt / nrisk)[:, None]).T @ at_risk
         self.obs, self.exp, self.var = obs, exp, var
         df = exp > 0
         if df.sum() < 2:
@@ -1047,6 +1055,33 @@ def _earlier(item_seq, item_key, item_w, query_seq, query_key, nbits):
     return result[n_items:]
 
 
+def _sweep_sums(item_seq, item_key, item_w, query_seq, query_key, nbits):
+    """For each query, the weight of the items earlier in the sweep (smaller
+    seq) whose key is below the query's within its group, equal to it, and
+    anywhere in its group: ``_earlier``, ``_equal_earlier`` and the group
+    total together. Keys are group * 2**nbits + rank. The compiled kernel
+    sweeps once with a Fenwick tree over the keys; otherwise each count is a
+    vectorized prefix sum."""
+    kernel = compiled("sweep_sums")
+    gkey = (query_key >> nbits) << nbits
+    if kernel is None:
+        item_gkey = (item_key >> nbits) << nbits
+        return (_earlier(item_seq, item_key, item_w, query_seq, query_key, nbits),
+                _equal_earlier(item_seq, item_key, item_w, query_seq, query_key),
+                _equal_earlier(item_seq, item_gkey, item_w, query_seq, gkey))
+    n_items = len(item_seq)
+    keys = np.r_[item_key, query_key]
+    unique, dense = np.unique(keys, return_inverse=True)
+    dense = dense.reshape(-1).astype(np.int64)
+    is_query = np.r_[np.zeros(n_items, dtype=bool), np.ones(len(query_seq), dtype=bool)]
+    qindex = np.r_[np.zeros(n_items, dtype=np.int64), np.arange(len(query_seq), dtype=np.int64)]
+    gstart = np.searchsorted(unique, np.r_[np.zeros(n_items, dtype=np.int64), gkey], "left").astype(np.int64)
+    gend = np.searchsorted(unique, np.r_[np.zeros(n_items, dtype=np.int64), gkey + (1 << nbits)], "left").astype(np.int64)
+    order = np.argsort(np.r_[item_seq, query_seq], kind="stable").astype(np.int64)
+    weight = np.r_[np.asarray(item_w, dtype=float), np.zeros(len(query_seq))]
+    return kernel(order, dense, weight, is_query, qindex, gstart, gend, len(unique))
+
+
 def _compact(keys):
     """Nonnegative keys as 16-bit integers when they fit, so NumPy's stable
     sort uses radix sort; otherwise unchanged."""
@@ -1112,9 +1147,7 @@ def _concordance(y: _Response, lp, strata, w, cluster):
     item_key = np.r_[key, key[removed]]
     item_gkey = np.r_[gkey, gkey[removed]]
     item_w = np.r_[w, -w[removed]]
-    lower = _earlier(item_seq, item_key, item_w, query_seq, q_key, nbits)
-    equal = _equal_earlier(item_seq, item_key, item_w, query_seq, q_key)
-    total = _equal_earlier(item_seq, item_gkey, item_w, query_seq, q_gkey)
+    lower, equal, total = _sweep_sums(item_seq, item_key, item_w, query_seq, q_key, nbits)
     # Row side: the weight of events a row was compared with, while at risk,
     # whose predictor is above (concordant), below or equal to its own.
     dep_seq, dep_key, dep_gkey, dep_w = query_seq, key[ev], gkey[ev], w[ev]
@@ -1127,16 +1160,14 @@ def _concordance(y: _Response, lp, strata, w, cluster):
             # deposits before the row left, minus those before it entered
             return values[:n] - values[n:]
 
-        d_lower = window(_earlier(dep_seq, dep_key, dep_w, both_seq, np.r_[key, key], nbits))  # events below the row
-        d_equal = window(_equal_earlier(dep_seq, dep_key, dep_w, both_seq, np.r_[key, key]))
-        d_total = window(_equal_earlier(dep_seq, dep_gkey, dep_w, both_seq, np.r_[gkey, gkey]))
+        # events below the row's predictor, equal to it, and in its stratum
+        d_lower, d_equal, d_total = (window(v) for v in _sweep_sums(dep_seq, dep_key, dep_w, both_seq, np.r_[key, key], nbits))
     else:
         # Right-censored rows never leave: deposits while at risk are all of
         # them (a count by key alone) minus those before the row entered.
         all_lower, all_equal, all_total = _by_key(dep_key, dep_w, key, nbits)
-        d_lower = all_lower - _earlier(dep_seq, dep_key, dep_w, enter_seq, key, nbits)
-        d_equal = all_equal - _equal_earlier(dep_seq, dep_key, dep_w, enter_seq, key)
-        d_total = all_total - _equal_earlier(dep_seq, dep_gkey, dep_w, enter_seq, gkey)
+        before = _sweep_sums(dep_seq, dep_key, dep_w, enter_seq, key, nbits)
+        d_lower, d_equal, d_total = all_lower - before[0], all_equal - before[1], all_total - before[2]
     higher = total - lower - equal
     influence = np.zeros((n, 3))
     influence[ev, 0], influence[ev, 1], influence[ev, 2] = lower, higher, equal
