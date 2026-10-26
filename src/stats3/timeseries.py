@@ -513,20 +513,64 @@ def _make_arima(phi: np.ndarray, theta: np.ndarray, delta: np.ndarray, kappa: fl
             "P": np.zeros((rd, rd), dtype=dtype), "T": t, "V": v, "h": 0.0, "Pn": pn}
 
 
-def _arima_like(y: np.ndarray, mod: dict[str, Any]) -> tuple[Any, Any, int, np.ndarray]:
+_FIXED_POINT = 4 * float(np.finfo(float).eps)
+
+
+def _converged(new: np.ndarray, old: np.ndarray) -> bool:
+    """Whether a prediction covariance has reached its fixed point to within
+    a few units in the last place, in its real and (for complex-step
+    derivatives) its imaginary part separately."""
+    if not np.iscomplexobj(new):
+        return float(np.abs(new - old).max()) <= _FIXED_POINT * float(np.abs(new).max())
+    change = new - old
+    return (float(np.abs(change.real).max()) <= _FIXED_POINT * float(np.abs(new.real).max())
+            and float(np.abs(change.imag).max()) <= _FIXED_POINT * float(np.abs(new.imag).max()))
+
+
+def _arima_like(y: np.ndarray, mod: dict[str, Any], fast: bool = False) -> tuple[Any, Any, int, np.ndarray]:
     """R's ARIMA_Like: the Kalman filter, with the first prediction variance
     the initial Pn; observations with gain of 1e4 or more (the diffuse
     start of differenced models) are left out of the likelihood. Updates
-    the model's state (a, P, Pn) as R does in place, for forecasting."""
+    the model's state (a, P, Pn) as R does in place, for forecasting.
+
+    ``fast`` (for the optimizer only): once the prediction covariance stops
+    changing (after the last missing value), the filter's gain is fixed and
+    its innovations obey the model's own recursion,
+    theta(L) e = phi(L) Delta(L) y, so the rest of the series goes through
+    scipy's lfilter in one call. The innovations agree with the loop's to
+    rounding; the state is then not updated, so the final fit uses the loop."""
+    from scipy.signal import lfilter, lfiltic
+
     t, v, z = mod["T"], mod["V"], mod["Z"]
     a, p, pnew = mod["a"].copy(), mod["P"].copy(), mod["Pn"].copy()
     ssq = sumlog = 0.0
     nu = 0
     resid = np.full(len(y), np.nan, dtype=np.result_type(t, y))
+    raw = np.zeros(len(y), dtype=resid.dtype)  # innovations before scaling
+    if fast:
+        missing = np.flatnonzero(np.isnan(np.real(y)))
+        after = int(missing[-1]) + 1 if len(missing) else 0
+        b_poly = np.convolve(np.r_[1.0, -mod["phi"]], np.r_[1.0, -mod["Delta"]])
+        a_poly = np.r_[1.0, mod["theta"]]
+        warm = max(len(b_poly), len(a_poly))
+    previous = None
     for i, value in enumerate(y):
         anew = t @ a
         if i > 0:
             pnew = t @ p @ t.T + v
+            if fast and i >= after + warm and previous is not None and _converged(pnew, previous):
+                m = pnew @ z
+                gain = z @ m
+                if gain.real < 1e4:
+                    zi = lfiltic(b_poly, a_poly, raw[i - 1::-1][:len(a_poly) - 1], y[i - 1::-1][:len(b_poly) - 1])
+                    tail = lfilter(b_poly, a_poly, y[i:], zi=zi)[0]
+                    count = len(tail)
+                    nu += count
+                    ssq = ssq + np.sum(tail * tail) / gain
+                    sumlog = sumlog + count * np.log(gain)
+                    resid[i:] = tail / np.sqrt(gain)
+                    return ssq, sumlog, nu, resid
+            previous = pnew
         if not np.isnan(value):
             resid0 = value - z @ anew
             m = pnew @ z
@@ -536,6 +580,7 @@ def _arima_like(y: np.ndarray, mod: dict[str, Any]) -> tuple[Any, Any, int, np.n
                 ssq = ssq + resid0 * resid0 / gain
                 sumlog = sumlog + np.log(gain)
             resid[i] = resid0 / np.sqrt(gain)
+            raw[i] = resid0
             a = anew + m * (resid0 / gain)
             p = pnew - np.outer(m, m) / gain
         else:
@@ -554,20 +599,20 @@ def _arima_css(y: np.ndarray, arma: list[int], phi: np.ndarray, theta: np.ndarra
     ns = arma[4]
     for _ in range(arma[6]):
         w[ns:] = w[ns:] - w[:-ns]
+    from scipy.signal import lfilter, lfiltic
+
     p, q = len(phi), len(theta)
     resid = np.zeros(n, dtype=w.dtype)
-    ssq, nu = 0.0, 0
-    for i in range(ncond, n):
-        tmp = w[i]
-        if p:
-            tmp = tmp - phi @ w[i - p:i][::-1]
-        k = min(i - ncond, q)
-        if k:
-            tmp = tmp - theta[:k] @ resid[i - k:i][::-1]
-        resid[i] = tmp
-        if not np.isnan(tmp):
-            nu += 1
-            ssq = ssq + tmp * tmp
+    if ncond < n:
+        # The recursion resid[i] = w[i] - phi . w[i-1..] - theta . resid[i-1..]
+        # from ncond on, with resid before ncond zero, is one linear filter.
+        b_poly, a_poly = np.r_[1.0, -phi], np.r_[1.0, theta]
+        zi = lfiltic(b_poly, a_poly, np.zeros(q, dtype=w.dtype), w[ncond - 1::-1][:p] if ncond else np.zeros(0))
+        resid[ncond:] = lfilter(b_poly, a_poly, w[ncond:], zi=zi)[0]
+    tail = resid[ncond:]
+    ok = ~np.isnan(np.real(tail))
+    nu = int(ok.sum())
+    ssq = np.sum(tail[ok] * tail[ok])
     return ssq / nu, resid
 
 
@@ -795,6 +840,8 @@ class ArimaModel(_Fit):
             phi, theta = _trans_pars(par, arma, False)
             return 0.5 * np.log(_arima_css(regressed(par), arma, phi, theta, ncond)[0])
 
+        fast = True  # the steady-state shortcut while optimizing; the reported fit uses the full filter
+
         def arma_fn(p, trans):
             par = coef.astype(np.result_type(p, float))
             par[mask] = p
@@ -803,7 +850,7 @@ class ArimaModel(_Fit):
                 mod = _make_arima(phi, theta, delta, kappa)
             except np.linalg.LinAlgError:
                 return DOUBLE_XMAX
-            ssq, sumlog, nu, _ = _arima_like(regressed(par), mod)
+            ssq, sumlog, nu, _ = _arima_like(regressed(par), mod, fast)
             return 0.5 * (np.log(ssq / nu) + sumlog / nu)
 
         self.converged = True
@@ -857,6 +904,10 @@ class ArimaModel(_Fit):
                 coef = _undo_pars(coef, arma)
             else:
                 var = None if no_optim else np.linalg.inv(_optim_hess(real_objective, par, scale) * n_used)
+            # The reported value comes from the full filter (the shortcut is used
+            # for the search and the Hessian, where it agrees to rounding).
+            fast = False
+            value = real_objective(par)
             phi, theta = _trans_pars(coef, arma, False)
             mod = _make_arima(phi, theta, delta, kappa)
             ssq, _, _, resid = _arima_like(regressed(coef), mod)
