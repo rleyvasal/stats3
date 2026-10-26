@@ -213,6 +213,26 @@ def _eigh_lapack(A: np.ndarray):
     return values[::-1], vectors[:, ::-1]
 
 
+# Above this many knots the thin-plate basis takes only its k largest-
+# magnitude eigenpairs, by Lanczos iteration (ARPACK), as mgcv does,
+# instead of a full eigen-decomposition (O(n^3): seconds at 2000 knots).
+LANCZOS_FROM = 400
+
+
+def _top_eigen(E: np.ndarray, k: int):
+    """The k eigenpairs of E with largest magnitude, values decreasing."""
+    if len(E) < LANCZOS_FROM or k >= len(E) - 1:
+        values, vectors = _eigh_lapack(E)
+        top = np.argsort(-np.abs(values), kind="stable")[:k]
+    else:
+        from scipy.sparse.linalg import eigsh
+
+        values, vectors = eigsh(E, k=k, which="LM", tol=0, v0=np.ones(len(E)), maxiter=100 * len(E))
+        top = np.arange(k)
+    top = top[np.argsort(-values[top], kind="stable")]  # Lanczos order: descending
+    return values[top], vectors[:, top]
+
+
 def tp_basis(xs: list[np.ndarray], k: int, m: Any, max_knots: int = 2000, seed: int = 1) -> Basis:
     """smooth.construct.tp.smooth.spec with construct_tprs (no supplied knots)."""
     d = len(xs)
@@ -250,10 +270,8 @@ def tp_basis(xs: list[np.ndarray], k: int, m: Any, max_knots: int = 2000, seed: 
     if nu == k:  # pure knot basis: no eigen step
         A, D = np.eye(nu), E
     else:
-        values, vectors = _eigh_lapack(E)
-        top = np.argsort(-np.abs(values), kind="stable")[:k]
-        top = top[np.argsort(-values[top], kind="stable")]  # Lanczos order: descending
-        A, D = vectors[:, top], np.diag(values[top])
+        values, A = _top_eigen(E, k)
+        D = np.diag(values)
     us = _householder_rows(T.T @ A)
     Q = _apply_right(np.eye(A.shape[1]), us)
     UZ = np.zeros((nu + M, k))

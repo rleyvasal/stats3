@@ -53,6 +53,7 @@ from stats3.models import (
 _EPS = np.finfo(float).eps
 _METHODS = ("GCV.Cp", "REML")
 _RHO_MAX = 25.0
+_RHO_FAR = 15.0  # beyond this, a log smoothing parameter heading outward is taken to its limit
 
 
 # formula --------------------------------------------------------------------
@@ -920,6 +921,21 @@ class GeneralizedAdditiveModel(_Fit):
             change = abs(score - new_score)
             moved = float(np.max(np.abs(trial - theta)))
             theta, score, grad = trial, new_score, new_grad
+            # A smoothing parameter already far out (e^15: its smooth is in
+            # its penalty's null space to about 1e-7) and still pulled outward
+            # is at its infinite limit; creeping towards it, with the gradient
+            # decaying like e^-rho, would take every remaining iteration.
+            outward = (np.abs(theta[:M]) > _RHO_FAR) & (np.abs(theta[:M]) < _RHO_MAX) \
+                & (np.sign(theta[:M]) * grad[:M] < 0)
+            if outward.any():
+                trial = theta.copy()
+                trial[:M] = np.where(outward, np.sign(theta[:M]) * _RHO_MAX, theta[:M])
+                try:
+                    limit_score, limit_grad, _ = self._criterion(trial)
+                except (ValueError, np.linalg.LinAlgError):
+                    limit_score = math.inf
+                if limit_score <= score + 1e-14 * abs(score):
+                    theta, score, grad = trial, limit_score, limit_grad
             # Converge tightly: a smoothing parameter heading to infinity
             # (a smooth penalized to its null space) keeps a small gradient,
             # and following it brings results to their limit, as mgcv's are.
