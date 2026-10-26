@@ -4,7 +4,9 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.5.0 — 2026-10-26
+
+The slowest functions brought to R's speed: an optional compiled path for k-means, hclust, dist and the concordance sweep, ports of R's studentized range and Fisher odds-ratio searches, and vectorized survdiff, smooth_spline, Shapiro-Wilk and type II/III anova.
 
 ### Added
 
