@@ -38,12 +38,28 @@ class _Single:
 
 
 class _Gaussian(_Single):
-    def hess(self, z, eta):
-        # The Gaussian Hessian, Z'WZ, does not depend on eta: one per design.
-        cached = getattr(self, "_hess", None)
+    """Squared error, which glmnet fits in "covariance" mode: after one pass
+    over the data for Z'WZ, Z'Wy and y'Wy, every lambda's value and
+    gradient are O(p^2) in the parameters alone (``value_at`` and
+    ``grad_at``), so the path never revisits the rows."""
+
+    def _gram(self, z):
+        cached = getattr(self, "_cache", None)
         if cached is None or cached[0] is not z:
-            self._hess = (z, z.T @ (self.w[:, None] * z))
-        return self._hess[1]
+            wz = self.w[:, None] * z
+            self._cache = (z, z.T @ wz, z.T @ (self.w * self.y), float(self.w @ self.y**2))
+        return self._cache[1:]
+
+    def hess(self, z, eta=None):
+        return self._gram(z)[0]
+
+    def grad_at(self, z, theta):
+        g, b, _ = self._gram(z)
+        return g @ theta - b
+
+    def value_at(self, z, theta):
+        g, b, yy = self._gram(z)
+        return .5 * float(yy - 2 * theta @ b + theta @ g @ theta)
 
     def value(self, eta):
         return .5 * float(self.w @ (self.y - eta)**2)
@@ -301,8 +317,11 @@ def _solve(loss, z, offset, theta, l1, l2, lo, hi, free, maxit, quadratic):
 
     passes = 0
     for _ in range(100):
-        eta = eta_of(theta)
-        g, h = loss.grad(z, eta), loss.hess(z, eta)
+        if quadratic:
+            g, h = loss.grad_at(z, theta), loss.hess(z)
+        else:
+            eta = eta_of(theta)
+            g, h = loss.grad(z, eta), loss.hess(z, eta)
         new, used = _qp(h, h @ theta - g, l1, l2, lo, hi, theta, free, maxit)
         passes += used
         d = new - theta
@@ -470,8 +489,12 @@ class _Path:
         def lambda_max(theta):
             # glmnet starts from the gradient at the first solution (infinite
             # lambda), where unpenalized variables are already fitted.
-            eta = z @ theta.reshape(shape, order="F") + off
-            gradient = np.abs(loss.grad(z, eta).reshape(shape, order="F"))
+            if quadratic:
+                gradient = loss.grad_at(z, theta)
+            else:
+                eta = z @ theta.reshape(shape, order="F") + off
+                gradient = loss.grad(z, eta)
+            gradient = np.abs(gradient.reshape(shape, order="F"))
             if k > 1:
                 gradient = gradient.max(axis=1)
             gradient = gradient[1:]
@@ -508,9 +531,12 @@ class _Path:
                       f"maxit={maxit} iterations; solutions for larger lambdas returned")
                 break
             npasses += used
-            eta = z @ theta.reshape(shape, order="F") + off
             if family == "gaussian":
-                dev = 1 - 2 * loss.value(eta)
+                dev = 1 - 2 * loss.value_at(z, theta)
+            else:
+                eta = z @ theta.reshape(shape, order="F") + off
+            if family == "gaussian":
+                pass
             elif family == "binomial":
                 dev = (null_value - loss.clipped(eta)) / null_dev
             else:

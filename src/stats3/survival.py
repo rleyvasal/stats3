@@ -763,49 +763,133 @@ class _CoxData:
     method: str
 
 
-def _events(cd: _CoxData, beta: np.ndarray, efron: bool):
-    """Per stratum and event time, the risk-set sums R's coxfit6/agfit4 use,
-    expanded to one row per Efron step (one per time for Breslow)."""
-    eta = cd.x @ beta + cd.offset
-    out = []
+@dataclass
+class _Stratum:
+    """One stratum's rows in stop-time order, with everything about them
+    that does not depend on the coefficients: computed once per fit."""
+
+    idx: np.ndarray  # original row numbers, sorted by stop time
+    y: _Response
+    dead: np.ndarray
+    times: np.ndarray  # distinct event times
+    pos: np.ndarray  # each row's event-time index (searchsorted)
+    pos_d: np.ndarray
+    m: int
+    ndead: np.ndarray
+    stop_index: np.ndarray  # suffix-sum positions of the times among the stops
+    start_order: np.ndarray | None  # counting process: rows by start time
+    start_index: np.ndarray | None
+    h_stop: np.ndarray  # number of event times <= each row's stop
+    h_start: np.ndarray | None  # number of event times <= each row's start
+
+
+def _strata(cd: _CoxData) -> list[_Stratum]:
+    layout = cd.__dict__.get("_layout")
+    if layout is not None:
+        return layout
+    layout = []
     for s in np.unique(cd.strata):
-        idx = np.flatnonzero(cd.strata == s)
+        rows = np.flatnonzero(cd.strata == s)
+        idx = rows[np.argsort(cd.y.stop[rows], kind="stable")]
         y = _subset(cd.y, idx)
         dead = y.status == 1
         if not dead.any():
             continue
-        x, w, e = cd.x[idx], cd.w[idx], eta[idx]
+        times = np.unique(y.stop[dead])
+        pos = np.searchsorted(times, y.stop)
+        pos_d = pos[dead]
+        m = len(times)
+        start_order = start_index = h_start = None
+        if y.counting:
+            start_order = np.argsort(y.start, kind="stable")
+            start_index = np.searchsorted(y.start[start_order], times, "left")
+            h_start = np.searchsorted(times, y.start, "right")
+        layout.append(_Stratum(idx, y, dead, times, pos, pos_d, m, np.bincount(pos_d, minlength=m),
+                               np.searchsorted(y.stop, times, "left"), start_order, start_index,
+                               np.searchsorted(times, y.stop, "right"), h_start))
+    cd.__dict__["_layout"] = layout
+    return layout
+
+
+def _stratum_x(cd: _CoxData, k: int, st: _Stratum):
+    """The stratum's covariates and their outer products, gathered once per design."""
+    cache = cd.__dict__.setdefault("_xcache", {})
+    entry = cache.get(k)
+    if entry is None or entry[0] is not cd.x:
+        x = cd.x[st.idx]
+        entry = cache[k] = (cd.x, x, x[:, :, None] * x[:, None, :])
+    return entry[1], entry[2]
+
+
+def _suffix_at(values: np.ndarray, st: _Stratum) -> np.ndarray:
+    """Sum of ``values`` (rows in stop order) over subjects at risk at each
+    event time: start < t <= stop, by suffix sums at precomputed positions."""
+    suffix = np.concatenate([np.cumsum(values[::-1], axis=0)[::-1], np.zeros((1,) + values.shape[1:])])
+    total = suffix[st.stop_index]
+    if st.start_order is not None:
+        by_start = np.concatenate([np.cumsum(values[st.start_order][::-1], axis=0)[::-1],
+                                   np.zeros((1,) + values.shape[1:])])
+        total = total - by_start[st.start_index]
+    return total
+
+
+def _block_sum(values: np.ndarray, st: _Stratum) -> np.ndarray:
+    """``values`` over the dead rows (in time order) summed per event time."""
+    starts = np.cumsum(st.ndead) - st.ndead
+    return np.add.reduceat(values, starts, axis=0)
+
+
+def _events(cd: _CoxData, beta: np.ndarray, efron: bool, second: bool = False):
+    """Per stratum and event time, the risk-set sums R's coxfit6/agfit4 use,
+    expanded to one row per Efron step (one per time for Breslow). Rows come
+    in stop-time order (``idx`` maps them back).
+
+    ``a`` is each row's weight in the second-moment sums: its risk score
+    times the sum of wtave/den over the Efron steps it was at risk for (its
+    cumulative hazard), less its own time's fractional part when it died.
+    The sums over steps of wtave * (S2 - frac D2)/den and of wtave * xb are
+    then x' diag(a) x and x' a, without the n x p x p risk-set sums; those
+    (``s2``, ``d2``) are built only with ``second=True``."""
+    eta = cd.x @ beta + cd.offset
+    out = []
+    for k, st in enumerate(_strata(cd)):
+        idx, y, dead = st.idx, st.y, st.dead
+        x, xx = _stratum_x(cd, k, st)
+        w, e = cd.w[idx], eta[idx]
         shift = float(e.max())
         risk = np.exp(e - shift)
         r = w * risk
-        times = np.unique(y.stop[dead])
-        key = int(s)  # one sort per stratum, reused across Newton steps
-        orders = cd.__dict__.setdefault("_orders", {}).get(key)
-        if orders is None:
-            orders = cd._orders[key] = _risk_orders(y)
-        s0 = _at_risk_sums(y, times, r, orders)
-        s1 = _at_risk_sums(y, times, r[:, None] * x, orders)
-        s2 = _at_risk_sums(y, times, r[:, None, None] * x[:, :, None] * x[:, None, :], orders)
-        pos = np.searchsorted(times, y.stop)
-        pos_d = pos[dead]
-        m, p = len(times), x.shape[1]
+        rx = r[:, None] * x
+        s0, s1 = _suffix_at(r, st), _suffix_at(rx, st)
+        pos, pos_d, m, ndead = st.pos, st.pos_d, st.m, st.ndead
         d0 = np.bincount(pos_d, r[dead], m)
-        d1 = _group_sum(pos_d, r[dead, None] * x[dead], m)
-        d2 = _group_sum(pos_d, r[dead, None, None] * x[dead, :, None] * x[dead, None, :], m)
+        d1 = _block_sum(rx[dead], st)
         deadwt = np.bincount(pos_d, w[dead], m)
-        ndead = np.bincount(pos_d, minlength=m)
         if efron:
             row = np.repeat(np.arange(m), ndead)
-            k = np.arange(len(row)) - np.repeat(np.cumsum(ndead) - ndead, ndead)
-            frac = k / ndead[row]
+            k_ = np.arange(len(row)) - np.repeat(np.cumsum(ndead) - ndead, ndead)
+            frac = k_ / ndead[row]
             wtave = (deadwt / ndead)[row]
+            ends = np.cumsum(ndead) - 1
         else:
             row, frac, wtave = np.arange(m), np.zeros(m), deadwt
+            ends = np.arange(m)
         den = s0[row] - frac * d0[row]
         xb = (s1[row] - frac[:, None] * d1[row]) / den[:, None]
-        out.append(dict(idx=idx, y=y, x=x, w=w, risk=risk, shift=shift, eta=e, dead=dead, times=times,
-                        pos=pos, row=row, frac=frac, wtave=wtave, den=den, xb=xb, s2=s2, d2=d2, m=m,
-                        deadwt=deadwt, ndead=ndead))
+        hz = wtave / den
+        cum = np.r_[0.0, np.cumsum(hz)[ends]]  # cumulative hazard after each event time
+        H = cum[st.h_stop]
+        if st.h_start is not None:
+            H = H - cum[st.h_start]
+        a = r * H
+        a[dead] -= r[dead] * np.bincount(row, frac * hz, m)[pos_d]
+        ev = dict(idx=idx, y=y, x=x, w=w, risk=risk, shift=shift, eta=e, dead=dead, times=st.times,
+                  pos=pos, row=row, frac=frac, wtave=wtave, den=den, xb=xb, a=a, m=m,
+                  deadwt=deadwt, ndead=ndead)
+        if second:
+            rxx = r[:, None, None] * xx
+            ev["s2"], ev["d2"] = _suffix_at(rxx, st), _block_sum(rxx[dead], st)
+        out.append(ev)
     return out
 
 
@@ -815,12 +899,10 @@ def _cox_likelihood(cd: _CoxData, beta: np.ndarray):
     p = cd.x.shape[1]
     loglik, u, imat = 0.0, np.zeros(p), np.zeros((p, p))
     for ev in _events(cd, beta, cd.method == "efron"):
-        dead, w = ev["dead"], ev["w"]
+        dead, w, x, a, xb = ev["dead"], ev["w"], ev["x"], ev["a"], ev["xb"]
         loglik += float(np.sum(w[dead] * ev["eta"][dead]) - np.sum(ev["wtave"] * (np.log(ev["den"]) + ev["shift"])))
-        u += (w[dead, None] * ev["x"][dead]).sum(0) - (ev["wtave"][:, None] * ev["xb"]).sum(0)
-        row, frac = ev["row"], ev["frac"]
-        second = (ev["s2"][row] - frac[:, None, None] * ev["d2"][row]) / ev["den"][:, None, None]
-        imat += np.einsum("k,kij->ij", ev["wtave"], second - ev["xb"][:, :, None] * ev["xb"][:, None, :])
+        u += (w[dead, None] * x[dead]).sum(0) - x.T @ a
+        imat += (x * a[:, None]).T @ x - (xb * ev["wtave"][:, None]).T @ xb
     return loglik, u, imat
 
 
@@ -1024,38 +1106,42 @@ def _concordance(y: _Response, lp, strata, w, cluster):
     query_seq = seq[int(removed.sum()) + n:]
     rows = np.arange(n)
     ev = rows[event]
+    q_key, q_gkey = key[ev], gkey[ev]
     # Event side: active rows' weight below, above and equal to each event's predictor.
     item_seq = np.r_[enter_seq, remove_seq]
     item_key = np.r_[key, key[removed]]
     item_gkey = np.r_[gkey, gkey[removed]]
     item_w = np.r_[w, -w[removed]]
-    q_key, q_gkey = key[ev], gkey[ev]
-
-    def below(ikey, qkey):
-        return _earlier(item_seq, ikey, item_w, query_seq, qkey, nbits)
-
-    lower = below(item_key, q_key)
+    lower = _earlier(item_seq, item_key, item_w, query_seq, q_key, nbits)
     equal = _equal_earlier(item_seq, item_key, item_w, query_seq, q_key)
     total = _equal_earlier(item_seq, item_gkey, item_w, query_seq, q_gkey)
+    # Row side: the weight of events a row was compared with, while at risk,
+    # whose predictor is above (concordant), below or equal to its own.
+    dep_seq, dep_key, dep_gkey, dep_w = query_seq, key[ev], gkey[ev], w[ev]
+    if removed.any():
+        end_seq = np.full(n, _SEQ_END, dtype=np.int64)
+        end_seq[removed] = remove_seq
+        both_seq = np.r_[end_seq, enter_seq]
+
+        def window(values):
+            # deposits before the row left, minus those before it entered
+            return values[:n] - values[n:]
+
+        d_lower = window(_earlier(dep_seq, dep_key, dep_w, both_seq, np.r_[key, key], nbits))  # events below the row
+        d_equal = window(_equal_earlier(dep_seq, dep_key, dep_w, both_seq, np.r_[key, key]))
+        d_total = window(_equal_earlier(dep_seq, dep_gkey, dep_w, both_seq, np.r_[gkey, gkey]))
+    else:
+        # Right-censored rows never leave: deposits while at risk are all of
+        # them (a count by key alone) minus those before the row entered.
+        all_lower, all_equal, all_total = _by_key(dep_key, dep_w, key, nbits)
+        d_lower = all_lower - _earlier(dep_seq, dep_key, dep_w, enter_seq, key, nbits)
+        d_equal = all_equal - _equal_earlier(dep_seq, dep_key, dep_w, enter_seq, key)
+        d_total = all_total - _equal_earlier(dep_seq, dep_gkey, dep_w, enter_seq, gkey)
     higher = total - lower - equal
     influence = np.zeros((n, 3))
     influence[ev, 0], influence[ev, 1], influence[ev, 2] = lower, higher, equal
     counts = np.zeros(5)
     counts[0], counts[1], counts[2] = w[ev] @ lower, w[ev] @ higher, w[ev] @ equal
-    # Row side: the weight of events a row was compared with, while at risk,
-    # whose predictor is above (concordant), below or equal to its own.
-    dep_seq, dep_key, dep_gkey, dep_w = query_seq, key[ev], gkey[ev], w[ev]
-    end_seq = np.full(n, _SEQ_END, dtype=np.int64)
-    end_seq[removed] = remove_seq
-    both_seq = np.r_[end_seq, enter_seq]
-
-    def window(values):
-        # deposits before the row left, minus those before it entered
-        return values[:n] - values[n:]
-
-    d_lower = window(_earlier(dep_seq, dep_key, dep_w, both_seq, np.r_[key, key], nbits))  # events below the row
-    d_equal = window(_equal_earlier(dep_seq, dep_key, dep_w, both_seq, np.r_[key, key]))
-    d_total = window(_equal_earlier(dep_seq, dep_gkey, dep_w, both_seq, np.r_[gkey, gkey]))
     influence[:, 0] += d_total - d_lower - d_equal
     influence[:, 1] += d_lower
     influence[:, 2] += d_equal
@@ -1076,6 +1162,20 @@ def _concordance(y: _Response, lp, strata, w, cluster):
     if cluster is not None:
         dfbeta = np.bincount(cluster, dfbeta)
     return counts, (somer + 1) / 2, math.sqrt(float(np.sum(dfbeta ** 2)))
+
+
+def _by_key(item_key, item_w, query_key, nbits):
+    """For each query, the weight of all items with a lower key, an equal key,
+    and any key in its group (keys are group * 2**nbits + rank)."""
+    order = np.argsort(item_key, kind="stable")
+    sorted_key, cum = item_key[order], np.r_[0.0, np.cumsum(item_w[order])]
+
+    def upto(keys, side):
+        return cum[np.searchsorted(sorted_key, keys, side)]
+
+    group_start = (query_key >> nbits) << nbits
+    lower, at = upto(query_key, "left"), upto(group_start, "left")
+    return lower - at, upto(query_key, "right") - lower, upto(group_start + (1 << nbits), "left") - at
 
 
 def _equal_earlier(item_seq, item_key, item_w, query_seq, query_key):
@@ -1167,8 +1267,7 @@ class CoxModel(_Fit):
             u = collapsed.sum(0)
             self.robust_score = _wtest(collapsed.T @ collapsed, u)
         self.wald = _wtest(self.var, self.beta - (0 if init is None else init)) if p else None
-        self.concordance = _concordance(self.y, self.linear_predictors, self.strata, w,
-                                        self.cluster if spec.cluster is not None else None)
+        self._concordance_cache = None
 
     # -- tables --------------------------------------------------------------------------
 
@@ -1233,6 +1332,16 @@ class CoxModel(_Fit):
                "nobs": self.nevent}
         schema = {k: (pl.Int64 if k == "n" else pl.Float64) for k in row}
         return self._with_key(pl.DataFrame([row], schema=schema))
+
+    @property
+    def concordance(self):
+        """R's concordance counts, Harrell's C and its standard error, as
+        ``coxph`` reports them; computed on first use (``glance`` asks), since
+        the fit itself needs none of it and it costs as much as the fit."""
+        if self._concordance_cache is None:
+            self._concordance_cache = _concordance(self.y, self.linear_predictors, self.strata, self.prior_weights,
+                                                   self.cluster if self.spec.cluster is not None else None)
+        return self._concordance_cache
 
     # -- prediction ---------------------------------------------------------------------
 
@@ -1591,7 +1700,7 @@ def _zph(fit: CoxModel, transform, terms, global_):
     cd = fit.cd
     u2 = np.zeros(p)
     imat = np.zeros((2 * p, 2 * p))
-    for ev in _events(cd, fit.beta, fit.method == "efron"):
+    for ev in _events(cd, fit.beta, fit.method == "efron", second=True):
         dead, w = ev["dead"], ev["w"]
         g_time = np.zeros(ev["m"])
         g_time[ev["pos"][dead]] = gtime[ev["idx"]][dead]
