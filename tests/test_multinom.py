@@ -57,6 +57,20 @@ def fits(request):
 LOOSE = {c: (1e-5, 1e-8) for c in ('estimate', 'std_error', 'statistic', 'conf_low', 'conf_high')}
 LOOSE.update(p_value=(1e-4, 1e-15), **{c: (1e-5, 1e-6) for c in (*SPECIES, 'female', 'male')})
 
+# Where nnet stops depends on the platform's rounding: on x86-64 it stopped
+# 4e-8 above the minimum deviance for 'species ~ flipper' (1.3e-10 relative),
+# which moves the coefficients by up to 7e-4 relative, and restarting it from
+# its own weights stops at once. stats3's deviance must never be above
+# nnet's. Where nnet's is measurably higher (relative gap over STOPPED_SHORT),
+# its tables are compared at the accuracy that gap allows.
+STOPPED_SHORT = 1e-11
+SHORT_LOOSE = (1e-3, 1e-6)
+
+
+def _r_deviance(expected):
+    glance_table = expected['glance']
+    return glance_table['data'][glance_table['columns'].index('deviance')][0]
+
 
 @pytest.mark.parametrize('table', ['tidy', 'vcov', 'probs', 'class', 'new_probs', 'new_class', 'glance'])
 def test_tables_match_r(fits, table):
@@ -69,9 +83,14 @@ def test_tables_match_r(fits, table):
                   'glance': lambda: glance(fit)}[table]()
         expected = _oracle('multinom')[name]
         assert expected['converged']
+        r_deviance = _r_deviance(expected)
+        gap = (r_deviance - fit.deviance) / fit.deviance
+        assert gap > -1e-12, f"{name}: stats3's deviance {fit.deviance} is above nnet's {r_deviance}"
         loose = dict(LOOSE)
         if table == 'vcov':
             loose.update({n: (2e-5, 1e-9) for n in fit.parameter_names})
+        if gap > STOPPED_SHORT and table not in ('glance', 'class', 'new_class'):
+            loose = {c: SHORT_LOOSE for c in expected[table]['columns']}
         assert_matches_r(actual, expected[table], loose=loose)
 
 
