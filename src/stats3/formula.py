@@ -422,10 +422,10 @@ def build_design(
         # The first variable varies fastest, as in R.
         for combo in itertools.product(*[range(len(p[0])) for p in reversed(pieces)]):
             combo = combo[::-1]
-            col = np.ones(n)
+            col = None
             parts = []
             for (labels, cols), k in zip(pieces, combo):
-                col = col * cols[k]
+                col = cols[k] if col is None else col * cols[k]  # 1 * x is x: a lone column is itself
                 parts.append(labels[k])
             blocks.append(col[:, None])
             names.append(":".join(parts))

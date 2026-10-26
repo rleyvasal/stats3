@@ -938,8 +938,11 @@ def _frames(data, formula, weights, offset, verb, na_action, extra=None):
     out = []
     for frame in frames:
         design = build_design(parsed, frame.variables, len(frame.weights))
+        # glmnet fits its own intercept: the design without that column (a
+        # view, since the intercept is always the first column).
         keep = [j for j, name in enumerate(design.names) if name != "(Intercept)"]
-        out.append((frame, design, design.matrix[:, keep], [design.names[j] for j in keep]))
+        x = design.matrix[:, 1:] if keep and keep[0] == 1 and len(keep) == design.matrix.shape[1] - 1 else design.matrix[:, keep]
+        out.append((frame, design, x, [design.names[j] for j in keep]))
     used_offset = offset is not None or bool(parsed.offsets)
     return parsed, survival, out, used_offset
 

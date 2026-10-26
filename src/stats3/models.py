@@ -392,8 +392,9 @@ def _model_frames(
     ).collect()
     # R's na.omit: rows missing (NA or NaN) in any model variable go.
     keep = pl.lit(True)
+    schema = frame.schema  # built once: each access makes a new Schema
     for name in exprs:
-        dtype = frame.schema[name]
+        dtype = schema[name]
         ok = pl.col(name).is_not_null()
         if dtype.is_float():
             ok = ok & pl.col(name).is_not_nan()
@@ -404,7 +405,7 @@ def _model_frames(
     dropped = frame.height < height
     if na_action == "fail" and dropped:
         raise ValueError(f"{verb}(): missing values in the model's variables (na_action='fail')")
-    floats = [name for name in exprs if frame.schema[name].is_float()]
+    floats = [name for name in exprs if schema[name].is_float()]
     if floats:  # one query for every column
         infinite = frame.select([pl.col(name).is_infinite().any() for name in floats]).row(0)
         for name, bad in zip(floats, infinite):
