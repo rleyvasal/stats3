@@ -104,7 +104,10 @@ multinom_emm_cases <- function(row) {
   out$multinom_latent <- row(emmeans(f, ~ species | sex, mode="latent"), c("sex", "species"))
   out$multinom_species <- row(emmeans(f, "species"), "species")
   out$multinom_proportional <- row(emmeans(f, ~ species | sex, weights="proportional"), c("sex", "species"))
-  out$multinom_weighted <- row(emmeans(fit(d$w), ~ species | sex), c("sex", "species"))
+  weighted <- fit(d$w)
+  out$multinom_weighted <- row(emmeans(weighted, ~ species | sex), c("sex", "species"))
+  # Where nnet stopped (its deviance), to judge the accuracy the means can have.
+  out$multinom_deviance <- data.frame(plain=f$deviance, weighted=weighted$deviance)
   out
 }
 

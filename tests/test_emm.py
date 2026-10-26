@@ -230,7 +230,16 @@ def test_multinom_emmeans_matches_r(name, backend, r_emmeans):
     assert type(result) is type(frame)
     # nnet reaches the MLE to about 1e-5 (see test_multinom), so the means,
     # which are smooth functions of the coefficients, agree to that accuracy.
-    loose = {c: (5e-5, 1e-6) for c in ("estimate", "std_error", "statistic", "conf_low", "conf_high")}
+    # Where nnet stops depends on the platform's rounding; where its deviance
+    # is measurably above stats3's (it stopped short), compare at 1e-3, as
+    # test_multinom does.
+    deviance = r_emmeans["multinom_deviance"]
+    column = "weighted" if name == "multinom_weighted" else "plain"
+    r_deviance = deviance["data"][deviance["columns"].index(column)][0]
+    ours = _multinom(_multinom_data(), **({"weights": "w"} if column == "weighted" else {})).deviance
+    assert (r_deviance - ours) / ours > -1e-12
+    rel = 1e-3 if (r_deviance - ours) / ours > 1e-11 else 5e-5
+    loose = {c: (rel, 1e-6) for c in ("estimate", "std_error", "statistic", "conf_low", "conf_high")}
     loose["p_value"] = (1e-4, 1e-9)
     assert_matches_r(result, r_emmeans[name], loose=loose)
 
