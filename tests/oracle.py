@@ -189,9 +189,23 @@ def assert_matches_r(result, expected: dict, *, rel: float = 1e-9, loose: dict |
                 tol, absolute = tol
             assert [h for h, _ in pairs] == pytest.approx(
                 [w for _, w in pairs], rel=tol, abs=absolute
-            ), name
+            ), _worst(name, pairs, tol, absolute)
         else:
             assert have == want, name
+
+
+def _worst(name: str, pairs: list, rel: float, absolute: float) -> str:
+    """The failing column with its largest difference, so a CI log shows how
+    far apart the numbers are, not only which column."""
+    rows = [(i, h, w) for i, (h, w) in enumerate(pairs) if h is None or not math.isclose(h, w, rel_tol=rel, abs_tol=absolute)]
+    if not rows:
+        return name
+    def size(row):
+        _, h, w = row
+        return math.inf if h is None else abs(h - w) / max(abs(w), 1e-300)
+    i, h, w = max(rows, key=size)
+    return (f"{name}: {len(rows)} of {len(pairs)} values off; worst row {i}: "
+            f"got {h!r}, R {w!r} (relative {size((i, h, w)):.2e}, tolerance {rel:g})")
 
 
 def assert_same_frame(have: pl.DataFrame, want: pl.DataFrame, rel: float = 1e-12) -> None:

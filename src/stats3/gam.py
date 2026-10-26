@@ -862,13 +862,22 @@ class GeneralizedAdditiveModel(_Fit):
         """magic's last step, which checks for optima at infinity: each log
         smoothing parameter in turn moves by 2, against the sign of its
         gradient at convergence, up to 5 times while the GCV score falls,
-        and stays there, even past a local minimum. At an exact optimum the
-        gradient's sign is rounding noise, so when GCV has several local
-        minima this step can end in a different one from mgcv's."""
+        and stays there, even past a local minimum.
+
+        stats3 converges more tightly than mgcv, so a component of its
+        gradient here can be rounding noise (a few units in the last place,
+        about 1e-16 on a score near 1), whose sign differs between machines;
+        following it sent one fit into a different local minimum on x86-64
+        than on arm64. A gradient below that floor carries no direction, so
+        the step then tries larger smoothing parameters (the smoother fit), as
+        mgcv does in the cases checked. Gradients above it (2e-14 and up in
+        those cases) are real, and mgcv follows them too. Every machine then
+        makes the same choice."""
         score, grad, _ = self._criterion(theta)
         theta = theta.copy()
+        noise = 1e-15 * (abs(score) + 1)
         for k in range(len(self.S)):
-            sign = 1.0 if grad[k] < 0 else -1.0
+            sign = 1.0 if grad[k] < noise else -1.0
             for _ in range(5):
                 trial = theta.copy()
                 trial[k] += 2 * sign

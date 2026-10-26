@@ -77,6 +77,14 @@ jobs:
   # Every R comparison, against R's own results.
   r-oracle:
     name: R oracle
+    # R's results and stats3's depend on which OpenBLAS kernels run: the
+    # runners' CPUs vary, and OpenBLAS picks kernels by CPU, which moves
+    # last bits that decide ties and near-degenerate choices, in R as well
+    # as in NumPy. One kernel family and one thread make every run compute
+    # alike.
+    env:
+      OPENBLAS_CORETYPE: Nehalem
+      OPENBLAS_NUM_THREADS: "1"
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

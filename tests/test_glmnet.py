@@ -103,7 +103,9 @@ SCALE = {"binomial": 5e-6, "binomial_offset": 5e-6, "multinomial": 1e-4, "cox": 
          "default_gaussian": 1e-2, "default_binomial": 1e-4}
 
 
-def _loose(expected, tol):
+def _loose(expected, tol, scale=None):
+    """Absolute tolerances: ``tol`` times each column's largest value, or
+    times ``scale`` for every column when one is given."""
     names = expected["columns"]
     names = [names] if isinstance(names, str) else names
     data = expected["data"]
@@ -112,6 +114,9 @@ def _loose(expected, tol):
     for name, values in zip(names, data):
         numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
         if numbers and name not in ("step", "nobs", "nzero", "lambda"):
+            if scale is not None:
+                out[name] = (0.0, tol * scale)
+                continue
             out[name] = (0.0, tol * max(1.0, max(abs(v) for v in numbers)) if name == "nulldev"
                          else tol * max(abs(v) for v in numbers) + 1e-12)
     return out
@@ -151,9 +156,17 @@ def test_cross_validation_matches_r(name, backend):
         pytest.skip("R oracle unavailable")
     fit = _cv(name, backend)
     expected = _oracle("glmnet")["cv"][name]
-    tol = 2e-4 if name in ("cox", "cindex") else 1e-4 if name.startswith("multinomial") else 1e-6
+    # Harrell's C counts concordant pairs, so it moves in steps: glmnet's
+    # coordinate descent stops at thresh, which leaves predictions about 1e-7
+    # apart, enough to reorder a nearly tied pair; one pair in one fold moves
+    # the fold-averaged C by about 1e-4. The C-index case allows a few such
+    # pairs (it reordered two under one OpenBLAS kernel family).
+    tol = 1e-3 if name == "cindex" else 2e-4 if name == "cox" else 1e-4 if name.startswith("multinomial") else 1e-6
     for table, actual in (("tidy", tidy(fit)), ("glance", glance(fit)), ("coef", coef(fit))):
-        assert_matches_r(actual, expected[table], loose=_loose(expected[table], tol))
+        # A reordered pair moves C and its fold SD by the same absolute amount,
+        # so the C-index columns share C's own 0-1 scale.
+        scale = 1.0 if name == "cindex" and table == "tidy" else None
+        assert_matches_r(actual, expected[table], loose=_loose(expected[table], tol, scale))
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
