@@ -4,7 +4,9 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.4.0 — 2026-10-26
+
+Closing gaps in the models already here: correlated random effects in lmer, weight decay, count responses and marginal means for multinom, left- and interval-censored survival data with Turnbull's estimator, and Kaplan-Meier curves with non-integer weights.
 
 ### Added
 
