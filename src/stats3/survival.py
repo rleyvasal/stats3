@@ -324,15 +324,31 @@ class _Kept:
 # risk sets -----------------------------------------------------------------------------
 
 
-def _at_risk_sums(y: _Response, times: np.ndarray, values: np.ndarray) -> np.ndarray:
+def _risk_orders(y: _Response):
+    """The orders of the stop (and start) times that ``_at_risk_sums`` sorts by."""
+    return (np.argsort(y.stop, kind="stable"),
+            np.argsort(y.start, kind="stable") if y.counting else None)
+
+
+def _group_sum(index: np.ndarray, values: np.ndarray, m: int) -> np.ndarray:
+    """``values`` (rows, any trailing shape) summed into ``m`` groups by
+    ``index``: np.add.at's result, by one bincount per column (much faster)."""
+    flat = values.reshape(len(values), -1)
+    out = np.column_stack([np.bincount(index, flat[:, j], m) for j in range(flat.shape[1])]) if flat.shape[1] \
+        else np.zeros((m, 0))
+    return out.reshape((m,) + values.shape[1:])
+
+
+def _at_risk_sums(y: _Response, times: np.ndarray, values: np.ndarray, orders=None) -> np.ndarray:
     """Sum of ``values`` (rows) over subjects at risk at each time:
-    start < t <= stop."""
-    order = np.argsort(y.stop, kind="stable")
+    start < t <= stop. ``orders`` is ``_risk_orders(y)``, when already known."""
+    stop_order, start_order = orders if orders is not None else _risk_orders(y)
+    order = stop_order
     stops = y.stop[order]
     suffix = np.concatenate([np.cumsum(values[order][::-1], axis=0)[::-1], np.zeros((1,) + values.shape[1:])])
     total = suffix[np.searchsorted(stops, times, "left")]
     if y.counting:
-        order = np.argsort(y.start, kind="stable")
+        order = start_order
         starts = y.start[order]
         suffix = np.concatenate([np.cumsum(values[order][::-1], axis=0)[::-1], np.zeros((1,) + values.shape[1:])])
         total = total - suffix[np.searchsorted(starts, times, "left")]
@@ -763,16 +779,19 @@ def _events(cd: _CoxData, beta: np.ndarray, efron: bool):
         risk = np.exp(e - shift)
         r = w * risk
         times = np.unique(y.stop[dead])
-        s0 = _at_risk_sums(y, times, r)
-        s1 = _at_risk_sums(y, times, r[:, None] * x)
-        s2 = _at_risk_sums(y, times, r[:, None, None] * x[:, :, None] * x[:, None, :])
+        key = int(s)  # one sort per stratum, reused across Newton steps
+        orders = cd.__dict__.setdefault("_orders", {}).get(key)
+        if orders is None:
+            orders = cd._orders[key] = _risk_orders(y)
+        s0 = _at_risk_sums(y, times, r, orders)
+        s1 = _at_risk_sums(y, times, r[:, None] * x, orders)
+        s2 = _at_risk_sums(y, times, r[:, None, None] * x[:, :, None] * x[:, None, :], orders)
         pos = np.searchsorted(times, y.stop)
         pos_d = pos[dead]
         m, p = len(times), x.shape[1]
         d0 = np.bincount(pos_d, r[dead], m)
-        d1, d2 = np.zeros((m, p)), np.zeros((m, p, p))
-        np.add.at(d1, pos_d, r[dead, None] * x[dead])
-        np.add.at(d2, pos_d, r[dead, None, None] * x[dead, :, None] * x[dead, None, :])
+        d1 = _group_sum(pos_d, r[dead, None] * x[dead], m)
+        d2 = _group_sum(pos_d, r[dead, None, None] * x[dead, :, None] * x[dead, None, :], m)
         deadwt = np.bincount(pos_d, w[dead], m)
         ndead = np.bincount(pos_d, minlength=m)
         if efron:
@@ -887,10 +906,10 @@ def _cox_residuals(cd: _CoxData, beta: np.ndarray, efron: bool):
         m, row, frac = ev["m"], ev["row"], ev["frac"]
         haz = ev["wtave"] / ev["den"]
         h = np.bincount(row, haz, m)
-        hx = np.zeros((m, p)); np.add.at(hx, row, haz[:, None] * ev["xb"])
+        hx = _group_sum(row, haz[:, None] * ev["xb"], m)
         hd = np.bincount(row, frac * haz, m)
-        hdx = np.zeros((m, p)); np.add.at(hdx, row, (frac * haz)[:, None] * ev["xb"])
-        xbar = np.zeros((m, p)); np.add.at(xbar, row, ev["xb"])
+        hdx = _group_sum(row, (frac * haz)[:, None] * ev["xb"], m)
+        xbar = _group_sum(row, ev["xb"], m)
         xbar /= np.bincount(row, minlength=m)[:, None]
         cum_h, cum_hx = np.r_[0, np.cumsum(h)], np.vstack([np.zeros(p), np.cumsum(hx, 0)])
         y, times = ev["y"], ev["times"]
@@ -909,37 +928,160 @@ def _cox_residuals(cd: _CoxData, beta: np.ndarray, efron: bool):
     return expected, score
 
 
+def _earlier(item_seq, item_key, item_w, query_seq, query_key, nbits):
+    """For each query, the weight of items earlier in the sweep (smaller
+    seq) whose key is below the query's, among items in the same group: keys
+    are (group, rank) pairs encoded as group * 2**nbits + rank. Counted bit
+    by bit: an item ranks below a query exactly when, at the highest bit
+    where they differ, the item has 0 and the query 1, with the higher bits
+    (and the group) equal. Everything is put in sweep order once; each bit
+    level is then a stable sort by its key (a radix sort once the key fits in
+    16 bits) and a cumulative sum, so the count is vectorized."""
+    n_items = len(item_seq)
+    seq = np.r_[item_seq, query_seq]
+    by_seq = np.argsort(seq)
+    key = np.r_[item_key, query_key][by_seq]
+    weight = np.r_[item_w, np.zeros(len(query_seq))][by_seq]
+    is_query = by_seq >= n_items
+    group, rank = key >> nbits, key & ((1 << nbits) - 1)
+    out = np.zeros(len(seq))
+    for level in range(nbits):
+        bit = (rank >> level) & 1
+        use = (is_query & (bit == 1)) | (~is_query & (bit == 0))
+        if not use.any():
+            continue
+        high = nbits - level - 1
+        level_key = (group[use] << high) | (rank[use] >> (level + 1))
+        level_w = np.where(is_query[use], 0.0, weight[use])
+        order = np.argsort(_compact(level_key), kind="stable")  # keeps sweep order within a key
+        sorted_key, total = level_key[order], np.cumsum(level_w[order])
+        first = np.r_[True, sorted_key[1:] != sorted_key[:-1]]
+        base = np.maximum.accumulate(np.where(first, np.arange(len(order)), 0))
+        within = np.empty(len(order))
+        within[order] = total - (total - level_w[order])[base]
+        out[np.flatnonzero(use)] += np.where(is_query[use], within, 0.0)
+    result = np.empty(len(seq))
+    result[by_seq] = out
+    return result[n_items:]
+
+
+def _compact(keys):
+    """Nonnegative keys as 16-bit integers when they fit, so NumPy's stable
+    sort uses radix sort; otherwise unchanged."""
+    return keys.astype(np.uint16) if len(keys) and int(keys.max()) < 1 << 16 else keys
+
+
+def _group_prefix(keys, seq, weights, n_items):
+    """For each query (the entries after the first ``n_items``), the summed
+    weight of items with the same key and a smaller seq. ``seq`` holds
+    distinct integers (``_SEQ_END`` for after everything)."""
+    keys = np.asarray(keys, dtype=np.int64)
+    span = _SEQ_END + 1
+    if len(keys) and int(keys.max()) < (1 << 32):
+        order = np.argsort(keys * span + seq)  # one integer key, unique: no stable sort needed
+    else:
+        order = np.lexsort((seq, keys))
+    sorted_keys, total = keys[order], np.cumsum(weights[order])
+    first = np.r_[True, sorted_keys[1:] != sorted_keys[:-1]]
+    base = np.maximum.accumulate(np.where(first, np.arange(len(order)), 0))
+    within = total - (total - weights[order])[base]
+    result = np.empty(len(order))
+    result[order] = within
+    return result[n_items:]
+
+
+_SEQ_END = 1 << 30  # a sweep position after every other
+
+
 def _concordance(y: _Response, lp, strata, w, cluster):
     """survival's concordancefit(reverse=TRUE): counts and the infinitesimal
-    jackknife standard error."""
+    jackknife standard error.
+
+    An event at time t is compared with every row at risk then: start < t,
+    and stop > t or censored at t. A sweep down the times (rows leave at
+    their start, censored rows enter at their stop before the events there,
+    event rows after them) makes "at risk" mean "earlier in the sweep", so
+    each event's concordant, discordant and tied weights, and each row's
+    share of the events it was compared with, are prefix sums by rank of the
+    linear predictor (see ``_earlier``)."""
     n = len(lp)
-    counts = np.zeros(5)
+    strata = np.asarray(strata, dtype=np.int64)
+    event = y.status == 1
+    _, rank = np.unique(lp, return_inverse=True)
+    nbits = max(1, int(rank.max()).bit_length() if n else 1)
+    group = np.unique(strata, return_inverse=True)[1].astype(np.int64)
+    key = (group << nbits) | rank.astype(np.int64)
+    gkey = group << nbits
+    # The sweep: by time, descending; at one time removals (start >= t), then
+    # censored rows entering, then the events' queries, then event rows entering.
+    removed = np.isfinite(y.start)
+    times = np.r_[y.start[removed], y.stop, y.stop[event]]
+    phase = np.r_[np.zeros(int(removed.sum())), np.where(event, 3, 1), np.full(int(event.sum()), 2)]
+    order = np.lexsort((phase, -times))
+    seq = np.empty(len(times), dtype=np.int64)
+    seq[order] = np.arange(len(times))
+    remove_seq, enter_seq = seq[:int(removed.sum())], seq[int(removed.sum()):int(removed.sum()) + n]
+    query_seq = seq[int(removed.sum()) + n:]
+    rows = np.arange(n)
+    ev = rows[event]
+    # Event side: active rows' weight below, above and equal to each event's predictor.
+    item_seq = np.r_[enter_seq, remove_seq]
+    item_key = np.r_[key, key[removed]]
+    item_gkey = np.r_[gkey, gkey[removed]]
+    item_w = np.r_[w, -w[removed]]
+    q_key, q_gkey = key[ev], gkey[ev]
+
+    def below(ikey, qkey):
+        return _earlier(item_seq, ikey, item_w, query_seq, qkey, nbits)
+
+    lower = below(item_key, q_key)
+    equal = _equal_earlier(item_seq, item_key, item_w, query_seq, q_key)
+    total = _equal_earlier(item_seq, item_gkey, item_w, query_seq, q_gkey)
+    higher = total - lower - equal
     influence = np.zeros((n, 3))
-    for s in np.unique(strata):
-        idx = np.flatnonzero(strata == s)
-        st, sp, ev, x, ww = y.start[idx], y.stop[idx], y.status[idx], lp[idx], w[idx]
-        for i in np.flatnonzero(ev == 1):
-            t = sp[i]
-            comp = (st < t) & ((sp > t) | ((sp == t) & (ev == 0)))
-            tied_y = (sp == t) & (ev == 1) & (np.arange(len(idx)) > i)
-            weight = ww[i] * ww
-            conc = comp & (x[i] > x)
-            disc = comp & (x[i] < x)
-            tie = comp & (x[i] == x)
-            counts[0] += weight[conc].sum()
-            counts[1] += weight[disc].sum()
-            counts[2] += weight[tie].sum()
-            counts[3] += weight[tied_y & (x != x[i])].sum()
-            counts[4] += weight[tied_y & (x == x[i])].sum()
-            for k, mask in enumerate((conc, disc, tie)):
-                influence[idx[i], k] += ww[mask].sum()
-                influence[idx[mask], k] += ww[i]
+    influence[ev, 0], influence[ev, 1], influence[ev, 2] = lower, higher, equal
+    counts = np.zeros(5)
+    counts[0], counts[1], counts[2] = w[ev] @ lower, w[ev] @ higher, w[ev] @ equal
+    # Row side: the weight of events a row was compared with, while at risk,
+    # whose predictor is above (concordant), below or equal to its own.
+    dep_seq, dep_key, dep_gkey, dep_w = query_seq, key[ev], gkey[ev], w[ev]
+    end_seq = np.full(n, _SEQ_END, dtype=np.int64)
+    end_seq[removed] = remove_seq
+    both_seq = np.r_[end_seq, enter_seq]
+
+    def window(values):
+        # deposits before the row left, minus those before it entered
+        return values[:n] - values[n:]
+
+    d_lower = window(_earlier(dep_seq, dep_key, dep_w, both_seq, np.r_[key, key], nbits))  # events below the row
+    d_equal = window(_equal_earlier(dep_seq, dep_key, dep_w, both_seq, np.r_[key, key]))
+    d_total = window(_equal_earlier(dep_seq, dep_gkey, dep_w, both_seq, np.r_[gkey, gkey]))
+    influence[:, 0] += d_total - d_lower - d_equal
+    influence[:, 1] += d_lower
+    influence[:, 2] += d_equal
+    # Events tied in time (same stratum): pairs tied in the predictor or not.
+    if event.any():
+        tk = np.unique(np.c_[group[ev], y.stop[ev]], axis=0, return_inverse=True)[1].ravel()
+        xk = np.unique(np.c_[tk, rank[ev]], axis=0, return_inverse=True)[1].ravel()
+
+        def pairs(k):
+            s, s2 = np.bincount(k, w[ev]), np.bincount(k, w[ev] ** 2)
+            return float(np.sum((s ** 2 - s2) / 2))
+
+        all_pairs, x_pairs = pairs(tk), pairs(xk)
+        counts[3], counts[4] = all_pairs - x_pairs, x_pairs
     npair = counts[:3].sum()
     somer = (counts[0] - counts[1]) / npair if npair > 0 else np.nan
     dfbeta = ((influence[:, 0] - influence[:, 1]) - influence.sum(1) * somer) * w / (2 * npair)
     if cluster is not None:
         dfbeta = np.bincount(cluster, dfbeta)
     return counts, (somer + 1) / 2, math.sqrt(float(np.sum(dfbeta ** 2)))
+
+
+def _equal_earlier(item_seq, item_key, item_w, query_seq, query_key):
+    """For each query, the weight of earlier items with exactly its key."""
+    return _group_prefix(np.r_[item_key, query_key], np.r_[item_seq, query_seq],
+                         np.r_[item_w, np.zeros(len(query_seq))], len(item_seq))
 
 
 def _wtest(var, b):
@@ -1187,7 +1329,7 @@ class CoxModel(_Fit):
             with np.errstate(divide="ignore", invalid="ignore"):
                 if efron:
                     erisk = np.bincount(pos, wr * dead, len(times))
-                    xsum2 = np.zeros((len(times), p)); np.add.at(xsum2, pos, (wr * dead)[:, None] * x)
+                    xsum2 = _group_sum(pos, (wr * dead)[:, None] * x, len(times))
                     sum1, sum2, xb = np.zeros(len(times)), np.zeros(len(times)), np.zeros((len(times), p))
                     for i in range(len(times)):
                         d = int(ndeath[i])
