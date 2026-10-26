@@ -38,6 +38,13 @@ class _Single:
 
 
 class _Gaussian(_Single):
+    def hess(self, z, eta):
+        # The Gaussian Hessian, Z'WZ, does not depend on eta: one per design.
+        cached = getattr(self, "_hess", None)
+        if cached is None or cached[0] is not z:
+            self._hess = (z, z.T @ (self.w[:, None] * z))
+        return self._hess[1]
+
     def value(self, eta):
         return .5 * float(self.w @ (self.y - eta)**2)
 
