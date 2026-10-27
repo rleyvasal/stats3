@@ -4,11 +4,17 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.5.1 — 2026-10-26
+
+Less overhead in arima, loess, the concordance, smooth_spline and glmnet's formula path.
 
 ### Changed
 
 - Faster, with the same results: `arima` makes one full Kalman pass at the optimum (for the reported likelihood, the residuals and the forecast state) instead of two, and with `stats3[fast]` the filter loop runs compiled (10k points: 0.24 s to 0.10 s); `loess` with one predictor interpolates every point at once through the blend's vertex weights (5k rows: 0.07 s to 0.007 s); `coxph`'s concordance sweep indexes its tree by the predictor ranks and counts its sweep order instead of sorting (200k rows with `glance`: 0.5 s to 0.3 s); `smooth_spline`'s banded Cholesky and leverage inner products run compiled with `stats3[fast]` (10k rows: 0.025 s to 0.014 s); `lm` leverages multiply X by R^-1 once; the models' infinite-value checks are one Polars query over all columns.
+
+### Fixed
+
+- `glmnet` from a formula and from a matrix gave lambda paths one unit in the last place apart on x86-64, because the formula path passed a strided view of the design; the input is now made contiguous first, so both interfaces give the same bits.
 
 ## 0.5.0 — 2026-10-26
 
