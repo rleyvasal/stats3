@@ -1149,11 +1149,9 @@ def _cv(fit, x, y, weights, offset, options, foldid, measure, grouped, names, ve
         measure = _MEASURES[family][0]
     lam = fit.lambda_
     nlam = len(lam)
-    if family == "multinomial":
-        per_class = (fit.path.beta != 0).sum(axis=1)
-        nz = np.ceil(np.median(per_class, axis=1)).astype(int)
-    else:
-        nz = fit.df
+    # glmnet 5.2 takes nzero from the fit's df: for a multinomial fit, the variables
+    # nonzero in any class (5.1 took the median of the per-class counts).
+    nz = fit.df
     folds = []
     for i in range(1, nfolds + 1):
         train = foldid != i

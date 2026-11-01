@@ -6,7 +6,7 @@ under **Changed**.
 
 ## 0.6.0 — 2026-11-01
 
-The notebook's formula quoting comes from tidysyntax, shared with tidy3, tidy3a and plot3.
+The notebook's formula quoting comes from tidysyntax, shared with tidy3, tidy3a and plot3, and `cv_glmnet` follows glmnet 5.2's `nzero`.
 
 ### Changed
 
@@ -15,6 +15,10 @@ The notebook's formula quoting comes from tidysyntax, shared with tidy3, tidy3a 
   (`tidysyntax>=0.1,<0.2`, standard library only). Formulas are quoted as
   before, and one thing is new: backtick names inside a formula are kept,
   so `lm(\`body mass\` ~ flipper_length_mm)` runs in a notebook.
+- `cv_glmnet`'s `nzero` for a multinomial fit is the number of variables
+  with a nonzero coefficient in any class, the fit's `df`, as glmnet 5.2's
+  `cv.glmnet` reports it; glmnet 5.1 and stats3 before took the median of the
+  per-class counts. The R oracle in CI installs the current glmnet.
 
 ## 0.5.1 — 2026-10-26
 
