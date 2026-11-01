@@ -4,7 +4,9 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.6.0 — 2026-11-01
+
+The notebook's formula quoting comes from tidysyntax, shared with tidy3, tidy3a and plot3.
 
 ### Changed
 
