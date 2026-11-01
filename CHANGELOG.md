@@ -4,6 +4,16 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- The notebook's formula quoting comes from tidysyntax, the notebook syntax
+  tidy3, tidy3a, plot3 and stats3 now share, which stats3 requires
+  (`tidysyntax>=0.1,<0.2`, standard library only). Formulas are quoted as
+  before, and one thing is new: backtick names inside a formula are kept,
+  so `lm(\`body mass\` ~ flipper_length_mm)` runs in a notebook.
+
 ## 0.5.1 — 2026-10-26
 
 Less overhead in arima, loess, the concordance, smooth_spline and glmnet's formula path.

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import io
+import subprocess
+import sys
+
 import polars as pl
 import pytest
 
@@ -125,3 +129,44 @@ def test_model_formulas_run_unquoted_in_ipython():
         assert result.success, (cell, result.error_before_exec or result.error_in_exec)
     assert ip.user_ns["coefs"]["term"].to_list()[-1] == "speciesGentoo"
     assert ip.user_ns["logit"].family.family == "binomial"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # Backtick names stay in the formula, which stats3's formula parser reads.
+        ("t_test(`body mass` ~ sex)", "t_test('`body mass` ~ sex')"),
+        # A backtick name tidy3's notebook pass already rewrote becomes one again.
+        ("t_test(__tidy3_bt__('body mass') ~ sex)", "t_test('`body mass` ~ sex')"),
+        ("t_test(~mask)", "t_test(~mask)"),
+        ("lm(formula = y ~ x)", "lm(formula = y ~ x)"),
+    ],
+)
+def test_formula_quoting_comes_from_tidysyntax(source, expected):
+    assert quote_formulas(source) == expected
+
+
+def test_backtick_names_in_formulas_run_in_ipython():
+    # A fresh process with stats3 alone: tidy3 0.14's backtick pass, which
+    # other tests load into the shared shell, also rewrites backticks inside
+    # strings, so it breaks a quoted formula until tidy3 takes tidysyntax's
+    # repairs.
+    pytest.importorskip("IPython")
+    script = f"""
+from IPython.core.interactiveshell import InteractiveShell
+ip = InteractiveShell.instance()
+cells = [
+    "%load_ext stats3.jupyter\\nimport polars as pl\\nfrom stats3 import *\\n"
+    "penguins = pl.read_csv({str(PENGUINS)!r}, null_values='NA').rename({{'body_mass_g': 'body mass'}})",
+    "result = penguins >> lm(`body mass` ~ flipper_length_mm) >> tidy()",
+]
+for cell in cells:
+    run = ip.run_cell(cell)
+    assert run.success, (cell, run.error_before_exec or run.error_in_exec)
+print(ip.user_ns["result"].write_json())
+"""
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True).stdout
+    from stats3 import lm, tidy
+
+    expected = lm(penguins().rename({"body_mass_g": "body mass"}), "`body mass` ~ flipper_length_mm") >> tidy()
+    assert_same_frame(pl.read_json(io.StringIO(out.strip().splitlines()[-1])), expected)

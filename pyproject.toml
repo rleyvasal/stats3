@@ -28,6 +28,9 @@ dependencies = [
   # (Polars has none); NumPy arrives with scipy. 1.18 is the first whose
   # inverse t and Shapiro-Wilk match R to full precision.
   "scipy>=1.18",
+  # The notebook syntax tidy3, tidy3a, plot3 and stats3 share: unquoted
+  # formulas. Standard library only; a minor version may change behaviour.
+  "tidysyntax>=0.1,<0.2",
 ]
 
 [project.optional-dependencies]

@@ -4,7 +4,8 @@ Two rewrites, both limited to calls of stats3's own functions:
 
 * Formulas: ``t_test(body_mass_g ~ sex)`` is not Python (``~`` has no
   binary form), so before the cell is parsed the formula argument is quoted:
-  ``t_test("body_mass_g ~ sex")``.
+  ``t_test("body_mass_g ~ sex")``. This part comes from tidysyntax, shared
+  with tidy3, tidy3a and plot3.
 * Bare column names: ``binom_test(sex == "male")`` and
   ``cor_test(bill_length_mm, bill_depth_mm, by=species)``. After parsing,
   a name that the notebook has not defined becomes ``pl.col("name")``. A
@@ -18,9 +19,10 @@ from __future__ import annotations
 
 import ast
 import builtins
-import io
-import tokenize
 from typing import Any, Iterable
+
+import tidysyntax
+from tidysyntax.repairs import quote_formulas as quote
 
 COL_NAME = "__stats3_col__"
 
@@ -39,72 +41,19 @@ FUNCTIONS = frozenset({
 
 # formulas ------------------------------------------------------------------------
 
+# stats3's part of the notebook syntax the tidy3 family shares (tidysyntax):
+# a formula argument of these functions becomes a string.
+DIALECT = tidysyntax.Dialect("stats3", formula_calls=FUNCTIONS, prefixes={"stats3"}, exports=FUNCTIONS)
+
 
 def quote_formulas(source: str) -> str:
-    """Quote ``y ~ g`` arguments of stats3 calls; leave everything else as is."""
-    if "~" not in source:
-        return source
-    try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        return source
-    edits: list[tuple[tuple[int, int], tuple[int, int]]] = []
-    for i, tok in enumerate(tokens[:-1]):
-        nxt = tokens[i + 1]
-        if tok.type == tokenize.NAME and tok.string in FUNCTIONS and nxt.string == "(":
-            if i > 0 and tokens[i - 1].string == ".":
-                prev = tokens[i - 2] if i > 1 else None
-                if prev is None or prev.string != "stats3":
-                    continue
-            edits.extend(_formula_arguments(tokens, i + 1))
-    if not edits:
-        return source
-    lines = source.splitlines(keepends=True)
-    offsets = [0]
-    for line in lines:
-        offsets.append(offsets[-1] + len(line))
+    """Quote ``y ~ g`` arguments of stats3 calls; leave everything else as is.
 
-    def at(pos: tuple[int, int]) -> int:
-        return offsets[pos[0] - 1] + pos[1]
-
-    out = source
-    for start, end in sorted(edits, key=lambda e: at(e[0]), reverse=True):
-        text = " ".join(source[at(start): at(end)].split())
-        out = out[: at(start)] + repr(text) + out[at(end):]
-    return out
-
-
-def _formula_arguments(tokens: list[tokenize.TokenInfo], open_index: int):
-    """Spans of top-level arguments after ``(`` that contain a bare ``~``."""
-    depth = 0
-    arg: list[tokenize.TokenInfo] = []
-    for tok in tokens[open_index + 1:]:
-        if tok.type in (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT):
-            continue
-        if tok.string in "([{" and tok.type == tokenize.OP:
-            depth += 1
-        elif tok.string in ")]}" and tok.type == tokenize.OP:
-            if depth == 0:
-                yield from _span(arg)
-                return
-            depth -= 1
-        elif tok.string == "," and depth == 0:
-            yield from _span(arg)
-            arg = []
-            continue
-        arg.append(tok)
-
-
-def _span(arg: list[tokenize.TokenInfo]):
-    if not arg:
-        return
-    is_keyword = len(arg) > 1 and arg[0].type == tokenize.NAME and arg[1].string == "="
-    if is_keyword or not any(t.string == "~" and t.type == tokenize.OP for t in arg):
-        return
-    # A unary ~ at the start (``~mask``) is Python; a formula has a left side.
-    if arg[0].string == "~":
-        return
-    yield arg[0].start, arg[-1].end
+    Only the formula repair runs here, not tidysyntax's other repairs: their
+    placeholders (``__r_name__`` for a backtick name) are not yet read by
+    tidy3, whose calls a stats3 pass may meet first in a shared notebook.
+    """
+    return quote(source, [DIALECT])
 
 
 def stats3_formula_transform(lines: list[str]) -> list[str]:
