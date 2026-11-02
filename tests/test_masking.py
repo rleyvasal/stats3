@@ -170,3 +170,31 @@ print(ip.user_ns["result"].write_json())
 
     expected = lm(penguins().rename({"body_mass_g": "body mass"}), "`body mass` ~ flipper_length_mm") >> tidy()
     assert_same_frame(pl.read_json(io.StringIO(out.strip().splitlines()[-1])), expected)
+
+
+def test_backtick_column_outside_a_formula():
+    source = "cor_test(`bill length`, bill_depth_mm)"
+    assert mask_source(__import__("tidy3syntax").repairs.backticks(source), NS) == (
+        "cor_test(__stats3_col__('bill length'), __stats3_col__('bill_depth_mm'))"
+    )
+
+
+def test_the_importing_cell_takes_formulas_through_the_entry_point():
+    # Another package's coordinator is already in the shell (here a stand-in);
+    # the cell that imports stats3 uses a formula at once.
+    pytest.importorskip("IPython")
+    script = f"""
+from IPython.core.interactiveshell import InteractiveShell
+import tidy3syntax, tidy3syntax.ipython
+ip = InteractiveShell.instance()
+tidy3syntax.ipython.register(ip, tidy3syntax.Dialect("other", negation_calls={{"keep"}}))
+run = ip.run_cell(
+    "import polars as pl\\nfrom stats3 import *\\n"
+    "penguins = pl.read_csv({str(PENGUINS)!r}, null_values='NA')\\n"
+    "result = penguins >> t_test(body_mass_g ~ sex)"
+)
+assert run.success, run.error_before_exec or run.error_in_exec
+print("stats3" in tidy3syntax.ipython.registered(ip))
+"""
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True).stdout
+    assert out.strip().splitlines()[-1] == "True"

@@ -4,6 +4,18 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- In a notebook, stats3's formulas go through tidy3syntax's coordinator
+  (`tidy3syntax>=0.1.2`), one input transformer shared with tidy3, tidy3a
+  and plot3, so the packages' load order no longer matters. stats3 declares
+  a `tidy3syntax.dialects` entry point: when another of those packages is
+  already loaded, a cell that imports stats3 can use a formula at once.
+  A backtick name outside a formula, `` cor_test(`bill length`, y) ``, is a
+  column.
+
 ## 0.6.1 — 2026-11-01
 
 ### Changed

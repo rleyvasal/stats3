@@ -17,13 +17,9 @@ from __future__ import annotations
 from typing import Any
 
 import polars as pl
+import tidy3syntax.ipython
 
-from stats3.masking import (
-    COL_NAME,
-    Stats3MaskTransformer,
-    is_stats3_transform,
-    stats3_formula_transform,
-)
+from stats3.masking import DIALECT, COL_NAME, Stats3MaskTransformer, is_stats3_transform
 
 
 def _shell(ipython: Any | None) -> Any | None:
@@ -44,18 +40,20 @@ def enable(ipython: Any | None = None) -> bool:
     namespace = getattr(shell, "user_ns", None)
     if isinstance(namespace, dict):
         namespace[COL_NAME] = pl.col
-    # Source pass: before parsing, and before tidy3's pipe rewriting when
-    # tidy3 was loaded first. Quoting is idempotent, so both lists are safe.
-    for attr in ("input_transformers_cleanup", "input_transformers_post"):
+    _remove_own(shell)  # an earlier stats3's transformers, from before the coordinator
+    # The formulas go through the coordinator tidy3, tidy3a and plot3 share,
+    # one transformer for every package whatever the load order.
+    tidy3syntax.ipython.register(
+        shell, DIALECT, ast_transformer=Stats3MaskTransformer(namespace if isinstance(namespace, dict) else {})
+    )
+    return True
+
+
+def _remove_own(shell: Any) -> None:
+    for attr in ("input_transformers_cleanup", "input_transformers_post", "ast_transformers"):
         transformers = getattr(shell, attr, None)
         if isinstance(transformers, list):
             transformers[:] = [t for t in transformers if not is_stats3_transform(t)]
-            transformers.insert(0, stats3_formula_transform)
-    ast_transformers = getattr(shell, "ast_transformers", None)
-    if isinstance(ast_transformers, list):
-        ast_transformers[:] = [t for t in ast_transformers if not is_stats3_transform(t)]
-        ast_transformers.append(Stats3MaskTransformer(namespace if isinstance(namespace, dict) else {}))
-    return True
 
 
 def disable(ipython: Any | None = None) -> None:
@@ -63,10 +61,8 @@ def disable(ipython: Any | None = None) -> None:
     shell = _shell(ipython)
     if shell is None:
         return
-    for attr in ("input_transformers_cleanup", "input_transformers_post", "ast_transformers"):
-        transformers = getattr(shell, attr, None)
-        if isinstance(transformers, list):
-            transformers[:] = [t for t in transformers if not is_stats3_transform(t)]
+    tidy3syntax.ipython.unregister(shell, "stats3")
+    _remove_own(shell)
 
 
 def load_ipython_extension(ipython: Any) -> None:

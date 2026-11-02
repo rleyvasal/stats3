@@ -85,6 +85,16 @@ def _assigned_names(tree: ast.AST) -> set[str]:
     return names
 
 
+def _backtick_name(node: ast.AST) -> bool:
+    """``__r_name__('body mass')``: a backtick name as tidy3syntax writes it (or tidy3 or plot3 before it)."""
+    return (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id in (tidy3syntax.NAME, "__tidy3_bt__", "__plot3_bt__")
+        and len(node.args) == 1 and not node.keywords
+        and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+    )
+
+
 def _is_stats3_call(node: ast.Call) -> bool:
     func = node.func
     if isinstance(func, ast.Name):
@@ -137,6 +147,9 @@ class Stats3MaskTransformer(ast.NodeTransformer):
                 return name
 
             def visit_Call(self, call: ast.Call) -> ast.AST:
+                if _backtick_name(call):  # `body mass`: a column whose name is not an identifier
+                    return ast.copy_location(ast.Call(
+                        func=ast.Name(id=COL_NAME, ctx=ast.Load()), args=call.args, keywords=[]), call)
                 # Leave other functions' names (np.log, ...) alone; their
                 # arguments are still masked.
                 call.args = [self.visit(a) for a in call.args]
