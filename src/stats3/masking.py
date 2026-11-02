@@ -43,7 +43,15 @@ FUNCTIONS = frozenset({
 
 # stats3's part of the notebook syntax the tidy3 family shares (tidy3syntax):
 # a formula argument of these functions becomes a string.
-DIALECT = tidy3syntax.Dialect("stats3", formula_calls=FUNCTIONS, prefixes={"stats3"}, exports=FUNCTIONS)
+DIALECT = tidy3syntax.Dialect(
+    "stats3", formula_calls=FUNCTIONS, prefixes={"stats3"}, exports=FUNCTIONS,
+    extension="stats3.jupyter:load_ipython_extension",
+)
+
+
+def dialect() -> tidy3syntax.Dialect:
+    """stats3's dialect for tidy3syntax (its ``tidy3syntax.dialects`` entry point)."""
+    return DIALECT
 
 
 def quote_formulas(source: str) -> str:

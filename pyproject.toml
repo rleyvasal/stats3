@@ -54,9 +54,9 @@ dev = [
 ]
 
 # A notebook cell that imports stats3 gets its syntax in that same cell
-# (tidy3syntax's coordinator calls this before rewriting the cell).
+# (its dialect names the notebook loader tidy3syntax's coordinator calls).
 [project.entry-points."tidy3syntax.dialects"]
-stats3 = "stats3.jupyter:load_ipython_extension"
+stats3 = "stats3.masking:dialect"
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/stats3"
