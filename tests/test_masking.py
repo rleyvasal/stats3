@@ -142,14 +142,14 @@ def test_model_formulas_run_unquoted_in_ipython():
         ("lm(formula = y ~ x)", "lm(formula = y ~ x)"),
     ],
 )
-def test_formula_quoting_comes_from_tidysyntax(source, expected):
+def test_formula_quoting_comes_from_tidy3syntax(source, expected):
     assert quote_formulas(source) == expected
 
 
 def test_backtick_names_in_formulas_run_in_ipython():
     # A fresh process with stats3 alone: tidy3 0.14's backtick pass, which
     # other tests load into the shared shell, also rewrites backticks inside
-    # strings, so it breaks a quoted formula until tidy3 takes tidysyntax's
+    # strings, so it breaks a quoted formula until tidy3 takes tidy3syntax's
     # repairs.
     pytest.importorskip("IPython")
     script = f"""

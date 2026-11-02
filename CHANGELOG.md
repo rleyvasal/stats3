@@ -4,6 +4,15 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## 0.6.1 — 2026-11-01
+
+### Changed
+
+- The notebook syntax stats3 shares with tidy3, tidy3a and plot3 is now published as
+  `tidy3syntax` (`tidy3syntax>=0.1,<0.2`), the same code under the tidy3
+  family's name; 0.6.0 required `tidysyntax`, its first name, which this
+  release no longer installs.
+
 ## 0.6.0 — 2026-11-01
 
 The notebook's formula quoting comes from tidysyntax, shared with tidy3, tidy3a and plot3, and `cv_glmnet` follows glmnet 5.2's `nzero`.

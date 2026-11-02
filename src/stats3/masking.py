@@ -4,7 +4,7 @@ Two rewrites, both limited to calls of stats3's own functions:
 
 * Formulas: ``t_test(body_mass_g ~ sex)`` is not Python (``~`` has no
   binary form), so before the cell is parsed the formula argument is quoted:
-  ``t_test("body_mass_g ~ sex")``. This part comes from tidysyntax, shared
+  ``t_test("body_mass_g ~ sex")``. This part comes from tidy3syntax, shared
   with tidy3, tidy3a and plot3.
 * Bare column names: ``binom_test(sex == "male")`` and
   ``cor_test(bill_length_mm, bill_depth_mm, by=species)``. After parsing,
@@ -21,8 +21,8 @@ import ast
 import builtins
 from typing import Any, Iterable
 
-import tidysyntax
-from tidysyntax.repairs import quote_formulas as quote
+import tidy3syntax
+from tidy3syntax.repairs import quote_formulas as quote
 
 COL_NAME = "__stats3_col__"
 
@@ -41,15 +41,15 @@ FUNCTIONS = frozenset({
 
 # formulas ------------------------------------------------------------------------
 
-# stats3's part of the notebook syntax the tidy3 family shares (tidysyntax):
+# stats3's part of the notebook syntax the tidy3 family shares (tidy3syntax):
 # a formula argument of these functions becomes a string.
-DIALECT = tidysyntax.Dialect("stats3", formula_calls=FUNCTIONS, prefixes={"stats3"}, exports=FUNCTIONS)
+DIALECT = tidy3syntax.Dialect("stats3", formula_calls=FUNCTIONS, prefixes={"stats3"}, exports=FUNCTIONS)
 
 
 def quote_formulas(source: str) -> str:
     """Quote ``y ~ g`` arguments of stats3 calls; leave everything else as is.
 
-    Only the formula repair runs here, not tidysyntax's other repairs: their
+    Only the formula repair runs here, not tidy3syntax's other repairs: their
     placeholders (``__r_name__`` for a backtick name) are not yet read by
     tidy3, whose calls a stats3 pass may meet first in a shared notebook.
     """
