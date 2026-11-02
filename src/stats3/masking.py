@@ -50,8 +50,35 @@ DIALECT = tidy3syntax.Dialect(
 
 
 def dialect() -> tidy3syntax.Dialect:
-    """stats3's dialect for tidy3syntax (its ``tidy3syntax.dialects`` entry point)."""
-    return DIALECT
+    """stats3's dialect for tidy3syntax (its ``tidy3syntax.dialects`` entry point), with
+    the masking an export applies (:func:`export_mask`)."""
+    import dataclasses
+
+    return dataclasses.replace(DIALECT, mask=export_mask, export_imports=("import polars",))
+
+
+def export_mask(source: str, known: frozenset[str], context: Any) -> str:
+    """stats3's bare column names in *source* as ``polars.col("name")``, for a script exported
+    from a notebook. A name the notebook defines (*known*) keeps its value; a notebook that
+    imports nothing from stats3 (*context*, its imports) is returned unchanged."""
+    if not any(str(module).split(".")[0] == "stats3" for module in (context or {}).values()):
+        return source
+    tree = ast.parse(source)
+    before = ast.dump(tree)
+    tree = Stats3MaskTransformer({name: None for name in known}).visit(tree)
+
+    class Public(ast.NodeTransformer):
+        def visit_Call(self, node: ast.Call) -> ast.AST:
+            self.generic_visit(node)
+            if isinstance(node.func, ast.Name) and node.func.id == COL_NAME:
+                node.func = ast.Attribute(value=ast.Name(id="polars", ctx=ast.Load()), attr="col", ctx=ast.Load())
+            return node
+
+    tree = Public().visit(tree)
+    if ast.dump(tree) == before:
+        return source
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
 
 
 def quote_formulas(source: str) -> str:

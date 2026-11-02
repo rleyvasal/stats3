@@ -8,6 +8,10 @@ under **Changed**.
 
 ### Changed
 
+- `nb_export` (tidy3's) writes stats3's bare column names as
+  `polars.col("name")` and imports `polars` in the script; formulas stay
+  strings. stats3's dialect carries this as its export mask.
+
 - In notebooks, stats3 reads only tidy3syntax's `__r_name__` as a backtick
   name, not tidy3's `__tidy3_bt__` or plot3's `__plot3_bt__`. Requires
   tidy3syntax 0.2, whose placeholders the four packages now share alone.
