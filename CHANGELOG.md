@@ -4,6 +4,14 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Changed
+
+- In notebooks, stats3 reads only tidy3syntax's `__r_name__` as a backtick
+  name, not tidy3's `__tidy3_bt__` or plot3's `__plot3_bt__`. Requires
+  tidy3syntax 0.2, whose placeholders the four packages now share alone.
+
 ## 0.7.0 — 2026-11-01
 
 stats3's formulas register with tidy3syntax's coordinator, shared with tidy3, tidy3a and plot3.

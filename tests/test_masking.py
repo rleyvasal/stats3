@@ -136,8 +136,8 @@ def test_model_formulas_run_unquoted_in_ipython():
     [
         # Backtick names stay in the formula, which stats3's formula parser reads.
         ("t_test(`body mass` ~ sex)", "t_test('`body mass` ~ sex')"),
-        # A backtick name tidy3's notebook pass already rewrote becomes one again.
-        ("t_test(__tidy3_bt__('body mass') ~ sex)", "t_test('`body mass` ~ sex')"),
+        # A backtick name another package's rewrite reached first becomes one again.
+        ("t_test(__r_name__('body mass') ~ sex)", "t_test('`body mass` ~ sex')"),
         ("t_test(~mask)", "t_test(~mask)"),
         ("lm(formula = y ~ x)", "lm(formula = y ~ x)"),
     ],

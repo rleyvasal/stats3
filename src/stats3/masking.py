@@ -94,10 +94,10 @@ def _assigned_names(tree: ast.AST) -> set[str]:
 
 
 def _backtick_name(node: ast.AST) -> bool:
-    """``__r_name__('body mass')``: a backtick name as tidy3syntax writes it (or tidy3 or plot3 before it)."""
+    """``__r_name__('body mass')``: a backtick name as tidy3syntax writes it."""
     return (
         isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        and node.func.id in (tidy3syntax.NAME, "__tidy3_bt__", "__plot3_bt__")
+        and node.func.id == tidy3syntax.NAME
         and len(node.args) == 1 and not node.keywords
         and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
     )
