@@ -4,7 +4,9 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.7.0 — 2026-11-01
+
+stats3's formulas register with tidy3syntax's coordinator, shared with tidy3, tidy3a and plot3.
 
 ### Changed
 
