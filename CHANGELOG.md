@@ -4,7 +4,9 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
-## Unreleased
+## 0.8.0 — 2026-11-02
+
+Only tidy3syntax's placeholders, and stats3's syntax in tidy3's nb_export.
 
 ### Changed
 
