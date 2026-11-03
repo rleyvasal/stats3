@@ -632,6 +632,13 @@ result <- switch(
                        g=rep(s$g, 3))
     cars <- data.frame(id=rep(m$model, 3), k=rep(c("cyl", "gear", "carb"), each=nrow(m)),
                        v=c(m$cyl, m$gear, m$carb))
+    # ranks' a, b and e as matched columns, two of them with a missing value.
+    wide <- as.matrix(s[c("a", "b", "e")])
+    wide_na <- s
+    wide_na$a[3] <- NA
+    wide_na$e[7] <- NaN
+    long_na <- data.frame(k=rep(c("a", "b", "e"), each=nrow(s)), v=c(wide_na$a, wide_na$b, wide_na$e))
+    cols <- function(d) as.matrix(d[c("a", "b", "e")])
     counts <- m |> group_by(gear, am) |> summarise(events=sum(carb), time=n(), .groups="drop") |> as.data.frame()
     props <- p[!is.na(p$sex), ] |> group_by(year, island) |>
       summarise(male=sum(sex == "male"), n=n(), .groups="drop") |> as.data.frame()
@@ -684,6 +691,13 @@ result <- switch(
       qu_ties=test(quade.test(v ~ k | id, cars)),
       qu_by_g=by(long, "g", function(d) test(quade.test(v ~ k | id, d))),
       qu_perfect=test(quade.test(v ~ k | id, perfect)),
+      qu_wide=test(quade.test(wide)),
+      # quade.test(matrix) counts blocks before dropping incomplete rows, so
+      # its F and denominator df include blocks it does not use (friedman.test
+      # does not); stats3 counts the blocks it uses, so compare on those.
+      qu_wide_na=test(quade.test(cols(wide_na)[complete.cases(cols(wide_na)), ])),
+      qu_wide_ties=test(quade.test(as.matrix(m[c("cyl", "gear", "carb")]))),
+      qu_wide_by_g=by(s, "g", function(d) test(quade.test(cols(d)))),
       ptr_smokers=test(prop.trend.test(smokers$x, smokers$n)),
       ptr_score=test(prop.trend.test(smokers$x, smokers$n, c(0, 0, 0, 1))),
       ptr_score_column=test(prop.trend.test(smokers$x, smokers$n, smokers$dose)),
@@ -695,9 +709,20 @@ result <- switch(
       o_by_year=by(p, "year", function(d) test(oneway.test(flipper_length_mm ~ island, d))),
       fl_species=test(fligner.test(body_mass_g ~ species, p)),
       fl_by_sex=by(p, "sex", function(d) test(fligner.test(flipper_length_mm ~ island, d))),
+      kr_wide=test(kruskal.test(list(s$a, s$b, s$e))),
+      kr_wide_na=test(kruskal.test(list(wide_na$a, wide_na$b, wide_na$e))),
+      kr_wide_by_g=by(s, "g", function(d) test(kruskal.test(list(d$a, d$b, d$e)))),
+      ba_wide_na=test(bartlett.test(list(wide_na$a, wide_na$b, wide_na$e))),
+      ba_wide_by_g=by(s, "g", function(d) test(bartlett.test(list(d$a, d$b, d$e)))),
+      fl_wide_na=test(fligner.test(list(wide_na$a, wide_na$b, wide_na$e))),
+      fl_wide_by_g=by(s, "g", function(d) test(fligner.test(list(d$a, d$b, d$e)))),
       fr_ranks=test(friedman.test(v ~ k | id, long)),
       fr_ties=test(friedman.test(v ~ k | id, cars)),
       fr_by_g=by(long, "g", function(d) test(friedman.test(v ~ k | id, d))),
+      fr_wide=test(friedman.test(wide)),
+      fr_wide_na=test(friedman.test(cols(wide_na))),
+      fr_wide_ties=test(friedman.test(as.matrix(m[c("cyl", "gear", "carb")]))),
+      fr_wide_by_g=by(s, "g", function(d) test(friedman.test(cols(d)))),
       mc_cars=test(mcnemar.test(m$vs, m$am)),
       mc_three=test(mcnemar.test(m$cyl, m$gear)),
       mc_logical=test(mcnemar.test(p$dream, p$first_year)),
@@ -727,6 +752,11 @@ result <- switch(
       pw_species=pw(pairwise.wilcox.test(p$flipper_length_mm, p$species)),
       pw_exact=pw(pairwise.wilcox.test(s$a, s$h, p.adjust.method="BH")),
       pw_paired=pw(pairwise.wilcox.test(long$v, long$k, paired=TRUE)),
+      pt_wide_na=pw(pairwise.t.test(long_na$v, long_na$k, paired=TRUE, p.adjust.method="bonferroni")),
+      pt_wide_order=pw(pairwise.t.test(long$v, factor(long$k, levels=c("e", "b", "a")), paired=TRUE)),
+      pt_wide_by_g=by(long, "g", function(d) pw(pairwise.t.test(d$v, d$k, paired=TRUE))),
+      pw_wide_na=pw(pairwise.wilcox.test(long_na$v, long_na$k, paired=TRUE)),
+      pw_wide_by_g=by(long, "g", function(d) pw(pairwise.wilcox.test(d$v, d$k, paired=TRUE))),
       pw_by_year=by(p, "year", function(d) pw(pairwise.wilcox.test(d$body_mass_g, d$species))),
       pp_islands=pw(pairwise.prop.test(named(props[props$year == 2008, ]), props$n[props$year == 2008])),
       pp_numbered=pw(pairwise.prop.test(props$male[props$year == 2009], props$n[props$year == 2009],

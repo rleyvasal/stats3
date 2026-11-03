@@ -15,8 +15,11 @@ import scipy.stats as scipy_stats
 
 from stats3 import (
     ansari_test,
+    bartlett_test,
     fligner_test,
     friedman_test,
+    kruskal_test,
+    levene_test,
     mantelhaen_test,
     mcnemar_test,
     mood_test,
@@ -29,7 +32,9 @@ from stats3 import (
     prop_trend_test,
     quade_test,
 )
-from oracle import BACKENDS, _oracle, assert_matches_r, case, penguins, ranks, run_case
+from oracle import (
+    BACKENDS, _oracle, as_polars, assert_matches_r, assert_same_frame, case, penguins, ranks, run_case,
+)
 
 DATA = Path(__file__).parent / "data"
 
@@ -48,6 +53,14 @@ def long() -> pl.DataFrame:
     return pl.concat([
         r.select("id", k=pl.lit(k), v=pl.col(k), g="g") for k in ("a", "b", "e")
     ])
+
+
+def wide_na() -> pl.DataFrame:
+    """ranks with ``a`` missing in block 3 and ``e`` NaN in block 7."""
+    return ranks().with_columns(
+        a=pl.when(pl.col("id") == 3).then(None).otherwise(pl.col("a")),
+        e=pl.when(pl.col("id") == 7).then(float("nan")).otherwise(pl.col("e")),
+    )
 
 
 def cars() -> pl.DataFrame:
@@ -116,6 +129,13 @@ CASES = {
     "o_by_year": case(P, lambda: oneway_test("flipper_length_mm ~ island"), "year"),
     "fl_species": case(P, lambda: fligner_test("body_mass_g ~ species")),
     "fl_by_sex": case(P, lambda: fligner_test("flipper_length_mm ~ island"), "sex"),
+    "kr_wide": case(S, lambda: kruskal_test("a", "b", "e")),
+    "kr_wide_na": case(wide_na, lambda: kruskal_test(["a", "b", "e"])),
+    "kr_wide_by_g": case(S, lambda: kruskal_test("a", "b", "e"), "g"),
+    "ba_wide_na": case(wide_na, lambda: bartlett_test("a", "b", "e")),
+    "ba_wide_by_g": case(S, lambda: bartlett_test("a", "b", "e"), "g"),
+    "fl_wide_na": case(wide_na, lambda: fligner_test("a", "b", "e")),
+    "fl_wide_by_g": case(S, lambda: fligner_test(pl.col("a"), pl.col("b"), pl.col("e")), "g"),
     "fr_ranks": case(L, lambda: friedman_test("v ~ k | id")),
     "fr_ties": case(cars, lambda: friedman_test("v ~ k | id")),
     "fr_by_g": case(L, lambda: friedman_test("v ~ k | id"), "g"),
@@ -123,6 +143,14 @@ CASES = {
     "qu_ties": case(cars, lambda: quade_test("v ~ k | id")),
     "qu_by_g": case(L, lambda: quade_test("v ~ k | id"), "g"),
     "qu_perfect": case(perfect, lambda: quade_test("v ~ k | id")),
+    "qu_wide": case(S, lambda: quade_test("a", "b", "e")),
+    "qu_wide_na": case(wide_na, lambda: quade_test("a", "b", "e")),
+    "qu_wide_ties": case(M, lambda: quade_test(["cyl", "gear", "carb"])),
+    "qu_wide_by_g": case(S, lambda: quade_test("a", "b", "e"), "g"),
+    "fr_wide": case(S, lambda: friedman_test("a", "b", "e")),
+    "fr_wide_na": case(wide_na, lambda: friedman_test("a", "b", "e")),
+    "fr_wide_ties": case(M, lambda: friedman_test(["cyl", "gear", "carb"])),
+    "fr_wide_by_g": case(S, lambda: friedman_test(pl.col("a"), pl.col("b"), pl.col("e")), "g"),
     "an_exact": case(S, lambda: ansari_test("a", "b")),
     "an_less": case(S, lambda: ansari_test("a", "b", alternative="less")),
     "an_greater": case(S, lambda: ansari_test("e", "b", alternative="greater")),
@@ -187,6 +215,12 @@ CASES = {
     "pw_species": case(P, lambda: pairwise_wilcox_test("flipper_length_mm ~ species")),
     "pw_exact": case(S, lambda: pairwise_wilcox_test("a ~ h", p_adjust_method="BH")),
     "pw_paired": case(L, lambda: pairwise_wilcox_test("v ~ k", paired=True)),
+    "pt_wide_na": case(wide_na, lambda: pairwise_t_test(
+        "a", "b", "e", paired=True, p_adjust_method="bonferroni")),
+    "pt_wide_order": case(S, lambda: pairwise_t_test("e", "b", "a", paired=True)),
+    "pt_wide_by_g": case(S, lambda: pairwise_t_test("a", "b", "e", paired=True), "g"),
+    "pw_wide_na": case(wide_na, lambda: pairwise_wilcox_test(["a", "b", "e"], paired=True)),
+    "pw_wide_by_g": case(S, lambda: pairwise_wilcox_test("a", "b", "e", paired=True), "g"),
     "pw_by_year": case(P, lambda: pairwise_wilcox_test("body_mass_g ~ species"), "year"),
     "pp_islands": case(props_year(2008), lambda: pairwise_prop_test("male", "n", labels="island")),
     "pp_numbered": case(props_year(2009), lambda: pairwise_prop_test(
@@ -280,6 +314,136 @@ def test_fligner_matches_scipy():
     got = fligner_test(p, "body_mass_g ~ species")
     assert got["statistic"][0] == pytest.approx(ref.statistic, rel=1e-12)
     assert got["p_value"][0] == pytest.approx(ref.pvalue, rel=1e-12)
+
+
+def stacked(frame: pl.DataFrame, columns=("a", "b", "e")) -> pl.DataFrame:
+    """``frame``'s matched columns in long form: block ``row``, treatment
+    ``k`` (the column), value ``v``, and ``g``."""
+    frame = frame.with_row_index("row")
+    keep = [c for c in ("g",) if c in frame.columns]
+    return pl.concat([frame.select("row", *keep, k=pl.lit(k), v=pl.col(k).cast(pl.Float64)) for k in columns])
+
+
+def complete_blocks(frame: pl.DataFrame) -> pl.DataFrame:
+    """``stacked`` without the blocks that have a missing value."""
+    long = stacked(frame)
+    missing = long.filter(pl.col("v").is_null() | pl.col("v").is_nan())["row"]
+    return long.filter(~pl.col("row").is_in(missing.implode()))
+
+
+# Each column form and the formula it stands for, on data stacked to match.
+WIDE_VS_LONG = {
+    "friedman": (ranks, lambda: friedman_test("a", "b", "e"), lambda: stacked(ranks()),
+                 lambda: friedman_test("v ~ k | row")),
+    "friedman_na": (wide_na, lambda: friedman_test("a", "b", "e"), lambda: complete_blocks(wide_na()),
+                    lambda: friedman_test("v ~ k | row")),
+    "friedman_ties": (mtcars, lambda: friedman_test("cyl", "gear", "carb"),
+                      lambda: stacked(mtcars(), ("cyl", "gear", "carb")), lambda: friedman_test("v ~ k | row")),
+    "quade": (ranks, lambda: quade_test("a", "b", "e"), lambda: stacked(ranks()),
+              lambda: quade_test("v ~ k | row")),
+    "quade_na": (wide_na, lambda: quade_test("a", "b", "e"), lambda: complete_blocks(wide_na()),
+                 lambda: quade_test("v ~ k | row")),
+    "kruskal": (wide_na, lambda: kruskal_test("a", "b", "e"), lambda: stacked(wide_na()),
+                lambda: kruskal_test("v ~ k")),
+    "bartlett": (wide_na, lambda: bartlett_test("a", "b", "e"), lambda: stacked(wide_na()),
+                 lambda: bartlett_test("v ~ k")),
+    "levene": (wide_na, lambda: levene_test("a", "b", "e"), lambda: stacked(wide_na()),
+               lambda: levene_test("v ~ k")),
+    "levene_mean": (wide_na, lambda: levene_test("a", "b", "e", center="mean"), lambda: stacked(wide_na()),
+                    lambda: levene_test("v ~ k", center="mean")),
+    "fligner": (wide_na, lambda: fligner_test("a", "b", "e"), lambda: stacked(wide_na()),
+                lambda: fligner_test("v ~ k")),
+    "pairwise_t": (wide_na, lambda: pairwise_t_test("a", "b", "e", paired=True), lambda: stacked(wide_na()),
+                   lambda: pairwise_t_test("v ~ k", paired=True)),
+    "pairwise_wilcox": (wide_na, lambda: pairwise_wilcox_test("a", "b", "e", paired=True),
+                        lambda: stacked(wide_na()), lambda: pairwise_wilcox_test("v ~ k", paired=True)),
+}
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("by", [(), ("g",)], ids=["ungrouped", "by_g"])
+@pytest.mark.parametrize("name", sorted(WIDE_VS_LONG))
+def test_columns_match_formula(name, by, backend):
+    wide, make_wide, long, make_long = WIDE_VS_LONG[name]
+    if by and "g" not in wide().columns:
+        pytest.skip("no g column")
+    got = as_polars(run_case(case(wide, make_wide, *by), backend))
+    want = as_polars(run_case(case(long, make_long, *by), backend))
+    # The same rows in the same order. Rank tests give the same bits; Polars'
+    # grouped means and variances (Levene, Bartlett) vary in the last bits
+    # from run to run, for the formula alone too.
+    assert_same_frame(got, want, rel=1e-12 if name.startswith(("levene", "bartlett")) else 0)
+
+
+@pytest.mark.parametrize("make", [
+    lambda: kruskal_test("a", "b", "e"),
+    lambda: fligner_test("a", "b", "e"),
+    lambda: friedman_test("a", "b", "e"),
+    lambda: quade_test("a", "b", "e"),
+    lambda: pairwise_t_test("a", "b", "e", paired=True),
+    lambda: pairwise_wilcox_test("a", "b", "e", paired=True),
+])
+def test_columns_ignore_row_order(make):
+    """Rows are the matched sets, so their order does not matter."""
+    shuffled = wide_na().sample(fraction=1.0, shuffle=True, seed=7)
+    assert_same_frame(shuffled >> make(), wide_na() >> make(), rel=1e-13)
+
+
+def test_columns_keep_their_order_in_pairs():
+    got = pairwise_t_test(ranks(), "e", "b", "a", paired=True)
+    assert list(zip(got["group1"], got["group2"])) == [("b", "e"), ("a", "e"), ("a", "b")]
+
+
+@pytest.mark.parametrize(("test", "reference", "kwargs"), [
+    (kruskal_test, scipy_stats.kruskal, {}),
+    (bartlett_test, scipy_stats.bartlett, {}),
+    (levene_test, scipy_stats.levene, {}),
+    (levene_test, scipy_stats.levene, {"center": "mean"}),
+    (fligner_test, scipy_stats.fligner, {}),
+], ids=["kruskal", "bartlett", "levene", "levene_mean", "fligner"])
+def test_independent_columns_match_scipy(test, reference, kwargs):
+    """One sample per column, each without its own missing values, as SciPy's *samples."""
+    d = wide_na()
+    ref = reference(*(d[c].drop_nulls().drop_nans().to_numpy() for c in ("a", "b", "e")), **kwargs)
+    got = test(d, "a", "b", "e", **kwargs)
+    assert got["statistic"][0] == pytest.approx(ref.statistic, rel=1e-12)
+    assert got["p_value"][0] == pytest.approx(ref.pvalue, rel=1e-12)
+
+
+def test_friedman_columns_match_scipy():
+    r = ranks()
+    ref = scipy_stats.friedmanchisquare(r["a"], r["b"], r["e"])
+    got = friedman_test(r, "a", "b", "e")
+    assert got["statistic"][0] == pytest.approx(ref.statistic, rel=1e-12)
+    assert got["p_value"][0] == pytest.approx(ref.pvalue, rel=1e-12)
+
+
+@pytest.mark.parametrize(("make", "message"), [
+    (lambda: friedman_test(ranks(), "a"), "at least two columns"),
+    (lambda: quade_test(ranks(), ["a"]), "at least two columns"),
+    (lambda: friedman_test(ranks(), "v ~ k | id", "a"), "not both"),
+    (lambda: friedman_test(ranks(), "a", "a"), "more than once"),
+    (lambda: friedman_test(ranks(), "a", "g"), "must be numeric"),
+    (lambda: friedman_test(ranks(), "a", "zz"), "does not exist"),
+    (lambda: friedman_test(ranks(), "a", "b", by="a"), "grouping column"),
+    (lambda: friedman_test(ranks(), pl.col("a") * 2, "b"), "must name one column"),
+    (lambda: kruskal_test(ranks(), "a"), "at least two columns"),
+    (lambda: levene_test(ranks(), "a ~ g", "b"), "not both"),
+    (lambda: bartlett_test(ranks(), "a", "g"), "must be numeric"),
+    (lambda: fligner_test(ranks(), "a", "b", by="b"), "grouping column"),
+    (lambda: pairwise_t_test(ranks(), "a", "b"), "need paired=True"),
+    (lambda: pairwise_wilcox_test(ranks(), "a", "b"), "need paired=True"),
+    (lambda: pairwise_t_test(ranks(), "a", "b", paired=True, pool_sd=True), "pooling of SD"),
+])
+def test_column_errors(make, message):
+    with pytest.raises((ValueError, TypeError, KeyError), match=message):
+        make()
+
+
+def test_pairwise_groups_named_like_internal_columns():
+    """A grouping column called g (or y) once clashed with internal names."""
+    got = pairwise_t_test(long(), "v ~ k", by="g")
+    assert got["g"].to_list() == ["u"] * 3 + ["v"] * 3
 
 
 def test_friedman_matches_scipy():

@@ -28,7 +28,9 @@ from stats3.core import (
     _check_conf_level,
     _check_mu,
     _column,
+    _columns_as_formula,
     _finish,
+    _formula_or_columns,
     _group_label,
     _is_formula,
     _keys,
@@ -37,6 +39,7 @@ from stats3.core import (
     _present,
     _sorted_keys,
     _special,
+    _stack_columns,
     _summarise,
 )
 
@@ -499,15 +502,19 @@ def _scores_for(
 
 
 @step
-def kruskal_test(formula: str) -> Step:
+def kruskal_test(x: Any, *columns: Any) -> Step:
     """Kruskal-Wallis rank sum test, as R's ``kruskal.test(y ~ g)``.
 
     Ranks are computed per group after dropping rows missing the response or
-    the grouping column, with R's tie correction. Columns: ``statistic``,
-    ``df``, ``p_value``, ``method``.
+    the grouping column, with R's tie correction. ``kruskal_test(a, b, c)``
+    (or a list of columns) takes one sample per column instead, as R's
+    ``kruskal.test(list)``: each column drops its own missing values. Columns:
+    ``statistic``, ``df``, ``p_value``, ``method``.
     """
+    specs = _formula_or_columns(x, columns, "kruskal_test", "'y ~ group'")
 
     def _apply(tf: Any) -> Any:
+        tf, formula = _columns_as_formula(tf, x, specs, "kruskal_test")
         special = _special()
         groups = list(tf._groups or [])
         lf = tf._lf
@@ -552,6 +559,17 @@ def _block_formula(tf: Any, formula: str, verb: str) -> tuple[str, str, str]:
     return response, by, block
 
 
+_BLOCK_SHAPE = "'y ~ groups | blocks'"
+
+
+def _block_input(tf: Any, formula: Any, specs: list[Any] | None, verb: str) -> tuple[Any, str, str, str]:
+    """The frame and its (y, g, b) columns: from ``"y ~ g | b"``, or with the
+    columns ``specs`` stacked, a row with a missing value dropped."""
+    if specs is None:
+        return (tf, *_block_formula(tf, formula, verb))
+    return _stack_columns(tf, specs, verb, complete=True)
+
+
 def _join_design(
     table: pl.DataFrame, kept: pl.LazyFrame, groups: list[str], by: str, block: str, *extra: pl.Expr
 ) -> pl.DataFrame:
@@ -573,21 +591,28 @@ def _check_design(row: dict[str, Any], groups: list[str], k: int, verb: str) -> 
 
 
 @step
-def friedman_test(formula: str) -> Step:
-    """Friedman rank sum test, as R's ``friedman.test(y ~ g | b)``.
+def friedman_test(x: Any, *columns: Any) -> Step:
+    """Friedman rank sum test, as R's ``friedman.test``.
 
-    ``g`` is the treatment and ``b`` the block: every block must have exactly
-    one value for each treatment (an unreplicated complete block design),
-    after dropping rows with a missing value. Values are ranked within each
-    block, with R's tie correction. Columns: ``statistic``, ``df``,
-    ``p_value``, ``method``.
+    - ``friedman_test("y ~ g | b")``: ``g`` is the treatment and ``b`` the
+      block. Every block must have exactly one value for each treatment (an
+      unreplicated complete block design), after dropping rows with a
+      missing value.
+    - ``friedman_test(a, b, c)`` (or a list of columns): matched columns,
+      as R's ``friedman.test(matrix)``. Each row is a block and each column
+      a treatment; a row with a missing value in any of the columns is
+      dropped.
+
+    Values are ranked within each block, with R's tie correction. Columns:
+    ``statistic``, ``df``, ``p_value``, ``method``.
     """
+    specs = _formula_or_columns(x, columns, "friedman_test", _BLOCK_SHAPE)
 
     def _apply(tf: Any) -> Any:
         special = _special()
+        tf, response, by, block = _block_input(tf, x, specs, "friedman_test")
         groups = list(tf._groups or [])
         lf = tf._lf
-        response, by, block = _block_formula(tf, formula, "friedman_test")
         kept = lf.filter(_present(lf, response) & _present(lf, by) & _present(lf, block))
         value = pl.col(response).cast(pl.Float64)
         kept = kept.with_columns(__stats3_r=value.rank("average").over([*groups, block]))
@@ -618,8 +643,9 @@ def friedman_test(formula: str) -> Step:
 
 
 @step
-def quade_test(formula: str) -> Step:
-    """Quade test, as R's ``quade.test(y ~ g | b)``.
+def quade_test(x: Any, *columns: Any) -> Step:
+    """Quade test, as R's ``quade.test``: ``quade_test("y ~ g | b")``, or
+    ``quade_test(a, b, c)`` for matched columns (R's ``quade.test(matrix)``).
 
     The design and missing values are as in ``friedman_test``. Values are
     ranked within each block, and each block is weighted by the rank of its
@@ -629,12 +655,13 @@ def quade_test(formula: str) -> Step:
     equal ranges), F and its degrees of freedom are missing and the p-value
     is ``k!^(1 - b)`` for ``k`` treatments in ``b`` blocks.
     """
+    specs = _formula_or_columns(x, columns, "quade_test", _BLOCK_SHAPE)
 
     def _apply(tf: Any) -> Any:
         special = _special()
+        tf, response, by, block = _block_input(tf, x, specs, "quade_test")
         groups = list(tf._groups or [])
         lf = tf._lf
-        response, by, block = _block_formula(tf, formula, "quade_test")
         kept = lf.filter(_present(lf, response) & _present(lf, by) & _present(lf, block))
         value = pl.col(response).cast(pl.Float64)
         in_block = [*groups, block]

@@ -4,6 +4,34 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+### Added
+
+- `friedman_test`, `quade_test`, and `pairwise_t_test` / `pairwise_wilcox_test`
+  with `paired=True` take matched columns as well as a formula:
+  `data >> friedman_test(a, b, c)` (or a list of columns). Each row is one
+  matched set and each column a treatment, named by the column in the order
+  given, so wide data needs no reshaping or block column. Friedman and
+  Quade drop a row with a missing value in any of the columns, as R's
+  `friedman.test(matrix)` does; the pairwise tests drop, for each pair, the
+  rows missing either of its values, as R's paired `t.test` does. Results
+  are identical to the formula on the same data in long form.
+
+  R's `quade.test(matrix)` counts the blocks before dropping incomplete
+  rows, so with missing values its F and denominator df count blocks it
+  does not use; `quade_test` counts the blocks it uses.
+
+- `kruskal_test`, `bartlett_test`, `fligner_test` and `levene_test` take
+  one sample per column as well as a formula: `data >> kruskal_test(a, b, c)`,
+  as R's `kruskal.test(list(...))` and SciPy's `kruskal(a, b, c)`. Each
+  column drops only its own missing values, so samples can differ in size.
+
+### Fixed
+
+- `pairwise_t_test` and `pairwise_wilcox_test` no longer fail when a
+  grouping column is named `g` or `y`.
+
 ## 0.8.0 — 2026-11-02
 
 Only tidy3syntax's placeholders, and stats3's syntax in tidy3's nb_export.

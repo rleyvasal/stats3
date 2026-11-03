@@ -59,6 +59,11 @@ def test_formulas_elsewhere_are_left_alone():
         ("t_test(penguins, flipper_length_mm, mu=200)",
          "t_test(penguins, __stats3_col__('flipper_length_mm'), mu=200)"),
         ("mutate(adj=p_adjust(p_value, 'BH'))", "mutate(adj=p_adjust(__stats3_col__('p_value'), 'BH'))"),
+        ("friedman_test(a, b, e)",
+         "friedman_test(__stats3_col__('a'), __stats3_col__('b'), __stats3_col__('e'))"),
+        ("quade_test([a, b, e])", "quade_test([__stats3_col__('a'), __stats3_col__('b'), __stats3_col__('e')])"),
+        ("pairwise_t_test(a, b, paired=True)",
+         "pairwise_t_test(__stats3_col__('a'), __stats3_col__('b'), paired=True)"),
         ("t_test(pl.col('x'))", "t_test(pl.col('x'))"),
         ("t_test(len)", "t_test(len)"),
         ("group_by(species)", "group_by(species)"),
@@ -85,6 +90,7 @@ def test_shorthand_runs_in_ipython():
         "r1 = penguins >> t_test(body_mass_g ~ sex, by=species)",
         "r2 = penguins >> binom_test(sex == 'male')",
         "r3 = cor_test(penguins, bill_length_mm, bill_depth_mm, method='spearman')",
+        "r4 = penguins.drop_nulls() >> friedman_test(bill_length_mm, bill_depth_mm, flipper_length_mm)",
     ]
     for cell in cells:
         result = ip.run_cell(cell)
@@ -96,6 +102,10 @@ def test_shorthand_runs_in_ipython():
     with pytest.warns(UserWarning):
         expected = cor_test(penguins(), "bill_length_mm", "bill_depth_mm", method="spearman")
     assert_same_frame(ip.user_ns["r3"], expected)
+    from stats3 import friedman_test
+
+    assert_same_frame(ip.user_ns["r4"], friedman_test(
+        penguins().drop_nulls(), "bill_length_mm", "bill_depth_mm", "flipper_length_mm"))
 
 
 def test_shorthand_runs_alongside_tidy3_in_ipython():
