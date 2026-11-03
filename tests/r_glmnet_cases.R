@@ -133,5 +133,6 @@ glmnet_cases <- function() {
     cindex=list(formula=lungf, data=l, family="cox", measure="C")
   )
   out$cv <- lapply(cvspecs, cv)
+  out$glmnet_version <- as.character(packageVersion("glmnet"))
   out
 }
