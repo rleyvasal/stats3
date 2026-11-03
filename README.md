@@ -79,6 +79,19 @@ tidy(penguins)
 >> mutate(p_adj = p_adjust(p_value, "BH"))
 ```
 
+A tidy3 frame of results prints in a notebook as a paged table, ten rows a
+page, and `>> view()` opens it in a data explorer to search, sort and
+filter, as R's `View()`. Polars and pandas results open in the same explorer
+with [table3](https://github.com/rleyvasal/table3) (`pip install table3`):
+
+```python
+import table3
+
+tests = penguins >> t_test("body_mass_g ~ sex", by="species")
+table3.view(tests)             # the explorer
+table3.show(tests, digits=4);  # a paged table, four significant digits
+```
+
 ## In a notebook: R's shorthand
 
 In Jupyter or IPython, after `from stats3 import *` (or `%load_ext
