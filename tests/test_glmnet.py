@@ -149,6 +149,36 @@ def test_paths_match_r(name, backend):
         assert_matches_r(tables[table](), want, loose=_loose(want, tol))
 
 
+# cv.glmnet's nzero for a multinomial fit changed in glmnet 5.2: the variables
+# nonzero in any class (the fit's df), where 5.1 took the median of the
+# per-class counts. stats3 follows 5.2, so an R with 5.1 differs only there.
+_NZERO_52 = ("multinomial", "multinomial_class")
+
+
+def _old_glmnet() -> bool:
+    version = _oracle("glmnet").get("glmnet_version", "0")
+    return tuple(int(part) for part in version.split(".")[:2]) < (5, 2)
+
+
+def _without(expected, column):
+    """An R table without one of its columns."""
+    i = expected["columns"].index(column)
+    return {**expected, "columns": [c for c in expected["columns"] if c != column],
+            "data": [d for j, d in enumerate(expected["data"]) if j != i]}
+
+
+@pytest.mark.parametrize("name", _NZERO_52)
+def test_multinomial_nzero_follows_glmnet_5_2(name):
+    if R_COMMAND is None:
+        pytest.skip("R oracle unavailable")
+    if _old_glmnet():
+        pytest.skip(f"R has glmnet {_oracle('glmnet').get('glmnet_version')}; multinomial nzero follows "
+                    "glmnet 5.2: install.packages('glmnet') to compare it")
+    got = tidy(_cv(name, "polars"))["nzero"].to_list()
+    assert got == _oracle("glmnet")["cv"][name]["tidy"]["data"][
+        _oracle("glmnet")["cv"][name]["tidy"]["columns"].index("nzero")]
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("name", list(CV))
 def test_cross_validation_matches_r(name, backend):
@@ -162,7 +192,11 @@ def test_cross_validation_matches_r(name, backend):
     # the fold-averaged C by about 1e-4. The C-index case allows a few such
     # pairs (it reordered two under one OpenBLAS kernel family).
     tol = 1e-3 if name == "cindex" else 2e-4 if name == "cox" else 1e-4 if name.startswith("multinomial") else 1e-6
-    for table, actual in (("tidy", tidy(fit)), ("glance", glance(fit)), ("coef", coef(fit))):
+    tidy_fit = tidy(fit)
+    if name in _NZERO_52 and _old_glmnet():
+        # test_multinomial_nzero_follows_glmnet_5_2 says why, and skips.
+        tidy_fit, expected = as_polars(tidy_fit).drop("nzero"), {**expected, "tidy": _without(expected["tidy"], "nzero")}
+    for table, actual in (("tidy", tidy_fit), ("glance", glance(fit)), ("coef", coef(fit))):
         # A reordered pair moves C and its fold SD by the same absolute amount,
         # so the C-index columns share C's own 0-1 scale.
         scale = 1.0 if name == "cindex" and table == "tidy" else None
