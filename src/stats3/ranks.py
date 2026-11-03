@@ -28,6 +28,7 @@ from stats3.core import (
     _check_conf_level,
     _check_mu,
     _column,
+    _columns_as_formula,
     _finish,
     _formula_or_columns,
     _group_label,
@@ -501,15 +502,19 @@ def _scores_for(
 
 
 @step
-def kruskal_test(formula: str) -> Step:
+def kruskal_test(x: Any, *columns: Any) -> Step:
     """Kruskal-Wallis rank sum test, as R's ``kruskal.test(y ~ g)``.
 
     Ranks are computed per group after dropping rows missing the response or
-    the grouping column, with R's tie correction. Columns: ``statistic``,
-    ``df``, ``p_value``, ``method``.
+    the grouping column, with R's tie correction. ``kruskal_test(a, b, c)``
+    (or a list of columns) takes one sample per column instead, as R's
+    ``kruskal.test(list)``: each column drops its own missing values. Columns:
+    ``statistic``, ``df``, ``p_value``, ``method``.
     """
+    specs = _formula_or_columns(x, columns, "kruskal_test", "'y ~ group'")
 
     def _apply(tf: Any) -> Any:
+        tf, formula = _columns_as_formula(tf, x, specs, "kruskal_test")
         special = _special()
         groups = list(tf._groups or [])
         lf = tf._lf

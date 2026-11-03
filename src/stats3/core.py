@@ -148,11 +148,23 @@ def _stack_columns(tf: Any, specs: list[Any], verb: str, *, complete: bool) -> t
     lf = tf._lf.with_columns(pl.int_range(pl.len(), dtype=pl.Int64).alias(_BLOCK))
     if complete:
         lf = lf.filter(*(_present(lf, name) for name in names))
-    lf = lf.select(*groups, _BLOCK, *(pl.col(name).cast(pl.Float64) for name in names)).unpivot(
-        on=names, index=[*groups, _BLOCK], variable_name=_TREATMENT, value_name=_VALUE
-    )
+    # One select per column, concatenated in order, so each column's rows stay
+    # in row order (a lazy unpivot interleaves them).
+    lf = pl.concat([
+        lf.select(*groups, _BLOCK, pl.lit(name).alias(_TREATMENT), pl.col(name).cast(pl.Float64).alias(_VALUE))
+        for name in names
+    ])
     stacked = Data(lf, groups, {**tf._levels, _TREATMENT: names}, tf.kind, tf.source)
     return stacked, _VALUE, _TREATMENT, _BLOCK
+
+
+def _columns_as_formula(tf: Any, x: Any, specs: list[Any] | None, verb: str) -> tuple[Any, Any]:
+    """The frame and its ``"y ~ g"``: ``x`` itself, or with the columns
+    ``specs`` stacked, every row kept, so each column (or each pair of
+    columns) drops only its own missing values."""
+    if specs is None:
+        return tf, x
+    return _stack_columns(tf, specs, verb, complete=False)[0], f"{_VALUE} ~ {_TREATMENT}"
 
 
 def _present(lf: pl.LazyFrame, name: str) -> pl.Expr:

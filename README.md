@@ -640,7 +640,7 @@ values follow `na_action` as in R: `"fail"` by default, or `"pass"`,
 |---|---|
 | `t.test` | `t_test("y ~ g")`, `t_test(x, mu=)`, `t_test(x, y, paired=True)` |
 | `wilcox.test` | `wilcox_test(...)`, same forms; R 4.6's exact tests with ties |
-| `kruskal.test`, `friedman.test`, `quade.test` | `kruskal_test("y ~ g")`, `friedman_test("y ~ g \| block")`, `quade_test("y ~ g \| block")`; matched columns as `friedman_test(a, b, c)`, `quade_test(a, b, c)` (a row per block, as R's matrix form) |
+| `kruskal.test`, `friedman.test`, `quade.test` | `kruskal_test("y ~ g")`, `friedman_test("y ~ g \| block")`, `quade_test("y ~ g \| block")`; matched columns as `friedman_test(a, b, c)`, `quade_test(a, b, c)` (a row per block, as R's matrix form); one sample per column as `kruskal_test(a, b, c)` (R's list form) |
 | `ansari.test`, `mood.test` | `ansari_test("y ~ g")`, `ansari_test(x, y, conf_int=True)`: exact or normal, with the ratio of scales; `mood_test("y ~ g")`, with ties as in R 4.x |
 | `aov`, `TukeyHSD` | `aov("y ~ a * b")`, `aov("y ~ x + a")`: `summary(aov())`'s sequential table; `tukey_hsd("y ~ a * b", which=, ordered=)`: per-term comparisons, interactions included (no `Error()` strata) |
 | `oneway.test` | `oneway_test("y ~ g")`: Welch's ANOVA, or `var_equal=True` |
@@ -652,7 +652,7 @@ values follow `na_action` as in R: `"fail"` by default, or `"pass"`,
 | `prop.test`, `prop.trend.test`, `binom.test` | `prop_test(x, n)`, `prop_trend_test(x, n, score=)`, `binom_test(sex == "male")` |
 | `poisson.test` | `poisson_test(events, time)`: one rate, or the ratio of two |
 | `shapiro.test`, `ks.test` | `shapiro_test(x)`, `ks_test(x, "pnorm", mean=, sd=)`, `ks_test(x, y)` |
-| `bartlett.test`, `fligner.test`, `var.test`, `car::leveneTest` | `bartlett_test`, `fligner_test`, `var_test`, `levene_test` |
+| `bartlett.test`, `fligner.test`, `var.test`, `car::leveneTest` | `bartlett_test`, `fligner_test`, `var_test`, `levene_test`; `bartlett_test(a, b, c)`, `fligner_test(a, b, c)`, `levene_test(a, b, c)` take one sample per column |
 | `p.adjust` | `p_adjust(p, "BH")`: on a vector or Series, or a column in `with_columns` / `mutate` |
 | effectsize | `cohens_d`, `hedges_g`, `eta_squared` |
 | `power.t.test`, `power.prop.test`, `power.anova.test` | `power_t_test`, `power_prop_test`, `power_anova_test` |

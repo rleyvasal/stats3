@@ -15,8 +15,11 @@ import scipy.stats as scipy_stats
 
 from stats3 import (
     ansari_test,
+    bartlett_test,
     fligner_test,
     friedman_test,
+    kruskal_test,
+    levene_test,
     mantelhaen_test,
     mcnemar_test,
     mood_test,
@@ -126,6 +129,13 @@ CASES = {
     "o_by_year": case(P, lambda: oneway_test("flipper_length_mm ~ island"), "year"),
     "fl_species": case(P, lambda: fligner_test("body_mass_g ~ species")),
     "fl_by_sex": case(P, lambda: fligner_test("flipper_length_mm ~ island"), "sex"),
+    "kr_wide": case(S, lambda: kruskal_test("a", "b", "e")),
+    "kr_wide_na": case(wide_na, lambda: kruskal_test(["a", "b", "e"])),
+    "kr_wide_by_g": case(S, lambda: kruskal_test("a", "b", "e"), "g"),
+    "ba_wide_na": case(wide_na, lambda: bartlett_test("a", "b", "e")),
+    "ba_wide_by_g": case(S, lambda: bartlett_test("a", "b", "e"), "g"),
+    "fl_wide_na": case(wide_na, lambda: fligner_test("a", "b", "e")),
+    "fl_wide_by_g": case(S, lambda: fligner_test(pl.col("a"), pl.col("b"), pl.col("e")), "g"),
     "fr_ranks": case(L, lambda: friedman_test("v ~ k | id")),
     "fr_ties": case(cars, lambda: friedman_test("v ~ k | id")),
     "fr_by_g": case(L, lambda: friedman_test("v ~ k | id"), "g"),
@@ -333,6 +343,16 @@ WIDE_VS_LONG = {
               lambda: quade_test("v ~ k | row")),
     "quade_na": (wide_na, lambda: quade_test("a", "b", "e"), lambda: complete_blocks(wide_na()),
                  lambda: quade_test("v ~ k | row")),
+    "kruskal": (wide_na, lambda: kruskal_test("a", "b", "e"), lambda: stacked(wide_na()),
+                lambda: kruskal_test("v ~ k")),
+    "bartlett": (wide_na, lambda: bartlett_test("a", "b", "e"), lambda: stacked(wide_na()),
+                 lambda: bartlett_test("v ~ k")),
+    "levene": (wide_na, lambda: levene_test("a", "b", "e"), lambda: stacked(wide_na()),
+               lambda: levene_test("v ~ k")),
+    "levene_mean": (wide_na, lambda: levene_test("a", "b", "e", center="mean"), lambda: stacked(wide_na()),
+                    lambda: levene_test("v ~ k", center="mean")),
+    "fligner": (wide_na, lambda: fligner_test("a", "b", "e"), lambda: stacked(wide_na()),
+                lambda: fligner_test("v ~ k")),
     "pairwise_t": (wide_na, lambda: pairwise_t_test("a", "b", "e", paired=True), lambda: stacked(wide_na()),
                    lambda: pairwise_t_test("v ~ k", paired=True)),
     "pairwise_wilcox": (wide_na, lambda: pairwise_wilcox_test("a", "b", "e", paired=True),
@@ -349,10 +369,15 @@ def test_columns_match_formula(name, by, backend):
         pytest.skip("no g column")
     got = as_polars(run_case(case(wide, make_wide, *by), backend))
     want = as_polars(run_case(case(long, make_long, *by), backend))
-    assert_same_frame(got, want, rel=0)
+    # The same rows in the same order. Rank tests give the same bits; Polars'
+    # grouped means and variances (Levene, Bartlett) vary in the last bits
+    # from run to run, for the formula alone too.
+    assert_same_frame(got, want, rel=1e-12 if name.startswith(("levene", "bartlett")) else 0)
 
 
 @pytest.mark.parametrize("make", [
+    lambda: kruskal_test("a", "b", "e"),
+    lambda: fligner_test("a", "b", "e"),
     lambda: friedman_test("a", "b", "e"),
     lambda: quade_test("a", "b", "e"),
     lambda: pairwise_t_test("a", "b", "e", paired=True),
@@ -367,6 +392,22 @@ def test_columns_ignore_row_order(make):
 def test_columns_keep_their_order_in_pairs():
     got = pairwise_t_test(ranks(), "e", "b", "a", paired=True)
     assert list(zip(got["group1"], got["group2"])) == [("b", "e"), ("a", "e"), ("a", "b")]
+
+
+@pytest.mark.parametrize(("test", "reference", "kwargs"), [
+    (kruskal_test, scipy_stats.kruskal, {}),
+    (bartlett_test, scipy_stats.bartlett, {}),
+    (levene_test, scipy_stats.levene, {}),
+    (levene_test, scipy_stats.levene, {"center": "mean"}),
+    (fligner_test, scipy_stats.fligner, {}),
+], ids=["kruskal", "bartlett", "levene", "levene_mean", "fligner"])
+def test_independent_columns_match_scipy(test, reference, kwargs):
+    """One sample per column, each without its own missing values, as SciPy's *samples."""
+    d = wide_na()
+    ref = reference(*(d[c].drop_nulls().drop_nans().to_numpy() for c in ("a", "b", "e")), **kwargs)
+    got = test(d, "a", "b", "e", **kwargs)
+    assert got["statistic"][0] == pytest.approx(ref.statistic, rel=1e-12)
+    assert got["p_value"][0] == pytest.approx(ref.pvalue, rel=1e-12)
 
 
 def test_friedman_columns_match_scipy():
@@ -386,6 +427,10 @@ def test_friedman_columns_match_scipy():
     (lambda: friedman_test(ranks(), "a", "zz"), "does not exist"),
     (lambda: friedman_test(ranks(), "a", "b", by="a"), "grouping column"),
     (lambda: friedman_test(ranks(), pl.col("a") * 2, "b"), "must name one column"),
+    (lambda: kruskal_test(ranks(), "a"), "at least two columns"),
+    (lambda: levene_test(ranks(), "a ~ g", "b"), "not both"),
+    (lambda: bartlett_test(ranks(), "a", "g"), "must be numeric"),
+    (lambda: fligner_test(ranks(), "a", "b", by="b"), "grouping column"),
     (lambda: pairwise_t_test(ranks(), "a", "b"), "need paired=True"),
     (lambda: pairwise_wilcox_test(ranks(), "a", "b"), "need paired=True"),
     (lambda: pairwise_t_test(ranks(), "a", "b", paired=True, pool_sd=True), "pooling of SD"),

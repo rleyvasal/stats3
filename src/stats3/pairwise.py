@@ -20,14 +20,12 @@ from stats3.checks import _group_values
 from stats3.core import (
     _alternative,
     _check_mu,
-    _TREATMENT,
-    _VALUE,
+    _columns_as_formula,
     _finish,
     _formula_or_columns,
     _parse_formula,
     _present,
     _special,
-    _stack_columns,
 )
 from stats3.counts import _count_lists, _counts_column, _prop_row
 from stats3.effects import P_ADJUST_METHODS, adjust_p
@@ -81,14 +79,6 @@ def _pair_columns(x: Any, columns: tuple[Any, ...], paired: bool, verb: str) -> 
         raise ValueError(f"{verb}(): columns are paired by row, so they need paired=True; "
                          "for independent samples use a formula 'y ~ group'")
     return specs
-
-
-def _pair_input(tf: Any, x: Any, specs: list[Any] | None, verb: str) -> tuple[Any, str]:
-    """The frame and its ``"y ~ g"``: ``x`` itself, or with the columns
-    ``specs`` stacked, every row kept so each pair drops its own missing values."""
-    if specs is None:
-        return tf, x
-    return _stack_columns(tf, specs, verb, complete=False)[0], f"{_VALUE} ~ {_TREATMENT}"
 
 
 def _paired_frame(rows: list[dict[str, Any]], paired: bool, verb: str) -> pl.DataFrame:
@@ -180,7 +170,7 @@ def pairwise_t_test(
         from stats3.core import t_test
 
         special = _special()
-        tf, formula = _pair_input(tf, x, specs, "pairwise_t_test")
+        tf, formula = _columns_as_formula(tf, x, specs, "pairwise_t_test")
         groups, by, table, rows = _by_pairs(tf, formula, "pairwise_t_test")
         if pool:
             p_values = []
@@ -240,7 +230,7 @@ def pairwise_wilcox_test(
     def _apply(tf: Any) -> Any:
         from stats3.ranks import wilcox_test
 
-        tf, formula = _pair_input(tf, x, specs, "pairwise_wilcox_test")
+        tf, formula = _columns_as_formula(tf, x, specs, "pairwise_wilcox_test")
         groups, by, table, rows = _by_pairs(tf, formula, "pairwise_wilcox_test")
         frame = _paired_frame(rows, paired, "pairwise_wilcox_test")
         tests = wilcox_test(

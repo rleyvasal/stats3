@@ -22,6 +22,11 @@ under **Changed**.
   rows, so with missing values its F and denominator df count blocks it
   does not use; `quade_test` counts the blocks it uses.
 
+- `kruskal_test`, `bartlett_test`, `fligner_test` and `levene_test` take
+  one sample per column as well as a formula: `data >> kruskal_test(a, b, c)`,
+  as R's `kruskal.test(list(...))` and SciPy's `kruskal(a, b, c)`. Each
+  column drops only its own missing values, so samples can differ in size.
+
 ### Fixed
 
 - `pairwise_t_test` and `pairwise_wilcox_test` no longer fail when a

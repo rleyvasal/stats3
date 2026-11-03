@@ -23,6 +23,8 @@ from stats3.core import (
     _by_levels,
     _check_conf_level,
     _column,
+    _columns_as_formula,
+    _formula_or_columns,
     _finish,
     _group_label,
     _is_formula,
@@ -147,14 +149,18 @@ def _swilk_w(y: np.ndarray, a: np.ndarray) -> np.ndarray:
 
 
 @step
-def bartlett_test(formula: str) -> Step:
-    """Bartlett's test of equal variances, as R's ``bartlett.test(y ~ g)``.
+def bartlett_test(x: Any, *columns: Any) -> Step:
+    """Bartlett's test of equal variances, as R's ``bartlett.test(y ~ g)``, or
+    ``bartlett_test(a, b, c)`` with one sample per column (R's
+    ``bartlett.test(list)``), each dropping its own missing values.
 
     Columns: ``statistic`` (Bartlett's K-squared), ``df``, ``p_value``,
     ``method``.
     """
+    specs = _formula_or_columns(x, columns, "bartlett_test", "'y ~ group'")
 
     def _apply(tf: Any) -> Any:
+        tf, formula = _columns_as_formula(tf, x, specs, "bartlett_test")
         special = _special()
         groups = list(tf._groups or [])
         lf = tf._lf
@@ -189,18 +195,22 @@ def bartlett_test(formula: str) -> Step:
 
 
 @step
-def levene_test(formula: str, *, center: str = "median") -> Step:
+def levene_test(x: Any, *columns: Any, center: str = "median") -> Step:
     """Levene's test of equal variances, as car's ``leveneTest(y ~ g)``.
 
     A one-way ANOVA on absolute deviations from each level's median (the
     Brown-Forsythe form, car's default) or mean (``center="mean"``, Levene's
-    original). Columns: ``statistic`` (F), ``df``, ``df_residual``,
-    ``p_value``, ``method``.
+    original). ``levene_test(a, b, c)`` takes one sample per column, as
+    SciPy's ``levene(a, b, c)``, each dropping its own missing values.
+    Columns: ``statistic`` (F), ``df``, ``df_residual``, ``p_value``,
+    ``method``.
     """
     if center not in ("median", "mean"):
         raise ValueError(f"levene_test(): center must be 'median' or 'mean', got {center!r}")
+    specs = _formula_or_columns(x, columns, "levene_test", "'y ~ group'")
 
     def _apply(tf: Any) -> Any:
+        tf, formula = _columns_as_formula(tf, x, specs, "levene_test")
         special = _special()
         groups = list(tf._groups or [])
         lf = tf._lf
@@ -515,17 +525,21 @@ def _two_sample(x: np.ndarray, y: np.ndarray, alternative: str, exact: bool | No
 
 
 @step
-def fligner_test(formula: str) -> Step:
+def fligner_test(x: Any, *columns: Any) -> Step:
     """Fligner-Killeen test of equal variances, as R's ``fligner.test(y ~ g)``.
 
     Robust to non-normal data: absolute deviations from each level's median
-    are ranked and turned into normal scores. Columns: ``statistic``,
-    ``df``, ``p_value``, ``method``.
+    are ranked and turned into normal scores. ``fligner_test(a, b, c)``
+    takes one sample per column, as R's ``fligner.test(list)``, each dropping
+    its own missing values. Columns: ``statistic``, ``df``, ``p_value``,
+    ``method``.
     """
+    specs = _formula_or_columns(x, columns, "fligner_test", "'y ~ group'")
 
     def _apply(tf: Any) -> Any:
         from scipy.stats import rankdata
 
+        tf, formula = _columns_as_formula(tf, x, specs, "fligner_test")
         special = _special()
         groups = list(tf._groups or [])
         lf = tf._lf
