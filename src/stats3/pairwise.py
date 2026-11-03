@@ -20,10 +20,14 @@ from stats3.checks import _group_values
 from stats3.core import (
     _alternative,
     _check_mu,
+    _TREATMENT,
+    _VALUE,
     _finish,
+    _formula_or_columns,
     _parse_formula,
     _present,
     _special,
+    _stack_columns,
 )
 from stats3.counts import _count_lists, _counts_column, _prop_row
 from stats3.effects import P_ADJUST_METHODS, adjust_p
@@ -57,16 +61,34 @@ def _by_pairs(tf: Any, formula: str, verb: str) -> tuple[list[str], str, pl.Data
     if by in groups:
         raise ValueError(f"{verb}(): {by!r} is a grouping column; ungroup it first")
     table, rows = _group_values(
-        tf, groups, {"y": pl.col(response).cast(pl.Float64), "g": pl.col(by)}, _present(tf._lf, by),
-        as_is=("g",),
+        tf, groups, {"__stats3_y": pl.col(response).cast(pl.Float64), "__stats3_g": pl.col(by)},
+        _present(tf._lf, by), as_is=("__stats3_g",),
     )
     for row in rows:
-        levels = _levels(tf, by, row["g"])
+        levels = _levels(tf, by, row["__stats3_g"])
         if len(levels) < 2:
             raise ValueError(f"{verb}(): all observations are in the same group{row['__label']}")
         row["levels"] = levels
-        row["values"] = [row["y"][row["g"] == level] for level in levels]
+        row["values"] = [row["__stats3_y"][row["__stats3_g"] == level] for level in levels]
     return groups, by, table, rows
+
+
+def _pair_columns(x: Any, columns: tuple[Any, ...], paired: bool, verb: str) -> list[Any] | None:
+    """None for a formula in ``x``; else the matched columns given, which
+    need ``paired=True``."""
+    specs = _formula_or_columns(x, columns, verb, "'y ~ group'")
+    if specs is not None and not paired:
+        raise ValueError(f"{verb}(): columns are paired by row, so they need paired=True; "
+                         "for independent samples use a formula 'y ~ group'")
+    return specs
+
+
+def _pair_input(tf: Any, x: Any, specs: list[Any] | None, verb: str) -> tuple[Any, str]:
+    """The frame and its ``"y ~ g"``: ``x`` itself, or with the columns
+    ``specs`` stacked, every row kept so each pair drops its own missing values."""
+    if specs is None:
+        return tf, x
+    return _stack_columns(tf, specs, verb, complete=False)[0], f"{_VALUE} ~ {_TREATMENT}"
 
 
 def _paired_frame(rows: list[dict[str, Any]], paired: bool, verb: str) -> pl.DataFrame:
@@ -126,8 +148,8 @@ def _result(
 
 @step
 def pairwise_t_test(
-    formula: str,
-    *,
+    x: Any,
+    *columns: Any,
     p_adjust_method: str = "holm",
     pool_sd: bool | None = None,
     paired: bool = False,
@@ -138,19 +160,27 @@ def pairwise_t_test(
 
     By default the standard deviation is pooled over all levels (R's
     ``pool.sd = !paired``); ``pool_sd=False`` runs Welch's test on each pair,
-    and ``paired=True`` paired tests (values paired in row order). Columns:
-    ``group1``, ``group2``, ``p_value``, ``method``, ``p_adjust_method``.
+    and ``paired=True`` paired tests (values paired in row order).
+
+    ``pairwise_t_test(a, b, c, paired=True)`` (or a list of columns) takes
+    matched columns instead: each row is one matched set, each column a
+    level (named by the column, in the order given), and each pair drops
+    the rows missing either of its values, as R's paired ``t.test``.
+    Columns: ``group1``, ``group2``, ``p_value``, ``method``,
+    ``p_adjust_method``.
     """
     _check_method("pairwise_t_test", p_adjust_method)
     alternative = _alternative(alternative)
     pool = not paired if pool_sd is None else pool_sd
     if paired and pool:
         raise ValueError("pairwise_t_test(): pooling of SD is incompatible with paired tests")
+    specs = _pair_columns(x, columns, paired, "pairwise_t_test")
 
     def _apply(tf: Any) -> Any:
         from stats3.core import t_test
 
         special = _special()
+        tf, formula = _pair_input(tf, x, specs, "pairwise_t_test")
         groups, by, table, rows = _by_pairs(tf, formula, "pairwise_t_test")
         if pool:
             p_values = []
@@ -185,8 +215,8 @@ def pairwise_t_test(
 
 @step
 def pairwise_wilcox_test(
-    formula: str,
-    *,
+    x: Any,
+    *columns: Any,
     p_adjust_method: str = "holm",
     paired: bool = False,
     exact: bool | None = None,
@@ -197,15 +227,20 @@ def pairwise_wilcox_test(
     ``pairwise.wilcox.test(y, g)``, with p-values adjusted by
     ``p_adjust_method``. Each pair gets ``wilcox_test`` (rank sum, or signed
     rank with ``paired=True``, values paired in row order), with R 4.6's
-    exact tests. ``method`` is each group's first pair's, as in R. Columns:
-    ``group1``, ``group2``, ``p_value``, ``method``, ``p_adjust_method``.
+    exact tests. ``method`` is each group's first pair's, as in R.
+
+    ``pairwise_wilcox_test(a, b, c, paired=True)`` takes matched columns, as
+    ``pairwise_t_test`` does. Columns: ``group1``, ``group2``, ``p_value``,
+    ``method``, ``p_adjust_method``.
     """
     _check_method("pairwise_wilcox_test", p_adjust_method)
     alternative = _alternative(alternative)
+    specs = _pair_columns(x, columns, paired, "pairwise_wilcox_test")
 
     def _apply(tf: Any) -> Any:
         from stats3.ranks import wilcox_test
 
+        tf, formula = _pair_input(tf, x, specs, "pairwise_wilcox_test")
         groups, by, table, rows = _by_pairs(tf, formula, "pairwise_wilcox_test")
         frame = _paired_frame(rows, paired, "pairwise_wilcox_test")
         tests = wilcox_test(

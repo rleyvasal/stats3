@@ -108,6 +108,53 @@ def _parse_formula(
     return response, _column(tf, rhs, "the formula's right side", verb)
 
 
+def _formula_or_columns(x: Any, columns: tuple[Any, ...], verb: str, shape: str) -> list[Any] | None:
+    """None for a formula in ``x``; else the columns given, as ``x, *columns``
+    or as one list or tuple, at least two of them."""
+    if _is_formula(x):
+        if columns:
+            raise ValueError(f"{verb}(): give a formula {shape} or columns, not both")
+        return None
+    specs = list(x) if isinstance(x, (list, tuple)) and not columns else [x, *columns]
+    if len(specs) < 2:
+        raise ValueError(f"{verb}(): give a formula {shape} or at least two columns, got {specs!r}")
+    return specs
+
+
+_BLOCK, _TREATMENT, _VALUE = "__stats3_block", "__stats3_treatment", "__stats3_value"
+
+
+def _stack_columns(tf: Any, specs: list[Any], verb: str, *, complete: bool) -> tuple[Any, str, str, str]:
+    """Matched columns, one row per matched set, stacked into long form.
+
+    Gives a frame with a block per row, a treatment per column (its levels
+    the column names, in the order given) and the values, and the names of
+    the value, treatment and block columns, so a test runs on it as on
+    ``"value ~ treatment | block"``. ``complete=True`` first drops each row
+    with a missing value in any of the columns, as R's ``complete.cases``.
+    """
+    from stats3._data import Data
+
+    groups = list(tf._groups or [])
+    names = [_column(tf, spec, f"column {i + 1}", verb) for i, spec in enumerate(specs)]
+    schema = tf._lf.collect_schema()
+    for name in names:
+        if names.count(name) > 1:
+            raise ValueError(f"{verb}(): column {name!r} is given more than once")
+        if name in groups:
+            raise ValueError(f"{verb}(): {name!r} is a grouping column; ungroup it first")
+        if not (schema[name].is_numeric() or schema[name] == pl.Boolean):
+            raise TypeError(f"{verb}(): column {name!r} must be numeric, got {schema[name]}")
+    lf = tf._lf.with_columns(pl.int_range(pl.len(), dtype=pl.Int64).alias(_BLOCK))
+    if complete:
+        lf = lf.filter(*(_present(lf, name) for name in names))
+    lf = lf.select(*groups, _BLOCK, *(pl.col(name).cast(pl.Float64) for name in names)).unpivot(
+        on=names, index=[*groups, _BLOCK], variable_name=_TREATMENT, value_name=_VALUE
+    )
+    stacked = Data(lf, groups, {**tf._levels, _TREATMENT: names}, tf.kind, tf.source)
+    return stacked, _VALUE, _TREATMENT, _BLOCK
+
+
 def _present(lf: pl.LazyFrame, name: str) -> pl.Expr:
     """Not missing, as R's ``is.na``: NaN counts as missing too."""
     present = pl.col(name).is_not_null()
