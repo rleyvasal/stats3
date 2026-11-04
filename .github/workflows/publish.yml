@@ -17,7 +17,8 @@ jobs:
     env:
       OPENBLAS_CORETYPE: Nehalem
       OPENBLAS_NUM_THREADS: "1"
-    runs-on: ubuntu-latest
+    # As tests.yml's R oracle: Ubuntu 26's OpenBLAS gives other last bits.
+    runs-on: ubuntu-24.04
     # A stalled R install fails the run instead of holding it for hours.
     timeout-minutes: 60
     strategy:
