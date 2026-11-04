@@ -85,7 +85,10 @@ jobs:
     env:
       OPENBLAS_CORETYPE: Nehalem
       OPENBLAS_NUM_THREADS: "1"
-    runs-on: ubuntu-latest
+    # Ubuntu 26's OpenBLAS (0.3.32, built for x86-64-v3) gives other last
+    # bits under that setting, which moved a GAM fit and a cmdscale axis past
+    # R's; the comparisons stay on the image they were checked on.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
