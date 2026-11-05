@@ -4,6 +4,30 @@ All notable changes to stats3. Versions follow [semantic versioning](https://sem
 before 1.0, a minor version may change behaviour, and those changes are listed
 under **Changed**.
 
+## Unreleased
+
+Effect sizes alongside p-values.
+
+### Added
+
+- `effect_size=True` on `t_test`, `wilcox_test`, `kruskal_test`,
+  `chisq_test` and `aov` adds the effect size R's effectsize package gives
+  for the same test: `effect` (its name), `effect_size`, `effect_low` and
+  `effect_high`, before `method`. These are Cohen's d (or `"hedges_g"`),
+  the rank-biserial correlation, rank epsilon squared, bias-corrected
+  Cramér's V (Fei for goodness of fit) and eta squared per term (partial
+  with several terms), with effectsize's intervals, one-sided for one-sided
+  tests. Rank epsilon squared has no interval, because effectsize's is a
+  bootstrap. Results are checked against effectsize 1.0.3. Off by default,
+  so the test columns are unchanged.
+
+### Fixed
+
+- `eta_squared`'s lower bound is now effectsize 1.0's `ncp / (ncp + df_error)`.
+  It used `ncp / (ncp + df1 + df2 + 1)`, from older effectsize releases,
+  which put the bound slightly low (0.6245 instead of 0.6265 for
+  `body_mass_g ~ species`).
+
 ## 0.8.1 — 2026-11-03
 
 Matched and independent samples as columns, besides the formula.

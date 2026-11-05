@@ -286,6 +286,7 @@ def t_test(
     var_equal: bool = False,
     alternative: str = "two.sided",
     conf_level: float = 0.95,
+    effect_size: bool | str = False,
 ) -> Step:
     """Student's and Welch's t-tests, as R's ``t.test``, one row per group.
 
@@ -305,10 +306,21 @@ def t_test(
     Columns: ``estimate`` (plus ``estimate1``/``estimate2`` for two samples),
     ``statistic``, ``df``, ``p_value``, ``conf_low``, ``conf_high``,
     ``method``, ``alternative``.
+
+    ``effect_size=True`` (or ``"cohens_d"``, or ``"hedges_g"``) adds the
+    effect size effectsize gives for the test: ``effect`` (its name),
+    ``effect_size``, ``effect_low`` and ``effect_high``, before ``method``.
+    Cohen's d uses the pooled SD with ``var_equal=True`` and the root mean
+    of the two variances for Welch's test; one-sample and paired d divide by
+    the SD of the values or differences. The interval is the noncentral-t
+    one at ``conf_level``, one-sided with a one-sided ``alternative``.
     """
+    from stats3.effects import effect_choice
+
     alternative = _alternative(alternative)
     _check_conf_level(conf_level)
     _check_mu(mu)
+    effect = effect_choice(effect_size, "t_test", ("cohens_d", "hedges_g"))
     formula = _is_formula(x)
     if formula and paired:
         raise ValueError(
@@ -342,6 +354,12 @@ def t_test(
             table, groups, kind, mu=mu, var_equal=var_equal,
             alternative=alternative, conf_level=conf_level,
         )
+        if effect is not None:
+            from stats3.effects import d_values, with_effect
+
+            values = d_values(table, "two" if kind == "two" else "one", mu, var_equal,
+                              effect == "hedges_g", conf_level, alternative)
+            columns = with_effect(columns, effect, *values)
         return _finish(tf, table, groups, columns)
 
     return Step(_apply, "t_test")
@@ -498,7 +516,7 @@ def _within(n: np.ndarray, v: np.ndarray) -> float:
 
 
 @step
-def aov(formula: str) -> Step:
+def aov(formula: str, *, effect_size: bool | str = False) -> Step:
     """Analysis of variance, as ``summary(aov(...))`` in R.
 
     ``penguins >> aov("body_mass_g ~ species")`` gives the ANOVA table: one row
@@ -509,12 +527,30 @@ def aov(formula: str) -> Step:
     and categorical columns are factors, numeric ones covariates. After
     ``group_by`` there is a table per group. Rows missing any variable are
     dropped. ``Error()`` strata are not supported.
+
+    ``effect_size=True`` (or ``"eta_squared"``) adds effectsize's
+    ``eta_squared`` for each term: ``effect``, ``effect_size``,
+    ``effect_low``, ``effect_high``. With one term it is eta squared; with
+    several, partial eta squared (``"eta_squared_partial"``), each term's
+    sum of squares over itself plus the residuals'. The interval is
+    effectsize's one-sided 95% noncentral-F interval, so ``effect_high``
+    is 1. ``Residuals`` rows have nulls.
     """
+    from stats3.effects import effect_choice
     from stats3.factorial import aov_table, check_strata
 
     check_strata(formula, "aov")
+    effect = effect_choice(effect_size, "aov", ("eta_squared",))
 
     def _apply(tf: Any) -> Any:
+        table = _aov(tf)
+        if effect is None:
+            return table
+        from stats3.effects import partial_eta_squared
+
+        return partial_eta_squared(table)
+
+    def _aov(tf: Any) -> Any:
         if not _one_factor(tf, formula):
             return aov_table(tf, formula)
         special = _special()

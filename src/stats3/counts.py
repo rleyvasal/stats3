@@ -90,6 +90,7 @@ def chisq_test(
     p: Sequence[float] | Mapping[Any, float] | None = None,
     correct: bool = True,
     rescale_p: bool = False,
+    effect_size: bool | str = False,
 ) -> Step:
     """Pearson's chi-squared test, as R's ``chisq.test``.
 
@@ -102,9 +103,20 @@ def chisq_test(
 
     Columns: ``statistic``, ``df``, ``p_value``, ``method``. Warns, as R does,
     when an expected count is below 5.
+
+    ``effect_size=True`` adds effectsize's effect size for the test:
+    ``effect``, ``effect_size``, ``effect_low``, ``effect_high``, before
+    ``method``. For two columns it is Cramer's V with effectsize's bias
+    correction (``"cramers_v"``); for goodness of fit, Fei (``"fei"``): phi
+    scaled so that 1 is the largest effect the probabilities allow. Both use
+    the statistic without Yates' correction, as effectsize does, and its
+    one-sided 95% noncentral chi-squared interval, so ``effect_high`` is 1.
     """
+    from stats3.effects import effect_choice
+
     if y is not None and p is not None:
         raise ValueError("chisq_test(): p is for one column; pass x and y, or x and p")
+    effect = effect_choice(effect_size, "chisq_test", ("fei",) if y is None else ("cramers_v",))
 
     def _apply(tf: Any) -> Any:
         special = _special()
@@ -113,7 +125,7 @@ def chisq_test(
         if y is not None:
             names.append(_column(tf, y, "y", "chisq_test"))
         keys, tables = _tables(tf, groups, names)
-        statistic, df, method = [], [], []
+        statistic, df, method, sizes = [], [], [], []
         for label, table in zip(_labels(keys, groups), tables):
             observed = table["counts"]
             total = observed.sum()
@@ -140,16 +152,27 @@ def chisq_test(
                 dof = len(levels) - 1
             if np.any(expected < 5):
                 _warn(_CHISQ_WARNING)
+            if effect is not None:
+                from stats3.effects import cramers_v_values, fei_values
+
+                pearson = float(np.sum((observed - expected) ** 2 / expected))
+                sizes.append(cramers_v_values(pearson, total, *observed.shape) if y is not None
+                             else fei_values(pearson, total, expected))
             statistic.append(stat)
             df.append(float(dof))
             method.append(name)
         stat_arr, df_arr = np.array(statistic), np.array(df)
-        return _finish(tf, keys, groups, {
+        out = {
             "statistic": stat_arr,
             "df": df_arr,
             "p_value": special.chdtrc(df_arr, stat_arr),
             "method": pl.Series(method, dtype=pl.String),
-        })
+        }
+        if effect is not None:
+            from stats3.effects import with_effect
+
+            out = with_effect(out, effect, *np.array(sizes, dtype=float).reshape(-1, 3).T)
+        return _finish(tf, keys, groups, out)
 
     return Step(_apply, "chisq_test")
 

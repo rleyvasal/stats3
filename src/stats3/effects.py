@@ -160,9 +160,85 @@ def _ncp_t(t: float, df: float, conf_level: float) -> tuple[float, float]:
     return solve(1 - alpha / 2), solve(alpha / 2)
 
 
+def _ncp_lower(cdf: Any, statistic: float, conf_level: float, start: float) -> float:
+    """effectsize's lower noncentrality bound for an F or chi-squared
+    statistic: the ``ncp`` putting ``statistic`` at the ``conf_level``
+    quantile, or 0 when the central distribution already does. (effectsize
+    finds it with ``optim``, to about 1e-8; this solves it exactly.)"""
+    from scipy.optimize import brentq
+
+    if not math.isfinite(statistic) or cdf(statistic, 0.0) <= conf_level:
+        return 0.0
+    upper = max(10.0, start)
+    while cdf(statistic, upper) > conf_level:
+        upper *= 2
+    return brentq(lambda ncp: cdf(statistic, ncp) - conf_level, 0.0, upper,
+                  xtol=1e-12, rtol=1e-14, maxiter=500)
+
+
+def _ncp_f_lower(f: float, df1: float, df2: float, conf_level: float) -> float:
+    from scipy.stats import f as f_dist, ncf
+
+    def cdf(x: float, ncp: float) -> float:
+        return float(f_dist.cdf(x, df1, df2) if ncp == 0 else ncf.cdf(x, df1, df2, ncp))
+
+    return _ncp_lower(cdf, f, conf_level, f * df1 * 4)
+
+
+def _ncp_chi_lower(chisq: float, df: float, conf_level: float) -> float:
+    from scipy.stats import chi2, ncx2
+
+    def cdf(x: float, ncp: float) -> float:
+        return float(chi2.cdf(x, df) if ncp == 0 else ncx2.cdf(x, df, ncp))
+
+    return _ncp_lower(cdf, chisq, conf_level, chisq * 4)
+
+
 def _hedges_j(df: np.ndarray) -> np.ndarray:
     special = _special()
     return np.exp(special.gammaln(df / 2) - np.log(np.sqrt(df / 2)) - special.gammaln((df - 1) / 2))
+
+
+def d_values(
+    table: pl.DataFrame, kind: str, mu: float, pooled_sd: bool, hedges: bool,
+    conf_level: float, alternative: str = "two.sided",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Cohen's d (or Hedges' g) per row of a moments table, with
+    effectsize's noncentral-t interval.
+
+    ``kind`` is ``"one"`` (columns ``n``, ``mean``, ``var``: one sample, or
+    paired differences) or ``"two"`` (``n1``, ``mean1``, ``var1``, ...). A
+    one-sided ``alternative`` gives effectsize's one-sided interval: the
+    two-sided one at ``2 * conf_level - 1``, the other end infinite.
+    """
+    level = conf_level if alternative == "two.sided" else 2 * conf_level - 1
+    estimate, low, high = [], [], []
+    for row in table.iter_rows(named=True):
+        if kind == "one":
+            n = row["n"]
+            df = n - 1
+            d = (row["mean"] - mu) / math.sqrt(row["var"])
+            scale = 1 / math.sqrt(n)
+        else:
+            n1, n2 = row["n1"], row["n2"]
+            v1 = row["var1"] if n1 > 1 else 0.0
+            v2 = row["var2"] if n2 > 1 else 0.0
+            if pooled_sd:
+                df = n1 + n2 - 2
+                sd = math.sqrt(((n1 - 1) * v1 + (n2 - 1) * v2) / df)
+                scale = math.sqrt(1 / n1 + 1 / n2)
+            else:
+                sd = math.sqrt((v1 + v2) / 2)
+                se = math.sqrt(v1 / n1 + v2 / n2)
+                df = se**4 / ((v1 / n1) ** 2 / (n1 - 1) + (v2 / n2) ** 2 / (n2 - 1))
+                scale = se / sd
+            d = (row["mean1"] - row["mean2"] - mu) / sd
+        lo, hi = _ncp_t(d / scale, df, level)
+        j = float(_hedges_j(np.array([float(df)]))[0]) if hedges else 1.0
+        estimate.append(d * j)
+        low.append(-math.inf if alternative == "less" else lo * scale * j)
+        high.append(math.inf if alternative == "greater" else hi * scale * j)
+    return np.array(estimate, dtype=float), np.array(low, dtype=float), np.array(high, dtype=float)
 
 
 def _d_family(
@@ -212,39 +288,11 @@ def _d_family(
                         aggs += [e.name.suffix(side) for e in _moments(value)]
                     table = _summarise(lf, groups, aggs)
         table = _sorted_keys(tf, table, groups)
-        estimate, low, high = [], [], []
         for row in table.iter_rows(named=True):
-            label = _group_label(row, groups)
-            if kind == "one":
-                n = row["n"]
-                if n < 2:
-                    raise ValueError(f"{verb}(): not enough observations{label}")
-                df = n - 1
-                d = (row["mean"] - mu) / math.sqrt(row["var"])
-                scale = 1 / math.sqrt(n)
-            else:
-                n1, n2 = row["n1"], row["n2"]
-                if n1 < 2 or n2 < 2:
-                    raise ValueError(f"{verb}(): not enough observations{label}")
-                v1, v2 = row["var1"], row["var2"]
-                if pooled_sd:
-                    df = n1 + n2 - 2
-                    sd = math.sqrt(((n1 - 1) * v1 + (n2 - 1) * v2) / df)
-                    scale = math.sqrt(1 / n1 + 1 / n2)
-                else:
-                    sd = math.sqrt((v1 + v2) / 2)
-                    se = math.sqrt(v1 / n1 + v2 / n2)
-                    df = se**4 / ((v1 / n1) ** 2 / (n1 - 1) + (v2 / n2) ** 2 / (n2 - 1))
-                    scale = se / sd
-                d = (row["mean1"] - row["mean2"] - mu) / sd
-            lo, hi = _ncp_t(d / scale, df, conf_level)
-            j = float(_hedges_j(np.array([float(df)]))[0]) if hedges else 1.0
-            estimate.append(d * j)
-            low.append(lo * scale * j)
-            high.append(hi * scale * j)
-        return _finish(tf, table, groups, {
-            "estimate": np.array(estimate), "conf_low": np.array(low), "conf_high": np.array(high),
-        })
+            if (row["n"] if kind == "one" else min(row["n1"], row["n2"])) < 2:
+                raise ValueError(f"{verb}(): not enough observations{_group_label(row, groups)}")
+        estimate, low, high = d_values(table, kind, mu, pooled_sd, hedges, conf_level)
+        return _finish(tf, table, groups, {"estimate": estimate, "conf_low": low, "conf_high": high})
 
     return Step(_apply, verb)
 
@@ -286,9 +334,6 @@ def eta_squared(formula: str, *, conf_level: float = 0.95) -> Step:
     _check_conf_level(conf_level)
 
     def _apply(tf: Any) -> Any:
-        from scipy.optimize import brentq
-        from scipy.stats import ncf, f as f_dist
-
         groups = list(tf._groups or [])
         lf = tf._lf
         response, by = _parse_formula(tf, formula, "eta_squared", one_sample=False)
@@ -306,16 +351,9 @@ def eta_squared(formula: str, *, conf_level: float = 0.95) -> Step:
             df1, df2 = len(n) - 1, total - len(n)
             fval = (between / df1) / (within / df2)
             estimate.append(between / (between + within))
-            alpha = 1 - conf_level
-            if f_dist.cdf(fval, df1, df2) < 1 - alpha:
-                ncp = 0.0
-            else:
-                upper = max(10.0, fval * df1 * 4)
-                while ncf.cdf(fval, df1, df2, upper) > 1 - alpha:
-                    upper *= 2
-                ncp = brentq(lambda nc: ncf.cdf(fval, df1, df2, nc) - (1 - alpha), 0.0, upper,
-                             xtol=1e-12, rtol=1e-14, maxiter=500)
-            low.append(ncp / (ncp + df1 + df2 + 1))
+            # effectsize 1.0: the bound on eta squared is ncp / (ncp + df_error).
+            ncp = _ncp_f_lower(fval, df1, df2, conf_level)
+            low.append(ncp / (ncp + df2))
         return _finish(tf, table, groups, {
             "term": by,
             "estimate": np.array(estimate),
@@ -324,6 +362,134 @@ def eta_squared(formula: str, *, conf_level: float = 0.95) -> Step:
         })
 
     return Step(_apply, "eta_squared")
+
+
+# effect sizes inside the tests -----------------------------------------------------
+#
+# ``t_test(..., effect_size=True)`` and the others add four columns, before
+# ``method``: ``effect`` (the measure's name), ``effect_size``,
+# ``effect_low`` and ``effect_high``. Each measure is the one effectsize's
+# ``effectsize()`` gives for the R test, with its default interval.
+
+EFFECT_COLUMNS = ("effect", "effect_size", "effect_low", "effect_high")
+
+
+def effect_choice(value: Any, verb: str, choices: tuple[str, ...]) -> str | None:
+    """The measure ``effect_size=`` asks for: None for off, the first of
+    ``choices`` (effectsize's default) for True, else one of ``choices``."""
+    if value is None or value is False:
+        return None
+    if value is True:
+        return choices[0]
+    if isinstance(value, str) and value in choices:
+        return value
+    allowed = ", ".join(repr(c) for c in choices)
+    raise ValueError(f"{verb}(): effect_size must be True, False or one of {allowed}, got {value!r}")
+
+
+def with_effect(columns: dict[str, Any], name: Any, estimate: Any, low: Any, high: Any) -> dict[str, Any]:
+    """``columns`` with the effect size columns added before ``method`` (at
+    the end without one). Missing values (NaN) become nulls."""
+
+    def floats(name: str, values: Any) -> pl.Series:
+        return pl.Series(name, np.asarray(values, dtype=float), dtype=pl.Float64, nan_to_null=True)
+
+    effect = {
+        "effect": name if isinstance(name, str) else pl.Series("effect", name, dtype=pl.String),
+        "effect_size": floats("effect_size", estimate),
+        "effect_low": floats("effect_low", low),
+        "effect_high": floats("effect_high", high),
+    }
+    out: dict[str, Any] = {}
+    for key, value in columns.items():
+        if key == "method":
+            out.update(effect)
+        out[key] = value
+    if "method" not in columns:
+        out.update(effect)
+    return out
+
+
+def _one_sided_level(conf_level: float, alternative: str) -> float:
+    """effectsize's ``.adjust_ci``: a one-sided interval is one end of the
+    two-sided interval at ``2 * conf_level - 1``."""
+    return conf_level if alternative == "two.sided" else 2 * conf_level - 1
+
+
+def rank_biserial_values(
+    r: np.ndarray, se: np.ndarray, alternative: str, conf_level: float = 0.95,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """effectsize's rank-biserial interval: normal on Fisher's z scale, cut
+    at -1 or 1 on the side a one-sided alternative leaves open."""
+    special = _special()
+    level = _one_sided_level(conf_level, alternative)
+    z = float(special.ndtri(1 - (1 - level) / 2))
+    r = np.asarray(r, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        centre = np.arctanh(r)
+        low = np.tanh(centre - z * se)
+        high = np.tanh(centre + z * se)
+    if alternative == "less":
+        low = np.full_like(r, -1.0)
+    elif alternative == "greater":
+        high = np.full_like(r, 1.0)
+    return r, low, high
+
+
+def cramers_v_values(chisq: float, n: float, nrow: int, ncol: int, conf_level: float = 0.95) -> tuple[float, float, float]:
+    """Bias-corrected Cramer's V, effectsize's default (``adjust = TRUE``),
+    from the uncorrected Pearson statistic, with its one-sided
+    noncentral chi-squared interval (so the upper end is 1)."""
+    df = (nrow - 1) * (ncol - 1)
+    shrink = df / (n - 1)
+    k = nrow - (nrow - 1) ** 2 / (n - 1)
+    l = ncol - (ncol - 1) ** 2 / (n - 1)
+    scale = math.sqrt(min(k - 1, l - 1))
+
+    def v(statistic: float) -> float:
+        return math.sqrt(max(0.0, statistic / n - shrink)) / scale
+
+    return v(chisq), v(_ncp_chi_lower(chisq, df, conf_level)), 1.0
+
+
+def fei_values(chisq: float, n: float, p: np.ndarray, conf_level: float = 0.95) -> tuple[float, float, float]:
+    """Fei, effectsize's effect size for a goodness-of-fit test: phi scaled
+    by its largest value under the expected probabilities ``p``, with the
+    one-sided noncentral chi-squared interval."""
+    p = np.asarray(p, dtype=float) / np.sum(p)
+    scale = math.sqrt(1 / float(np.min(p)) - 1)
+    low = math.sqrt(_ncp_chi_lower(chisq, len(p) - 1, conf_level) / n) / scale
+    return math.sqrt(chisq / n) / scale, low, 1.0
+
+
+def partial_eta_squared(table: pl.DataFrame, conf_level: float = 0.95) -> pl.DataFrame:
+    """An ANOVA table (one block per group, each ending in ``Residuals``)
+    with effectsize's ``eta_squared`` for each term: partial eta squared,
+    which with one term is eta squared, and its one-sided noncentral-F
+    interval. ``Residuals`` rows get nulls."""
+    terms = table["term"].to_list()
+    dfs, ss, fs = table["df"].to_list(), table["sumsq"].to_list(), table["statistic"].to_list()
+    name: list[str | None] = [None] * len(terms)
+    estimate = np.full(len(terms), np.nan)
+    low = np.full(len(terms), np.nan)
+    high = np.full(len(terms), np.nan)
+    start = 0
+    for end, term in enumerate(terms):
+        if term != "Residuals":
+            continue
+        rows = range(start, end)
+        label = "eta_squared" if len(rows) == 1 else "eta_squared_partial"
+        df_error, ss_error = dfs[end], ss[end]
+        for i in rows:
+            name[i] = label
+            estimate[i] = ss[i] / (ss[i] + ss_error)
+            if fs[i] is not None and df_error > 0:
+                ncp = _ncp_f_lower(fs[i], dfs[i], df_error, conf_level)
+                low[i] = ncp / (ncp + df_error)
+                high[i] = 1.0
+        start = end + 1
+    columns = with_effect({}, name, estimate, low, high)
+    return table.with_columns(pl.Series(k, v) if not isinstance(v, pl.Series) else v for k, v in columns.items())
 
 
 # power -------------------------------------------------------------------------------
