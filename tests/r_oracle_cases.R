@@ -291,7 +291,8 @@ result <- switch(
     ks <- function(..., alternative="two.sided") row(ks.test(..., alternative=alternative), alternative=alternative)
     adjust <- function(pv, method, n=NULL) data.frame(adj=if (is.null(n)) p.adjust(pv, method) else p.adjust(pv, method, n))
     pvalues <- c(0.01, 0.04, NA, 0.03, 0.2, 0.0005, 0.04, 0.6, 0.012)
-    # Effect sizes: effectsize's noncentral-t and noncentral-F intervals.
+    # Effect sizes: effectsize's noncentral-t and noncentral-F intervals
+    # (effectsize 1.0: the eta squared bound is ncp / (ncp + df_error)).
     ncp_ci <- function(t, df, conf=0.95) {
       f <- function(prob) uniroot(function(ncp) pt(t, df, ncp) - prob, c(t - 60, t + 60), tol=1e-13)$root
       c(f((1 + conf) / 2), f((1 - conf) / 2))
@@ -319,7 +320,7 @@ result <- switch(
       ncp <- if (pf(f, df1, df2) < conf) 0 else
         uniroot(function(nc) pf(f, df1, df2, nc) - conf, c(0, f * df1 * 50), tol=1e-13)$root
       data.frame(term=all.vars(formula)[2], estimate=a$`Sum Sq`[1] / sum(a$`Sum Sq`),
-                 conf_low=ncp / (ncp + df1 + df2 + 1), conf_high=1)
+                 conf_low=ncp / (ncp + df2), conf_high=1)
     }
     power_row <- function(h, values) {
       out <- as.data.frame(h[values])
@@ -382,6 +383,68 @@ result <- switch(
       pw_p_n=power_row(power.prop.test(p1=0.5, p2=0.75, power=0.9), c("n", "p1", "p2", "sig.level")),
       pw_p_p2=power_row(power.prop.test(n=50, p1=0.5, power=0.9), c("n", "p1", "p2", "sig.level")),
       pw_p_strict=power_row(power.prop.test(n=30, p1=0.4, p2=0.6, strict=TRUE, alternative="two.sided"), c("n", "p1", "p2", "sig.level"))
+    ))
+  },
+  effect_sizes = {
+    # effect_size= on the tests, against effectsize itself (the measure
+    # effectsize() gives for each R test, with its default interval).
+    suppressPackageStartupMessages(library(effectsize))
+    p <- read.csv("tests/data/penguins.csv", na.strings="NA")
+    p$dream <- p$island == "Dream"
+    s <- read.csv("tests/data/ranks.csv")
+    es <- function(name, e) {
+      e <- as.data.frame(e)
+      data.frame(effect=name, effect_size=e[[1]],
+                 effect_low=if (is.null(e$CI_low)) NA_real_ else e$CI_low,
+                 effect_high=if (is.null(e$CI_high)) NA_real_ else e$CI_high)
+    }
+    by <- function(data, groups, f) {
+      data |> group_by(across(all_of(groups))) |>
+        group_modify(function(d, k) f(d)) |> ungroup() |> as.data.frame()
+    }
+    complete <- function(d, ...) d[stats::complete.cases(d[c(...)]), ]
+    d_sex <- function(d, type="cohens_d", ...) {
+      d <- complete(d, "body_mass_g", "sex")
+      es(type, get(type)(body_mass_g ~ sex, data=d, verbose=FALSE, ...))
+    }
+    rb <- function(...) es("rank_biserial", rank_biserial(..., verbose=FALSE))
+    rb_sex <- function(d, ...) rb(body_mass_g ~ sex, data=complete(d, "body_mass_g", "sex"), ...)
+    eps <- function(formula, d) es("rank_epsilon_squared", rank_epsilon_squared(formula, data=d, ci=NULL, verbose=FALSE))
+    v <- function(d, a, b) { d <- complete(d, a, b); es("cramers_v", cramers_v(table(d[[a]], d[[b]]))) }
+    eta <- function(formula, d) {
+      e <- as.data.frame(eta_squared(aov(formula, data=d), verbose=FALSE))
+      data.frame(term=e$Parameter, effect=if (nrow(e) == 1) "eta_squared" else "eta_squared_partial",
+                 effect_size=e[[2]], effect_low=e$CI_low, effect_high=e$CI_high)
+    }
+    bl <- complete(p, "bill_length_mm", "bill_depth_mm")
+    suppressWarnings(list(
+      t_welch=d_sex(p, pooled_sd=FALSE),
+      t_student_less=d_sex(p, alternative="less", ci=0.9),
+      t_g_by_species=by(p, "species", function(d) d_sex(d, "hedges_g", pooled_sd=FALSE)),
+      t_g_mu=d_sex(p, "hedges_g", mu=-500, pooled_sd=FALSE, alternative="greater"),
+      t_one=es("cohens_d", cohens_d(na.omit(p$flipper_length_mm), mu=200, alternative="greater", verbose=FALSE)),
+      t_paired=es("cohens_d", cohens_d(bl$bill_length_mm, bl$bill_depth_mm, paired=TRUE, verbose=FALSE)),
+      t_columns=es("cohens_d", cohens_d(s$a, s$b, pooled_sd=FALSE, verbose=FALSE)),
+      w_sex=rb_sex(p),
+      w_mu_greater=rb_sex(p, mu=-500, alternative="greater"),
+      w_one=rb(na.omit(p$bill_length_mm), mu=44),
+      w_one_less=rb(s$c, alternative="less"),
+      w_paired=rb(bl$bill_length_mm, bl$bill_depth_mm - 25, paired=TRUE),
+      w_paired_zeros=rb(s$c, floor(s$c), paired=TRUE),
+      w_by_species=by(p, "species", function(d) rb_sex(d)),
+      w_columns=rb(s$a, s$b),
+      k_species=eps(body_mass_g ~ species, complete(p, "body_mass_g", "species")),
+      k_by_sex=by(p, "sex", function(d) eps(flipper_length_mm ~ island, complete(d, "flipper_length_mm", "island"))),
+      c_species_island=v(p, "species", "island"),
+      c_sex_island=v(p, "sex", "island"),
+      c_2x2=v(p, "sex", "dream"),
+      c_by_year=by(p, "year", function(d) v(d, "species", "island")),
+      c_gof=es("fei", fei(table(p$species))),
+      c_gof_p=es("fei", fei(table(p$species), p=c(0.5, 0.2, 0.3))),
+      a_species=eta(body_mass_g ~ species, p),
+      a_two_way=eta(body_mass_g ~ species * sex, p),
+      a_covariate=eta(body_mass_g ~ flipper_length_mm + species, p),
+      a_by_sex=by(p, "sex", function(d) eta(flipper_length_mm ~ island, d))
     ))
   },
   models = {

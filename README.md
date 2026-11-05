@@ -45,6 +45,40 @@ t_test(penguins, "body_mass_g ~ sex", by="species")
 (The table also has `estimate1`, `estimate2`, `method` and `alternative`.)
 `by=` is dplyr's `.by`: one test per group, one row per test, groups in order.
 
+### Effect sizes with the test
+
+`effect_size=True` adds the effect size R's effectsize package gives for the
+same test, with its interval, as four more columns: `effect`, `effect_size`,
+`effect_low`, `effect_high`.
+
+```python
+t_test(penguins, "body_mass_g ~ sex", by="species", effect_size=True)
+```
+
+```text
+┌───────────┬────────────┬──────────┬─────────────┬────────────┬─────────────┐
+│ species   ┆ p_value    ┆ effect   ┆ effect_size ┆ effect_low ┆ effect_high │
+╞═══════════╪════════════╪══════════╪═════════════╪════════════╪═════════════╡
+│ Adelie    ┆ 6.4023e-26 ┆ cohens_d ┆ -2.172678   ┆ -2.584806  ┆ -1.755505   │
+│ Chinstrap ┆ 0.000002   ┆ cohens_d ┆ -1.263061   ┆ -1.783035  ┆ -0.734727   │
+│ Gentoo    ┆ 1.8678e-28 ┆ cohens_d ┆ -2.703589   ┆ -3.199406  ┆ -2.201516   │
+└───────────┴────────────┴──────────┴─────────────┴────────────┴─────────────┘
+```
+
+(Selected columns shown.) Off by default, so the tables stay R's.
+
+| Test | `effect_size=True` gives | Other choices |
+|---|---|---|
+| `t_test` | Cohen's d: pooled SD with `var_equal=True`, else the root mean of the two variances; noncentral-t interval at `conf_level` | `"hedges_g"` |
+| `wilcox_test` | rank-biserial correlation, 95% interval on Fisher's z scale | |
+| `kruskal_test` | rank epsilon squared, `H / (n - 1)`; no interval (effectsize bootstraps one) | |
+| `chisq_test` | two columns: Cramér's V, bias-corrected; one column: Fei | |
+| `aov` | eta squared per term (partial with several terms) | |
+
+One-sided tests get one-sided intervals, as in effectsize. Cramér's V, Fei
+and eta squared have effectsize's one-sided 95% intervals, so `effect_high`
+is 1.
+
 ## Any frame in, the same frame out
 
 | You pass | Groups | You get back |
@@ -654,7 +688,7 @@ values follow `na_action` as in R: `"fail"` by default, or `"pass"`,
 | `shapiro.test`, `ks.test` | `shapiro_test(x)`, `ks_test(x, "pnorm", mean=, sd=)`, `ks_test(x, y)` |
 | `bartlett.test`, `fligner.test`, `var.test`, `car::leveneTest` | `bartlett_test`, `fligner_test`, `var_test`, `levene_test`; `bartlett_test(a, b, c)`, `fligner_test(a, b, c)`, `levene_test(a, b, c)` take one sample per column |
 | `p.adjust` | `p_adjust(p, "BH")`: on a vector or Series, or a column in `with_columns` / `mutate` |
-| effectsize | `cohens_d`, `hedges_g`, `eta_squared` |
+| effectsize | `cohens_d`, `hedges_g`, `eta_squared`; `effect_size=True` on `t_test`, `wilcox_test`, `kruskal_test`, `chisq_test`, `aov` (d or g, rank-biserial, rank epsilon squared, Cramér's V or Fei, eta squared) |
 | `power.t.test`, `power.prop.test`, `power.anova.test` | `power_t_test`, `power_prop_test`, `power_anova_test` |
 | `lm`, `glm` | `lm`, `glm`, with broom's `tidy`, `glance`, `augment`, and `anova`, `predict` |
 | `lm` with `cbind()`, `manova`, `anova.mlm`, `mauchly.test` | `lm("cbind(y1, y2) ~ x")`, `manova(...)`, `anova(fit, test="Spherical", X="~ 1")`, `mauchly_test(fit, X="~ 1")` |

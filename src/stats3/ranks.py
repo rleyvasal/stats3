@@ -260,6 +260,7 @@ def wilcox_test(
     exact: bool | None = None,
     correct: bool | int = True,
     alternative: str = "two.sided",
+    effect_size: bool | str = False,
 ) -> Step:
     """Wilcoxon rank sum and signed rank tests, as R 4.6's ``wilcox.test``.
 
@@ -275,7 +276,18 @@ def wilcox_test(
     adds the continuity correction, and ``correct=1``-``3`` add R's Edgeworth
     terms when there are no ties. Columns: ``statistic``, ``p_value``,
     ``method``, ``alternative``.
+
+    ``effect_size=True`` (or ``"rank_biserial"``) adds effectsize's
+    rank-biserial correlation: ``effect``, ``effect_size``, ``effect_low``,
+    ``effect_high``, before ``method``. For the rank sum test it is
+    ``2 W / (n1 n2) - 1``; for the signed rank test, ``2 V / S - 1`` with
+    ``S = n (n + 1) / 2`` over the non-zero differences. The 95% interval is
+    effectsize's, normal on Fisher's z scale, one-sided with a one-sided
+    ``alternative``.
     """
+    from stats3.effects import effect_choice
+
+    effect = effect_choice(effect_size, "wilcox_test", ("rank_biserial",))
     alternative = _alternative(alternative)
     _check_mu(mu)
     level = _correct_level(correct)
@@ -373,7 +385,21 @@ def wilcox_test(
             out["statistic"].append(q)
             out["p_value"].append(p)
             out["method"].append(method)
-        return _finish(tf, table, groups, {**out, "alternative": alternative})
+        columns = {**out, "alternative": alternative}
+        if effect is not None:
+            # effectsize ranks the non-zero differences only: V over them.
+            n = table["n"].cast(pl.Float64).to_numpy()
+            v = table["v"].cast(pl.Float64).fill_null(0.0).to_numpy()
+            with np.errstate(divide="ignore", invalid="ignore"):
+                total = n * (n + 1) / 2
+                se = np.sqrt((2 * n**3 + 3 * n**2 + n) / 6) / total
+                columns = _with_rank_biserial(columns, 2 * v / total - 1, se)
+        return _finish(tf, table, groups, columns)
+
+    def _with_rank_biserial(columns: dict[str, Any], r: np.ndarray, se: np.ndarray) -> dict[str, Any]:
+        from stats3.effects import rank_biserial_values, with_effect
+
+        return with_effect(columns, "rank_biserial", *rank_biserial_values(r, se, alternative))
 
     def _rank_sum(tf: Any, groups: list[str], table: pl.DataFrame, ranked: pl.LazyFrame) -> Any:
         """``table`` has n1, n2, r1 (rank sum of the first sample) and ties."""
@@ -424,7 +450,13 @@ def wilcox_test(
             out["statistic"].append(w)
             out["p_value"].append(p)
             out["method"].append(method)
-        return _finish(tf, table, groups, {**out, "alternative": alternative})
+        columns = {**out, "alternative": alternative}
+        if effect is not None:
+            n1 = table["n1"].cast(pl.Float64).to_numpy()
+            n2 = table["n2"].cast(pl.Float64).to_numpy()
+            se = np.sqrt((n1 + n2 + 1) / (3 * n1 * n2))
+            columns = _with_rank_biserial(columns, 2 * np.array(out["statistic"]) / (n1 * n2) - 1, se)
+        return _finish(tf, table, groups, columns)
 
     def _rank_sum_by(tf: Any, groups: list[str], response: str, by: str) -> Any:
         lf = tf._lf
@@ -502,7 +534,7 @@ def _scores_for(
 
 
 @step
-def kruskal_test(x: Any, *columns: Any) -> Step:
+def kruskal_test(x: Any, *columns: Any, effect_size: bool | str = False) -> Step:
     """Kruskal-Wallis rank sum test, as R's ``kruskal.test(y ~ g)``.
 
     Ranks are computed per group after dropping rows missing the response or
@@ -510,7 +542,16 @@ def kruskal_test(x: Any, *columns: Any) -> Step:
     (or a list of columns) takes one sample per column instead, as R's
     ``kruskal.test(list)``: each column drops its own missing values. Columns:
     ``statistic``, ``df``, ``p_value``, ``method``.
+
+    ``effect_size=True`` (or ``"rank_epsilon_squared"``) adds effectsize's
+    rank epsilon squared, ``H / (n - 1)``: ``effect``, ``effect_size``,
+    ``effect_low``, ``effect_high``, before ``method``. effectsize's interval
+    for it is a percentile bootstrap, which can't be matched, so
+    ``effect_low`` and ``effect_high`` are missing.
     """
+    from stats3.effects import effect_choice
+
+    effect = effect_choice(effect_size, "kruskal_test", ("rank_epsilon_squared",))
     specs = _formula_or_columns(x, columns, "kruskal_test", "'y ~ group'")
 
     def _apply(tf: Any) -> Any:
@@ -527,7 +568,7 @@ def kruskal_test(x: Any, *columns: Any) -> Step:
             [pl.len().alias("n"), pl.col("__stats3_r").sum().alias("r")], "kruskal_test",
         )
         table = _join_ties(table, _tie_term(kept, groups, pl.col(response)), groups)
-        statistic, df = [], []
+        statistic, df, size = [], [], []
         for row in table.iter_rows(named=True):
             n_i = np.array(row["n"], dtype=float)
             r_i = np.array(row["r"], dtype=float)
@@ -536,13 +577,20 @@ def kruskal_test(x: Any, *columns: Any) -> Step:
             h /= 1 - row["ties"] / (n**3 - n)
             statistic.append(float(h))
             df.append(float(len(n_i) - 1))
+            size.append(n)
         statistic_arr, df_arr = np.array(statistic), np.array(df)
-        return _finish(tf, table, groups, {
+        out = {
             "statistic": statistic_arr,
             "df": df_arr,
             "p_value": special.chdtrc(df_arr, statistic_arr),
             "method": "Kruskal-Wallis rank sum test",
-        })
+        }
+        if effect is not None:
+            from stats3.effects import with_effect
+
+            missing = np.full(len(statistic), np.nan)
+            out = with_effect(out, effect, statistic_arr / (np.array(size) - 1), missing, missing)
+        return _finish(tf, table, groups, out)
 
     return Step(_apply, "kruskal_test")
 

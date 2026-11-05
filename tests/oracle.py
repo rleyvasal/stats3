@@ -7,6 +7,7 @@ Robust and quantile regression comparisons need MASS/quantreg and emmeans.
 Survival comparisons need survival (shipped with R) and broom.
 Penalized regression comparisons need glmnet (5.2 for multinomial nzero) and survival.
 Mixed model comparisons need lme4.
+Effect size comparisons need effectsize.
 Set STATS3_R_ORACLE_MANIFEST to a pixi manifest to run R through pixi.
 """
 
@@ -103,6 +104,7 @@ R_COMMAND = _r_command()
 # A case whose packages are missing skips, naming them, instead of failing
 # when its R script stops.
 R_PACKAGES = {
+    "effect_sizes": ("effectsize",),
     "emmeans": ("emmeans", "MASS"),
     "gam": ("mgcv",),
     "glmnet": ("glmnet", "survival"),
